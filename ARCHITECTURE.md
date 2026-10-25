@@ -1,0 +1,304 @@
+# SVESC 局域网监控台 · 架构设计
+
+> 面向技术负责人。本文只描述**已经落地并实测跑通**的设计，不含未来畅想（未来项集中在第 9 节）。
+> 所有耗时数字均来自本机（Windows 10 Pro 19045 / 中文 locale / 192.168.2.0/24）实测。
+
+---
+
+## 1. 分层架构
+
+```
+┌──────────────────────────────────────────────────────────────────────────┐
+│ 渲染层 Renderer（React 19 + Vite 7）                      src/renderer/**  │
+│  Overview / Devices / Printers / Alarms / DeviceDetail 抽屉               │
+│  ▲ 只读 Snapshot，不发任何探测请求；订阅推送，2s/5s 增量重绘                 │
+└───────────────────────────────────┬──────────────────────────────────────┘
+                                    │ contextBridge（src/main/preload.ts）
+                                    │ window.lanApi：6 个 invoke + 3 个订阅
+┌───────────────────────────────────┴──────────────────────────────────────┐
+│ 编排层 Main（唯一允许 import electron 的层）                                │
+│  index.ts   生命周期 / 窗口 / 菜单隐藏 / SMOKE 分支                          │
+│  ipc.ts     6 个 invoke 路由 + 3 个推送出口                                 │
+│  smoke.ts   仅 SMOKE=1 时加载的截图例程（生产路径不引用）                     │
+└───────────────────────────────────┬──────────────────────────────────────┘
+                                    │ 纯函数 / 服务调用（无 electron）
+┌───────────────────────────────────┴──────────────────────────────────────┐
+│ 探测引擎 Engine（src/main/engine/**，可被 Vitest 在纯 Node 下直接导入）       │
+│  discovery : subnet → arp → ping sweep → ports → oui → fingerprint        │
+│  network   : quality（冻结公式） / monitor（滑窗） / bandwidth（估算）        │
+│  printers  : snmp-ber → snmp-client → printer-mib / spooler → 三源合并       │
+│  orchestration : scheduler（分频+相位） / alarms（去重恢复） / store / simulator│
+└───────────────────────────────────┬──────────────────────────────────────┘
+                                    │ child_process / net.Socket / dgram
+┌───────────────────────────────────┴──────────────────────────────────────┐
+│ 系统层 Windows                                                            │
+│  ping.exe · arp.exe · netstat.exe · route.exe（GBK 解码）                  │
+│  powershell.exe + Get-Printer / Win32_Printer / Get-PrintJob（UTF-8 JSON） │
+│  UDP 161 (SNMPv2c) · TCP connect（9100/631/515/445/…）· UDP 5353 (mDNS)    │
+└──────────────────────────────────────────────────────────────────────────┘
+```
+
+**分层铁律**：`src/main/engine/**` 内 `grep "from 'electron'"` 恒为 0。
+需要 Electron 能力的两处（userData 目录、下载目录）由 `index.ts` 注入字符串路径，引擎不认识 Electron。
+收益：Tess 的单元测试不需要启动 Electron；`scripts/engine-check.mjs` 能在纯 Node 下一轮跑完真实扫描。
+
+---
+
+## 2. 模块职责
+
+| 文件 | 职责 | 关键约束 |
+|---|---|---|
+| `engine/exec.ts` | **唯一子进程出口**。`runNative(cmd,args,enc,timeoutMs)`、`runPowerShell(code)`、`parsePsJson` | 编码按调用点声明；禁止调用点自行 `toString()`；全局并发 64；PowerShell 单飞；硬超时强杀后清 timer |
+| `discovery/subnet.ts` | 从 `os.networkInterfaces()` 推导 /24 网段 + 默认路由（`route print -4`） | 排除 `vEthernet/WSL/Loopback/169.254.*`；网关读不到就是 `null`，不猜 |
+| `discovery/arp.ts` | `arp -a`（GBK）主路径 + `Get-NetNeighbor` 回退 | 双 locale 正则；过滤组播/广播/全零 MAC；解析空 → `[]` + `parseWarning`，不抛错 |
+| `discovery/ping.ts` | `ping -n 1 -w 800` 存活与 RTT；`ping -n 4` 质量采样 | 解析失败不抛错；`<1ms` 记 0；**禁止 `ping -a`** |
+| `discovery/ports.ts` | `net.connect` 探活（700ms/端口），只对候选主机 | 禁止 254×10 全打 |
+| `discovery/oui.ts` | ≥60 条 OUI 前缀表，未命中返回 `null` | 不按概率猜厂商 |
+| `discovery/fingerprint.ts` | 端口优先的 `kind`/`osHint` 推断 | TTL 只作弱提示，绝不单独判 workstation/server |
+| `network/quality.ts` | **纯函数**质量评分（公式冻结） | 系数、取整时机不允许改；`samples < QUALITY_MIN_SAMPLES(8)` → `grade='unknown'`（score 保留），`>=8` 才出 85/70/50 分级 |
+| `network/monitor.ts` | 每设备滑窗（20 采样）+ RTT 历史（60 点） | 未响应只算丢包，不产生离线结论；数据源只有 `ping -n 4` 批量采样 |
+| `network/bandwidth.ts` | `netstat -e` 差分 + `netstat -ano` 连接归集 | 不与网卡计数器混算；无归集时 `attributable:false` |
+| `printers/snmp-ber.ts` | 手写 BER 编解码 + GET/GETNEXT 报文构造与响应解析 | 纯函数，可用构造字节单测 |
+| `printers/snmp-client.ts` | UDP 161 会话、超时重试、walk | 失败返回 `ok:false`，不抛错 |
+| `printers/printer-mib.ts` | RFC 3805 OID 常量与解析；`sanitizeModel` 纯函数清洗型号 | `maxCapacity<=0` → `levelPct:null`（-2/-3 是有语义的负数）；型号取首个 `;` 前、≤40 字符 |
+| `printers/spooler.ts` | `Get-Printer` / `Win32_Printer` / `Get-PrintJob` 全量取回 + 纯映射函数 | 空队列空字符串 → `[]`；单条结果包成数组；打印机名绝不拼进命令 |
+| `printers/ipp.ts` | IPP 2.0 `Get-Printer-Attributes`（opt-in 耗材通路，148 行 / 仅 `node:http`） | 只试 `/ipp/print`、`/ipp`；statusCode≠0x0000 立即放弃；`marker-levels<0` → `levelPct:null` |
+| `printers/printer-service.ts` | 三源合并 + **TCP 探活覆盖 state** + 耗材 provider 链（`snmp → ipp → unknown`，命中即短路） | `.213` 假在线必须被覆盖为 `offline`；网络不可达的打印机不查耗材（不为离线设备"猜"数据） |
+| `printers/mdns.ts` | `_ipp/_pdl-datastream` 组播发现（可选） | 任何异常静默返回 `[]` |
+| `alarms.ts` | 7 条规则、`(code,targetId)` 去重、自动恢复、历史上限 500 | 禁止为 ICMP 不可达告警；`DEVICE_NEW` 是事件型：保持 active 至 ack 或 `NEW_DEVICE_TTL_MS`(10min) 到期，**不参与"条件消失自动恢复"**；`NET_QUALITY` 需 `samples >= QUALITY_MIN_SAMPLES`（与 `computeQuality`/`isDegraded` 同源） |
+| `scheduler.ts` | 分频调度、4 相位扫描、质量采样、快照组装、状态判定 | `resolveLinkState` 是纯函数；**质量窗口只由 15s `ping -n 4` 填充**，扫描/心跳的存活 ping 不写入 |
+| `soak.ts` | 长跑取证（真实 95s 采样 + 注入时钟的 DEVICE_NEW 生命周期检查） | 纯 Node，`npm run soak` 驱动 |
+| `store.ts` | JSON 持久化（别名/告警历史/设置） | 目录注入；300ms debounce；损坏文件自动重建 |
+| `simulator.ts` | mulberry32 种子生成的 12 设备 + 4 打印机 | 与真实数据凭 `sim-` 前缀区分 |
+
+---
+
+## 3. 数据流
+
+```
+分频触发（2s 带宽 / 5s 心跳 / 15s 质量采样 / 15s 打印机 / 60s 全量）
+        │
+        ├─ 全量扫描 4 相位 ─────────────────────────────────────────────┐
+        │   ① arp -a（~120ms）→ 在位集合                                │
+        │   ② 254 × ping -n 1 -w 800 @并发 64（~6-8s）                   │
+        │   ③ 再读 arp -a（~150ms）→ 新条目也算在线                       │
+        │   ④ 端口探测（仅候选主机，~1.5s）→ 9100/631/515→printer 等       │
+        │   ⑤ 反向 DNS（800ms 超时/并发 8，只等 1.5s，其余后台补齐）        │
+        └───────────────────────────────────────────────────────────────┘
+        │
+归一化：DeviceRecord（mac/ttl/ports/hostname/miss 计数）
+        │  ├─ quality = QualityTracker.quality(ip)      ← 冻结公式
+        │  ├─ bandwidth = BandwidthMeter.statFor(ip)    ← 估算 + attributable
+        │  └─ state = resolveLinkState(6 级优先级)      ← ARP 主信号
+        ▼
+告警引擎 evaluate(devices, printers, reachability)
+        │  去重键 (code,targetId) → created / resolved
+        ▼
+快照 Snapshot（+ 演示数据合并 + 别名覆盖）
+        │  onSnapshot → ipc.pushSnapshot → webContents.send('lan:snapshot')
+        ▼
+渲染层重绘（无轮询、无请求风暴；扫描进度单独走 lan:scanProgress）
+```
+
+**状态判定（plan.md §5.1，自上而下命中即定论）**
+
+| 序 | 条件 | 结果 |
+|---|---|---|
+| 1 | `isSelf` / `isGateway` | online |
+| 2 | 本轮 ARP 存在有效 MAC | online（**主信号**） |
+| 3 | 任一被探测端口有响应 | online |
+| 4 | ARP 在位但 ICMP 全超时 | online + `quality.grade='unknown'`（质量未采样） |
+| 5 | ARP **连续 3 轮**缺席且 ICMP 无响应 | offline（**唯一**判离线路径） |
+| 6 | 有 ≥8 个质量样本（2 个 `ping -n 4` 批次）且（丢包 ≥20% 或延迟 >150ms） | degraded（覆盖 1-4） |
+
+本机实测：ARP 表 20-50 条，其中仅少数回 ICMP。若按"ping 不通即离线"，一次扫描会产出 20-30 条假离线 + 同样数量的噪音告警。这就是第 5 条存在的原因。
+
+---
+
+## 4. 为什么手写 SNMP BER
+
+**动机**
+1. `net-snmp` 等库需要 node-gyp 编译原生模块，在中文本地化 Windows + 企业网络环境下安装失败率高（本任务明确要求零原生依赖）。
+2. SNMPv2c GET/GETNEXT 只需要 BER 的一个极小子集：`INTEGER / OCTET STRING / NULL / OID / SEQUENCE / 上下文标签 PDU`。完整实现约 300 行，可控。
+3. 纯函数 → 可以用构造字节在 Vitest 里精确断言编解码，不需要真实设备。
+
+**结构**
+
+```
+encodeLength / decodeLength      长度域（短格式 + 0x80|n 长格式；不定长拒绝）
+encodeInteger / encodeOctetString / encodeOid / encodeNull
+encodeTlv(tag, value)            统一 TLV 组合
+encodeSequence(items)            SEQUENCE 组合
+decodeTlv / walkTlv / walkChildren   TLV 定位与同级遍历
+decodeInteger / decodeUnsigned / decodeOid   值解码（有符号 vs Counter32/Gauge32）
+buildGetRequest / buildGetNextRequest        SEQUENCE{version, community, PDU{reqId,0,0, varbinds}}
+parseResponse                     GetResponse → {requestId, errorStatus, varbinds[]}
+oidStartsWith / compareOid        walk 子树终止与前进判定
+```
+
+**真机实测结论（2026-10-25，192.168.2.0/24）**
+
+| 能力 | OID / 方法 | 实测结果 |
+|---|---|---|
+| 单 GET（标量） | `sysDescr.0`（1.3.6.1.2.1.1.1.0）等 | **可用**。`.235` 276B 响应 3ms、`.170` 55B 响应 7ms，各重复 3 次全部成功 |
+| GETNEXT walk（子树下行） | `prtMarkerSuppliesEntry` / `prtMarkerLifeCount` / `hrDeviceStatus` | **可用**。`.170` 取到 13 条耗材条目，`.235` 取到 black=75% |
+| 耗材表（RFC 3805） | `prtMarkerSuppliesType/MaxCapacity/Level` | **可用**：`levelPct` 由 `Level/MaxCapacity` 计算；`MaxCapacity=-2/-3` → `levelPct:null` |
+| 页计数 | `prtMarkerLifeCount` | **可用**。SHARP MX-B4621R = 117483 页（多 marker 取 max）；Xerox AltaLink C8055 = 17773 页 |
+| 告警表（printer MIB alert） | `prtAlert*` | **未使用**：故障判定走 `hrDeviceStatus` + TCP 探活 + spooler state，避免 walk 大表（单次 walk 耗时不可控） |
+| SNMPv1 | version=0 | **未实现**：只发 SNMPv2c（version=1），v1 设备会静默丢弃（本网段未遇到） |
+
+**报文结构（字节级）**：`SEQUENCE{ INTEGER version=1, OCTET STRING community, [0] GET{ requestId, 0, 0, VarBindList } }`，
+其中 `VarBindList = SEQUENCE OF SEQUENCE{ OID, NULL }` —— **varbind 必须再套一层 SEQUENCE**。
+这是与 P1 调查报告冲突的根因：Vera 的探针少了一层 SEQUENCE（38B vs 正确 40B），设备按 BER 解析失败后静默丢包，
+表现为"8 次 GET 全 timeout"；同一台设备用本实现的字段布局 3-7ms 即返回。证据见 `implementation-report.md`「与 P1 调查报告的冲突及澄清」。
+
+**RFC 3805 语义处理**：`prtMarkerSuppliesMaxCapacity = -2` 表示"未知"、`-3` 表示"无限但有余量"。这类值**不能**换算成百分比，`levelPct` 一律 `null`，只保留 `current`/`maxCapacity` 原值 —— Xerox 的 13 条耗材全部属于此类，UI 显示"设备不报告"，这是正确结果而非缺陷。
+
+---
+
+## 5. 带宽估算：方法与精度边界
+
+**方法**
+
+1. `netstat -e`（~103ms，系统级汇总）取「字节 rx / tx」两列；
+2. 每 2s 采样一次，`bps = Δbytes × 8 / Δt`；
+3. `netstat -ano`（~83ms）按**远端 IP** 聚合 ESTABLISHED TCP 连接数；
+4. 单设备吞吐 = 全网吞吐 × (该设备连接数 / LAN 内连接总数)，`estimated:true`、`share` 为占比。
+
+**为什么只能估算（必须诚实说明）**
+
+- 网卡计数器是**整机聚合**，Windows 不提供"某对端 IP 的字节数"（`Get-NetTCPConnection` 同样没有字节字段），所以按连接数分摊是唯一可行的近似。
+- 分摊假设"每条连接速率相同"，实际上大文件传输与心跳连接差 3 个数量级，**单设备数值只能作为量级参考，不可用于计费或容量规划**。
+- `netstat -e` 含虚拟网卡（WSL / Default Switch）。实测汇总 tx 比单卡大 4 倍，因此 `Get-NetAdapterStatistics`（按网卡、可排除 vEthernet）**不与 netstat 混算** —— 两者任选其一，本项目选 netstat（快 10 倍），并在文档与 UI 上标注"全网合计（含虚拟网卡）"。
+- 本机与 LAN 的 TCP 连接实测仅 4 条，绝大多数设备 `share≈0`。此时 `attributable:false`，UI 必须显示"无流量归集"而**不是** `0.0 Kbps` —— 后者会被误读为"真实测得的零流量"。
+
+**精度结论**：可用于"谁在跑流量"的相对排序与全网吞吐趋势；不可用于单机带宽承诺值。
+
+---
+
+## 6. 数据来源诚实原则（贯穿全项目）
+
+| 情况 | 本项目做法 | 反例（明确禁止） |
+|---|---|---|
+| 打印机不报告耗材 | `consumables: []` + UI「设备不报告耗材」 | 填 0% / 随机数 |
+| `maxCapacity=-2/-3` | `levelPct: null` + 保留原值 | 换算成 -2% |
+| 页计数无来源 | `pageCount: null` | 估算或填入 job 累计 |
+| 主机名反查失败 | `hostname: null` | 显示 IP 冒充主机名 |
+| 厂商未命中 OUI | `vendor: null` | 按端口猜"HP" |
+| 无法归集带宽 | `attributable:false` | 显示 0 bps |
+| ICMP 禁 ping 主机 | `online` + `quality.grade='unknown'` + `samples=0` | 判离线并把评分算成 0 分 |
+| 驱动是 Microsoft 通用驱动 | `model: null` | 当成真实型号展示 |
+| SNMP `sysDescr` 含 `; SS/NC/UI/ME/CC/DF` 固件串 | `model` 取首个 `;` 前、≤40 字符（`sanitizeModel`）；原文进 `stateDetail` 前 80 字符 | 整段固件日志塞进"型号" |
+| IPP `marker-levels` 为负（-1/-2/-3） | `levelPct: null`（RFC 8010 语义） | clamp 成 0%（＝"已耗尽"的假警报） |
+| 真实设备 < 3 台 | `dataSource: 'demo'/'mixed'` + 顶部角标 | 静默展示演示数据 |
+
+相关代码位置：`printer-mib.toLevelPct`、`spooler.modelFromDriver`、`bandwidth.emptyBandwidth`、`scheduler.resolveLinkState`、`scheduler.composeDevicesAndPrinters`。
+
+---
+
+## 7. 分频策略与延迟预算
+
+| 任务 | 周期 | 实测耗时 | 说明 |
+|---|---|---|---|
+| 带宽 | 2s | ~190ms（netstat -e + -ano） | 首次采样只建基线，返回 null（≠ 0 流量：R-02 语义）且 `attributable:false` |
+| 设备心跳 | 5s | ~1.5s（`arp -a` + 轮转 ping ≤32 台） | 轮转保证每台都能被采样，又不会每 5s 打 254 个地址 |
+| 质量采样 | 15s | ~6-10s（≤12 台 × `ping -n 4`，并发 8） | **质量窗口的唯一数据源**；扫描/心跳的单次存活 ping 不计入 |
+| 打印机 | 15s | ~3-5s（3 次 PowerShell + TCP 探活 + SNMP；IPP 有负缓存且命中 SNMP 即短路） | PowerShell 单飞；SNMP 正/负缓存（负 5min） |
+| 全量扫描 | 60s | **~8-10s**（预算 10s 内每个阶段都受 deadline 约束） | 超预算即跳过后续阶段，用已得结果出快照 |
+
+**实测分解（engine-check，本机 192.168.2.0/24）**
+
+```
+arp(首次) 105ms → ping(254@64) 5816ms → arp(复读) 116ms → ports 712ms → dns 24ms
+扫描阶段合计 ≈6773ms（预算 10000ms，未触发截断；多轮波动 6.3-10.0s）
+printers 采集 4520ms（独立任务，不在扫描预算内；SNMP 命中即短路）
+```
+
+**延迟预算设计**
+
+- 手动刷新（`lan:refresh`）：先 `emitSnapshot()` 再启动扫描 → UI 在 **1 个 IPC 往返内**看到进度条与既有数据，不等扫描结束。
+- 首屏：不阻塞。首轮扫描完成前 `dataSource` 保持 `live`，设备列表为空由 UI 呈现骨架/空态（**不用演示数据填**，避免真实网段上启动即"演示数据 12 台"的观感）。
+- 扫描期间不阻塞主线程：`ping` 走 `spawn` + 64 并发池，端口探测走 `net.connect` 异步，进度按批推送。
+- **10s 预算对每个阶段都生效**（`SCAN_BUDGET_MS`）：`ping` 到点即把剩余主机判死；`ports` 用 `AbortController` 在剩余预算为 0 时中止；`hostnames` 只等"剩余预算"（下限 300ms）；**已过预算则整个 `arp2` 阶段跳过**（`arp1` 的在位集合已够出快照）——否则一次 `arp -a` 撞上 2s 超时线后回退的 `Get-NetNeighbor` 能把该阶段拖到 ~10s。
+- **强杀不做进程树清剿，除非 PowerShell**：`exec.ts` 的 `sweepTree` 开关只对 `runPowerShell` 打开。Vera 受控实验证明给 `ping/arp/netstat` 这些无子进程的叶进程也 `taskkill /T /F`，会让一次扫描从 5.5s 恶化到 10s（进程创建拥塞正反馈）；而 PowerShell 确实会派生 conhost 进程树，孙进程持有管道时 `close` 不派发，必须清剿。
+- **超时立即 settle**：强杀后不押注 `close` 一定派发（Windows 上被强杀的进程、句柄卡住的 powershell 都可能静默），Promise 当场 resolve（`timedOut:true`），令牌闸门随之释放；`close` 迟到会被 `settled` 标志忽略，幂等。
+- 引擎侧的"命令失败"一律写入 `snapshot.warnings`（`discovery`/`printers`/`bandwidth`/`system` 四源，同源同文案去重、上限 20 条、条件恢复即消失），绝不把失败静默成 0 或空列表。
+
+**错峰**：2s 带宽采样与 60s 全量扫描可能同 tick。两者都是短命子进程，全局子进程闸门 64 兜底；实测无争抢（扫描期间带宽采样仍稳定在 200ms 内）。
+
+---
+
+## 8. 降级路径
+
+| 故障 | 表现 | 降级行为 |
+|---|---|---|
+| 无局域网 / 无法推导网段 | `detectSubnet()` 返回 null | `hosts=[]`，跳过扫描；`dataSource='demo'`（真实设备 0 台） |
+| `arp -a` 解析失败（编码/locale 变化） | 0 条目 + `parseWarning` | 回退 `Get-NetNeighbor`（JSON）；仍失败则本轮不判离线，并在 `snapshot.warnings` 留一条 `source='discovery'` |
+| 任一探测阶段失败（扫描轮异常 / `Get-Printer` 失败 / `netstat -e` 解析失败） | 命令返回空或抛错 | 写入 `snapshot.warnings`（上限 20 条、同源同文案去重、恢复即消失）；**不**把失败显示成 0 或"没有设备" |
+| ICMP 大面积被禁 | ping 存活率极低 | ARP + 端口作为在线主信号；`quality.grade='unknown'`，**不产生告警** |
+| 无 spooler 权限 / 执行策略限制 | `Get-Printer` 失败 | 回退 `Get-CimInstance Win32_Printer` + `Win32_PrintJob`；再失败 `printers=[]` 且不影响设备面板 |
+| SNMP 161 被封 | 全部 timeout | 负缓存 5min；`consumables: []`，不重试风暴 |
+| 设备未启用 SNMP | `levelPct:null` | UI「设备不报告耗材」，不产生耗材告警（`null ≠ 耗尽`） |
+| 反向 DNS 全失败 | `hostname:null` | 展示 IP；失败结果也缓存，不反复超时 |
+| GPU 进程崩溃（远程桌面/虚拟机） | Electron FATAL 退出 | 启动即 `disableHardwareAcceleration()` + `disable-gpu`（本机实测必须，否则应用起不来） |
+| 状态文件损坏 | JSON 解析异常 | 自动重建默认状态，不阻塞启动 |
+| 真实设备 < 3 台 | — | 叠加 `Simulator`，`dataSource='mixed'/'demo'` + 角标 |
+
+---
+
+## 9. 扩展点
+
+1. **IPP 耗材通路（opt-in，已实现）**：`printers/ipp.ts` 用 `node:http` 手写 IPP 2.0 `Get-Printer-Attributes`（operation 0x0009），单文件 148 行、零依赖。
+   - 路径固定 `['/ipp/print', '/ipp']`，版本固定 2.0，超时 2500ms；HTTP 404/连接失败才换下一个路径；
+   - **statusCode ≠ 0x0000 立即放弃**（不重试、不换路径重试），返回 null → provider 链落到 `unknown`；
+   - `marker-levels` 的负值（RFC 8010：-1/-2/-3）一律 `levelPct:null`，绝不 clamp 成 0；
+   - 负缓存 300s + "离线打印机不查耗材"两条策略，保证不支持 IPP 的设备不会每 15s 付 2.5s×2 的代价。
+   - **实测（本机）**：`.235` 回 `0x0400`（100ms 内放弃），`.170` 的 `/ipp/print` 是 HTTP 404、`/ipp` 无有效响应（约 3.2s 放弃）→ 两台都拿不到 `marker-*`，因此本机耗材仍全部来自 SNMP。该模块的价值在支持 IPP 的现场机型。
+2. **真实 ICMP（raw socket）**：当前用 `ping.exe`，进程开销决定了下限 ~0.5s/批。改 raw socket 可把 254 地址压到 1s 内，但需要管理员权限与 winpcap 类依赖（违背零原生依赖），暂不做。
+3. **多网段**：`SubnetInfo` 已含 `iface/cidr/prefix/hosts`，把单条 `SchedulerConfig` 改成数组即可并行多网段；`DeviceRecord` 需加 `iface` 维度的 MAC 唯一性处理。
+4. **Prometheus 导出**：`Snapshot` 即指标快照，加一个 30s 周期把 `system/devices/printers` 映射成 `/metrics` 文本即可；`engine-check` 的 phase 计时可直接映射成扫描耗时指标。
+5. **历史时序**：目前每设备 60 点 RTT 在内存。若要长期留存，`store.ts` 可扩展为 append-only NDJSON（仍是零原生依赖）。
+6. **告警通知外发**：`alarms.ts` 的 `created` 输出已是事件流，接邮件/IM webhook 只是消费者问题，引擎无需改动。
+
+## 9.5 打印管理页（新增需求）
+
+**导航**：独立"打印管理"视图（`PrinterManageView`），三项能力：手动添加打印机、别名、忽略。配置持久化于 `JsonStore.printers`（与别名/告警历史同一份 `svesc-state.json`）。
+
+- **手动添加**：IPv4 严格校验（`isValidIpv4`）+ 可选备注；同 IP 幂等更新备注。`collectPrinters` 按 IP 去重合并——自动发现已覆盖的 IP 不产生重复条目；**探活失败也保留并如实 offline**（`stateDetail` 标注"手动添加"），`reachable` 表同口径登记（否则告警引擎对手动打印机永远不评 PRINTER_OFFLINE）。
+- **忽略**：被忽略的自动发现条目在 `collectPrinters` 输出层过滤（不显示、不产生告警）；手动条目不受忽略影响（删除走 removeManualPrinter）。
+- **别名**：复用 `store.aliases`（key = printer id）；`applyAliases` 对 devices（displayName）与 printers（alias 字段）统一投影。别名只改显示名，告警 targetName 保持原队列名，便于对账。
+- **刷新联动**：IPC 变更落盘后 `void scheduler.refreshPrinters()` 立即重采并推送快照。
+
+## 9.7 全面审计修复（2026-10-25，两路并行调查 → 10 项落地）
+
+- **世代号（L4）**：`RouterManager.generation` 在 logout 时自增；`doRefresh` 入口捕获、写回前比对，不一致整体丢弃——堵住"logout 后在飞一轮把旧会话数据写回 status"的竞态。
+- **告警收尾**：`AlarmEngine.evaluate` 对"从监控集消失的打印机"（忽略/删除/拔除）统一 resolve 活跃告警；`printersCollected` 入参区分"启动早期空列表 tick"（绝不收尾）与"真实采集结果"。
+- **store 可感知性**：落盘失败 → `onWriteError` 回调 → 快照 `warnings[source=store]` + 5s 重试定时器直到恢复（恢复也通报）；损坏文件 `console.error` + alarms 逐条形状校验。
+- **设备别名补通**：引擎与持久化早已支持但无通道无 UI——新增 `lan:setDeviceAlias` 通道 + 详情抽屉别名编辑行；设备（displayName）与打印机（alias 字段）共用 `store.aliases`。
+- **告警交互收口**：`onAlarm` 推送被订阅（增量合并进快照）；system 告警跳总览；printer 告警滚动 + 高亮定位目标卡；ack 失败经 banner 提示。
+- **诚实化清理**：状态栏硬编码"引擎 4 个任务"删除；侧边栏打印机计数恒非虚拟口径；死代码（isVirtual/currentPrinters/alarmEvaluation/counts.router）移除。
+- **健壮性**：heartbeat 补 catch → warnings（此前 spawn 失败会让快照静默停更）；手动刷新在扫描进行中如实返 `started:false`；`exportReport` 附 routerStatus + printerManage。
+- **M3**：`runFullScan` 抽为 5 个 phase 方法（ScanCtx 共享上下文），预算语义逐行保留，engine-check 回归 PASS。
+
+## 10. 路由器管理模块（新增需求）**目标**：登录路由器账号密码，自动获取路由信息并进行管理——但严格遵守"能力探测 + 诚实降级"。
+
+### 10.1 三条通道（每条独立探测，能力互不假设）
+
+| 通道 | 协议 | 拿到什么 | 不支持时 |
+|------|------|----------|----------|
+| UPnP IGD | SSDP M-SEARCH → 描述 XML → SOAP（WANIPConnection） | WAN IP、累计流量计数器、Reboot | 标注"该路由器不提供 UPnP IGD"，字段一律 null |
+| OpenWrt ubus | HTTP POST /ubus（JSON-RPC，session.login） | system board、DHCP 租约、无线客户端、reboot | 登录表单 + "登录后可查看"（404 时文案指引改用内置浏览器） |
+| HTTP 管理页 | GET :80/:8080/:443，跟随 30x（≤2 跳），品牌指纹 | 品牌/型号提示（OpenWrt/TP-Link/小米/华硕/华为/NETGEAR）+ 落点 URL（`identity.adminUrl`） | "品牌未识别"，绝不猜 |
+| 内置浏览器登录（推荐） | 主进程 BrowserWindow（`router-browser.ts`）加载 `adminUrl`，用户在真实管理页登录 | 管理页会话（`session.kind='web'`，Cookie 关键词检测：sysauth/session/token/stok/auth…） | 无 Cookie → 不标记会话，绝不猜 |
+
+### 10.2 关键实现决策
+
+- **零依赖**：node:http / node:dgram 直用，不引 xml2js/soap 库；描述 XML 与 SOAP 用正则解析（`upnp.ts` 纯函数，30 条单测覆盖）。
+- **transport 注入**：`UbusClient` 的网络出口是构造参数，测试直接喂真实抓包形状的响应，不 mock 网络。
+- **ubus 登录 sid**：`session.login` 必须用 32 位零 null-session（`UBUS_NULL_SESSION`）——uhttpd 的 `uh_ubus_allowed` 只接受这种 sid 调登录，发字面量 `'session'` 会被当成不存在的会话，一律 -32002（真机必然登录失败，且文案与"密码错误"无法区分）。错误码文案按路径分流：`-32002` 在登录路径是"用户名或密码错误"，在调用路径是"会话已过期或无权限，请重新登录"。
+- **会话失效当场作废**：调用路径上的 -32002 是唯一"证据确凿的会话死亡"信号（同一个 sid 重试永远不会成功），且与网络超时/HTTP 错误走完全不同的分支——所以 `UbusClient.call()` 见到它即清掉缓存会话，下次调用直接 `auth-required` 短路，不再拿死 sid 发请求；网络/HTTP/权限拒绝（`result:[6]`）**不**作废会话（`sessionInvalid` 为 falsy），瞬时故障不会把用户登掉。
+- **凭据安全**：明文只存在内存；落盘必须经 Electron `safeStorage.encryptStringAsync` / 读取用 `decryptStringAsync`（Windows DPAPI，与旧同步 API 同一套平台密钥库，密文跨版本兼容）。密钥环不可用 → **拒绝落盘**并如实告知，绝不降级明文（`src/main/router-store.ts`）。同步 API（`isEncryptionAvailable`/`encryptString`/`decryptString`）自 Electron 45 弃用、46 移除，故主进程只走异步路径；`decryptStringAsync` 返回 `{shouldReEncrypt, result}`，平台密钥轮换时用新密文重存。
+- **WAN 速率**：UPnP 计数器 ≥2 个样本才出 bps；计数器回绕（路由器重启）→ 丢弃样本返回 null。
+- **独立 IPC**：路由器状态走 `router:*` 通道 + `router:status` 推送，不污染 Snapshot 冻结契约。
+- **会话正交性（404 修复的架构结论）**：ubus 会话（kind='ubus'）与管理页会话（kind='web'，Cookie 检测）是两个独立事实，合成规则"ubus 优先、web 独立存续"——ubus 登录失败不得清 web 会话，反之亦然；web 会话**不**点亮 `caps.openwrt`（Cookie 证明不了 ubus 可用，点亮就是撒谎）。DHCP/无线数据卡只在 kind='ubus' 下展示。非 OpenWrt 固件登录 ubus 拿到 HTTP 404 时，登录语境文案明确指引"改用内置浏览器登录"。
+- **实测结果（本机网关 192.168.2.1）**：管理页可达（302 落点 `/view/admin_login/tologin.html` 已被 `adminUrl` 捕获）、无 UPnP IGD、非 OpenWrt（generic）——界面如实展示"该路由器不支持"，内置浏览器登录直达登录页。

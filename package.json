@@ -1,0 +1,37 @@
+{
+  "name": "svesc",
+  "version": "0.2.0",
+  "private": true,
+  "description": "Windows LAN monitoring desktop app (devices, printers, network quality, alarms)",
+  "author": "浩玥工作室 (老高 QQ:846193)",
+  "main": "dist/main/index.cjs",
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.node.json",
+    "build:main": "esbuild src/main/index.ts --bundle --platform=node --format=cjs --external:electron --outfile=dist/main/index.cjs",
+    "build:preload": "esbuild src/main/preload.ts --bundle --platform=node --format=cjs --external:electron --outfile=dist/main/preload.cjs",
+    "build": "vite build && npm run build:main && npm run build:preload",
+    "test": "vitest run",
+    "start": "npm run build && node scripts/start.mjs",
+    "smoke": "npm run build && node scripts/smoke.mjs",
+    "engine-check": "node scripts/engine-check.mjs",
+    "soak": "node scripts/soak-check.mjs",
+    "dist": "npm run build && electron-builder --win --config electron-builder.yml"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/react": "^19.0.2",
+    "@types/react-dom": "^19.0.2",
+    "@vitejs/plugin-react": "^4.3.4",
+    "electron": "^45.0.0",
+    "electron-builder": "^26.18.0",
+    "esbuild": "^0.24.2",
+    "typescript": "^5.7.2",
+    "vite": "^7.0.0",
+    "vitest": "^3.0.0"
+  },
+  "dependencies": {
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  }
+}

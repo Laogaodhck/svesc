@@ -1,0 +1,31 @@
+[
+  {
+    "name": "以太网",
+    "state": "connected",
+    "ip": "192.168.2.179",
+    "gateway": "192.168.2.1",
+    "dns": [
+      "192.168.2.1"
+    ],
+    "mac": "00-E0-4C-36-D0-79",
+    "dhcp": false
+  },
+  {
+    "name": "vEthernet (Default Switch)",
+    "state": "connected",
+    "ip": "172.26.176.1",
+    "gateway": null,
+    "dns": [],
+    "mac": "00-15-5D-9E-F7-77",
+    "dhcp": false
+  },
+  {
+    "name": "vEthernet (WSL)",
+    "state": "connected",
+    "ip": "172.25.0.1",
+    "gateway": null,
+    "dns": [],
+    "mac": "00-15-5D-50-CE-72",
+    "dhcp": false
+  }
+]

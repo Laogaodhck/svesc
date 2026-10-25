@@ -1,0 +1,75 @@
+/* ==========================================================================
+   Design tokens — SVESC NOC console
+   值来源：brief-max2.md 第 3 节「视觉规范」原样落地，禁止自由发挥。
+   ========================================================================== */
+
+:root {
+  /* ---- 基础色板（冻结） ---- */
+  --bg: #0a0e13;
+  --surface: #11161d;
+  --surface-2: #171e27;
+  --elevated: #1c2531;
+  --border: #232c38;
+  --border-strong: #2f3a48;
+
+  --text: #e7edf5;
+  --text-muted: #8b98a9;
+  --text-dim: #5d6a7a;
+
+  --accent: #4c9aff;
+  --ok: #34d399;
+  --warn: #f5a623;
+  --crit: #ff5c5c;
+  --offline: #5d6a7a;
+
+  --radius: 10px;
+  --mono: ui-monospace, 'Cascadia Mono', 'Cascadia Code', 'Consolas', 'SFMono-Regular', monospace;
+
+  /* ---- 字体 ---- */
+  --sans: 'Segoe UI', 'Microsoft YaHei UI', 'Microsoft YaHei', system-ui, -apple-system, sans-serif;
+
+  /* ---- 派生色（半透明），全部由基础色板推导，不引入新色相 ---- */
+  --accent-a12: rgba(76, 154, 255, 0.12);
+  --accent-a20: rgba(76, 154, 255, 0.2);
+  --accent-a32: rgba(76, 154, 255, 0.32);
+
+  --ok-a10: rgba(52, 211, 153, 0.1);
+  --ok-a18: rgba(52, 211, 153, 0.18);
+  --ok-a40: rgba(52, 211, 153, 0.4);
+
+  --warn-a10: rgba(245, 166, 35, 0.1);
+  --warn-a18: rgba(245, 166, 35, 0.18);
+  --warn-a40: rgba(245, 166, 35, 0.4);
+
+  --crit-a10: rgba(255, 92, 92, 0.1);
+  --crit-a18: rgba(255, 92, 92, 0.18);
+  --crit-a40: rgba(255, 92, 92, 0.4);
+
+  --offline-a17: rgba(93, 106, 122, 0.17);
+
+  /* 高光：只用于卡片顶部 1px inset，禁止做成投影 */
+  --inset-hi: 0 1px 0 rgba(255, 255, 255, 0.03) inset;
+
+  /* ---- 耗材色（CMYK + 鼓/废粉） ---- */
+  --toner-k: #b9c4d2;
+  --toner-c: #38bdf8;
+  --toner-m: #e879f9;
+  --toner-y: #fbbf24;
+  --toner-drum: #a78bfa;
+  --toner-waste: #7c8899;
+  --toner-other: #8b98a9;
+
+  /* ---- 动效 ---- */
+  --dur-fast: 120ms;
+  --dur: 180ms;
+  --drawer-dur: 220ms;
+  --ease: cubic-bezier(0.22, 1, 0.36, 1);
+
+  /* ---- 尺寸 ---- */
+  --topbar-h: 56px;
+  --sidebar-w: 200px;
+  --statusbar-h: 28px;
+  --drawer-w: 420px;
+  --row-h: 44px;
+  --content-pad: 20px;
+}

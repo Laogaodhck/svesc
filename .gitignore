@@ -1,0 +1,13 @@
+node_modules/
+dist/
+release/
+release-*/
+.workbuddy/
+*.log
+npm-debug.log*
+.DS_Store
+Thumbs.db
+.vite/
+coverage/
+*.tsbuildinfo
+.agent-runs/**/artifacts/*.cjs

@@ -1,0 +1,66 @@
+# electron-builder 打包配置（SVESC 局域网管理台）
+#
+# 结构说明：
+#  - 全部运行时代码由 vite（渲染层）与 esbuild（main/preload）打进 dist/，
+#    运行时零第三方 node_modules 依赖 → files 只带 dist/** + package.json，
+#    排除 node_modules 让安装包体积只剩业务代码 + Electron 运行时。
+#  - main 字段（package.json）指向 dist/main/index.cjs，asar 内 loadFile 兼容。
+#  - userData（JsonStore / router-credentials）在打包后仍写 %APPDATA%，
+#    与开发态行为一致，无需 asarUnpack。
+appId: cn.svesc.lan-monitor
+productName: SVESC-LAN-Monitor
+# 作者信息：随安装器元数据与卸载面板展示
+copyright: Copyright © 浩玥工作室 · 老高 QQ 846193
+
+directories:
+  # 0.2.0 告警管理版（图标 + 托盘 + 全部功能 + 告警三态管理）：环境安全层对 .asar 有
+  # 全层删除保护（Node/PowerShell/Python 全被拦），打过的 win-unpacked 永远清不空 →
+  # 每次重打包必须换全新输出目录（全新目录首打必成，emptyDir 无可删项）。
+  # 历史目录：release-0.2.0 / -icons / -full / -tray / -alarm / -alarm2 / -alarm3。
+  output: release-0.2.0-alarm3
+  buildResources: build
+
+# 环境安全层拦截"一次调用递归删大目录"（electron-builder 解压 Electron 前必先
+# rm 掉 win-unpacked / win-unpacked.tmp，重复打包必然被拦死）。
+# electronDist 直接指到 node_modules 里现成的 Electron 发行目录：跳过解压，
+# 纯文件复制进 win-unpacked，全流程不再需要任何批量删除。
+# 注意：Electron 版本以该目录为准（当前 45.0.0，与 devDependencies 一致）。
+electronDist: node_modules/electron/dist
+
+files:
+  - dist/**
+  - package.json
+  - "!**/node_modules/**"
+
+asar: true
+compression: normal
+
+# 运行时图标资源：随安装包复制到 <resources>/，main 进程从 process.resourcesPath 读取
+extraResources:
+  - from: build/icon.png
+    to: icon.png
+  - from: build/tray-icon.png
+    to: tray-icon.png
+  - from: build/badge.png
+    to: badge.png
+
+win:
+  # 浩玥工作室 logo（build/icon.ico 由 scripts/make-icons.py 生成，16-256 八档尺寸）
+  # NSIS 安装器与 portable exe 默认复用该 ico
+  icon: build/icon.ico
+  target:
+    - target: nsis
+      arch: [x64]
+    - target: portable
+      arch: [x64]
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  artifactName: SVESC-Setup-${version}.${ext}
+  shortcutName: SVESC 局域网管理台
+  uninstallDisplayName: SVESC 局域网管理台
+
+portable:
+  artifactName: SVESC-Portable-${version}.${ext}

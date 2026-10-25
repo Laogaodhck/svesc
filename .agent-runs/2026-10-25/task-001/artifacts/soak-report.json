@@ -1,0 +1,466 @@
+{
+  "durationMs": 95009,
+  "lifecycle": {
+    "seededCreated": 0,
+    "created": 1,
+    "activeAfterNextRounds": 1,
+    "activeAfter90s": 1,
+    "infoCountAfter90s": 1,
+    "ackedResolved": true,
+    "ttlResolved": true,
+    "ttlResolvedAtDeltaMs": 600000,
+    "batchResolved": 0
+  },
+  "samples": [
+    {
+      "elapsedMs": 182,
+      "degraded": 0,
+      "unknown": 0,
+      "alarmCounts": {
+        "critical": 0,
+        "warning": 0,
+        "info": 0
+      },
+      "deviceNewActive": 0,
+      "deviceNewResolved": 0,
+      "maxSameMsResolved": 0,
+      "degradedDetail": []
+    },
+    {
+      "elapsedMs": 6809,
+      "degraded": 0,
+      "unknown": 0,
+      "alarmCounts": {
+        "critical": 0,
+        "warning": 0,
+        "info": 0
+      },
+      "deviceNewActive": 0,
+      "deviceNewResolved": 0,
+      "maxSameMsResolved": 0,
+      "degradedDetail": []
+    },
+    {
+      "elapsedMs": 11825,
+      "degraded": 0,
+      "unknown": 24,
+      "alarmCounts": {
+        "critical": 0,
+        "warning": 0,
+        "info": 0
+      },
+      "deviceNewActive": 0,
+      "deviceNewResolved": 0,
+      "maxSameMsResolved": 0,
+      "degradedDetail": []
+    },
+    {
+      "elapsedMs": 16825,
+      "degraded": 0,
+      "unknown": 24,
+      "alarmCounts": {
+        "critical": 0,
+        "warning": 0,
+        "info": 0
+      },
+      "deviceNewActive": 0,
+      "deviceNewResolved": 0,
+      "maxSameMsResolved": 0,
+      "degradedDetail": []
+    },
+    {
+      "elapsedMs": 21824,
+      "degraded": 0,
+      "unknown": 24,
+      "alarmCounts": {
+        "critical": 1,
+        "warning": 0,
+        "info": 0
+      },
+      "deviceNewActive": 0,
+      "deviceNewResolved": 0,
+      "maxSameMsResolved": 0,
+      "degradedDetail": []
+    },
+    {
+      "elapsedMs": 26827,
+      "degraded": 0,
+      "unknown": 24,
+      "alarmCounts": {
+        "critical": 1,
+        "warning": 0,
+        "info": 0
+      },
+      "deviceNewActive": 0,
+      "deviceNewResolved": 0,
+      "maxSameMsResolved": 0,
+      "degradedDetail": []
+    },
+    {
+      "elapsedMs": 31833,
+      "degraded": 0,
+      "unknown": 24,
+      "alarmCounts": {
+        "critical": 1,
+        "warning": 0,
+        "info": 0
+      },
+      "deviceNewActive": 0,
+      "deviceNewResolved": 0,
+      "maxSameMsResolved": 0,
+      "degradedDetail": []
+    },
+    {
+      "elapsedMs": 36839,
+      "degraded": 0,
+      "unknown": 24,
+      "alarmCounts": {
+        "critical": 1,
+        "warning": 0,
+        "info": 0
+      },
+      "deviceNewActive": 0,
+      "deviceNewResolved": 0,
+      "maxSameMsResolved": 0,
+      "degradedDetail": []
+    },
+    {
+      "elapsedMs": 41840,
+      "degraded": 0,
+      "unknown": 24,
+      "alarmCounts": {
+        "critical": 1,
+        "warning": 0,
+        "info": 0
+      },
+      "deviceNewActive": 0,
+      "deviceNewResolved": 0,
+      "maxSameMsResolved": 0,
+      "degradedDetail": []
+    },
+    {
+      "elapsedMs": 46853,
+      "degraded": 0,
+      "unknown": 24,
+      "alarmCounts": {
+        "critical": 1,
+        "warning": 0,
+        "info": 0
+      },
+      "deviceNewActive": 0,
+      "deviceNewResolved": 0,
+      "maxSameMsResolved": 0,
+      "degradedDetail": []
+    },
+    {
+      "elapsedMs": 51861,
+      "degraded": 0,
+      "unknown": 13,
+      "alarmCounts": {
+        "critical": 1,
+        "warning": 0,
+        "info": 0
+      },
+      "deviceNewActive": 0,
+      "deviceNewResolved": 0,
+      "maxSameMsResolved": 0,
+      "degradedDetail": []
+    },
+    {
+      "elapsedMs": 56868,
+      "degraded": 0,
+      "unknown": 13,
+      "alarmCounts": {
+        "critical": 1,
+        "warning": 0,
+        "info": 0
+      },
+      "deviceNewActive": 0,
+      "deviceNewResolved": 0,
+      "maxSameMsResolved": 0,
+      "degradedDetail": []
+    },
+    {
+      "elapsedMs": 61979,
+      "degraded": 0,
+      "unknown": 13,
+      "alarmCounts": {
+        "critical": 1,
+        "warning": 0,
+        "info": 0
+      },
+      "deviceNewActive": 0,
+      "deviceNewResolved": 0,
+      "maxSameMsResolved": 0,
+      "degradedDetail": []
+    },
+    {
+      "elapsedMs": 66982,
+      "degraded": 0,
+      "unknown": 13,
+      "alarmCounts": {
+        "critical": 1,
+        "warning": 0,
+        "info": 0
+      },
+      "deviceNewActive": 0,
+      "deviceNewResolved": 0,
+      "maxSameMsResolved": 0,
+      "degradedDetail": []
+    },
+    {
+      "elapsedMs": 71992,
+      "degraded": 0,
+      "unknown": 13,
+      "alarmCounts": {
+        "critical": 1,
+        "warning": 0,
+        "info": 0
+      },
+      "deviceNewActive": 0,
+      "deviceNewResolved": 0,
+      "maxSameMsResolved": 0,
+      "degradedDetail": []
+    },
+    {
+      "elapsedMs": 76993,
+      "degraded": 0,
+      "unknown": 13,
+      "alarmCounts": {
+        "critical": 1,
+        "warning": 0,
+        "info": 0
+      },
+      "deviceNewActive": 0,
+      "deviceNewResolved": 0,
+      "maxSameMsResolved": 0,
+      "degradedDetail": []
+    },
+    {
+      "elapsedMs": 82007,
+      "degraded": 0,
+      "unknown": 5,
+      "alarmCounts": {
+        "critical": 1,
+        "warning": 0,
+        "info": 0
+      },
+      "deviceNewActive": 0,
+      "deviceNewResolved": 0,
+      "maxSameMsResolved": 0,
+      "degradedDetail": []
+    },
+    {
+      "elapsedMs": 87016,
+      "degraded": 0,
+      "unknown": 5,
+      "alarmCounts": {
+        "critical": 1,
+        "warning": 0,
+        "info": 0
+      },
+      "deviceNewActive": 0,
+      "deviceNewResolved": 0,
+      "maxSameMsResolved": 0,
+      "degradedDetail": []
+    },
+    {
+      "elapsedMs": 92019,
+      "degraded": 0,
+      "unknown": 5,
+      "alarmCounts": {
+        "critical": 1,
+        "warning": 0,
+        "info": 0
+      },
+      "deviceNewActive": 0,
+      "deviceNewResolved": 0,
+      "maxSameMsResolved": 0,
+      "degradedDetail": []
+    },
+    {
+      "elapsedMs": 95006,
+      "degraded": 0,
+      "unknown": 5,
+      "alarmCounts": {
+        "critical": 1,
+        "warning": 0,
+        "info": 0
+      },
+      "deviceNewActive": 0,
+      "deviceNewResolved": 0,
+      "maxSameMsResolved": 0,
+      "degradedDetail": []
+    }
+  ],
+  "finalQuality": [
+    {
+      "ip": "192.168.2.179",
+      "grade": "unknown",
+      "samples": 4,
+      "lossPct": 0,
+      "latencyMs": 0
+    },
+    {
+      "ip": "192.168.2.1",
+      "grade": "excellent",
+      "samples": 12,
+      "lossPct": 0,
+      "latencyMs": 1.3
+    },
+    {
+      "ip": "192.168.2.23",
+      "grade": "excellent",
+      "samples": 8,
+      "lossPct": 0,
+      "latencyMs": 1.4
+    },
+    {
+      "ip": "192.168.2.24",
+      "grade": "excellent",
+      "samples": 8,
+      "lossPct": 0,
+      "latencyMs": 6.8
+    },
+    {
+      "ip": "192.168.2.50",
+      "grade": "excellent",
+      "samples": 8,
+      "lossPct": 0,
+      "latencyMs": 10.1
+    },
+    {
+      "ip": "192.168.2.52",
+      "grade": "excellent",
+      "samples": 8,
+      "lossPct": 0,
+      "latencyMs": 4.6
+    },
+    {
+      "ip": "192.168.2.75",
+      "grade": "excellent",
+      "samples": 8,
+      "lossPct": 0,
+      "latencyMs": 5.5
+    },
+    {
+      "ip": "192.168.2.76",
+      "grade": "excellent",
+      "samples": 8,
+      "lossPct": 0,
+      "latencyMs": 0.8
+    },
+    {
+      "ip": "192.168.2.85",
+      "grade": "excellent",
+      "samples": 8,
+      "lossPct": 0,
+      "latencyMs": 7.9
+    },
+    {
+      "ip": "192.168.2.102",
+      "grade": "unknown",
+      "samples": 7,
+      "lossPct": 12.5,
+      "latencyMs": 57.6
+    },
+    {
+      "ip": "192.168.2.104",
+      "grade": "excellent",
+      "samples": 8,
+      "lossPct": 0,
+      "latencyMs": 1.6
+    },
+    {
+      "ip": "192.168.2.112",
+      "grade": "excellent",
+      "samples": 8,
+      "lossPct": 0,
+      "latencyMs": 11.3
+    },
+    {
+      "ip": "192.168.2.148",
+      "grade": "excellent",
+      "samples": 8,
+      "lossPct": 0,
+      "latencyMs": 3.5
+    },
+    {
+      "ip": "192.168.2.170",
+      "grade": "excellent",
+      "samples": 8,
+      "lossPct": 0,
+      "latencyMs": 0.5
+    },
+    {
+      "ip": "192.168.2.175",
+      "grade": "excellent",
+      "samples": 8,
+      "lossPct": 0,
+      "latencyMs": 3.1
+    },
+    {
+      "ip": "192.168.2.176",
+      "grade": "unknown",
+      "samples": 7,
+      "lossPct": 12.5,
+      "latencyMs": 6.7
+    },
+    {
+      "ip": "192.168.2.178",
+      "grade": "excellent",
+      "samples": 8,
+      "lossPct": 0,
+      "latencyMs": 3.3
+    },
+    {
+      "ip": "192.168.2.196",
+      "grade": "unknown",
+      "samples": 3,
+      "lossPct": 62.5,
+      "latencyMs": 38
+    },
+    {
+      "ip": "192.168.2.205",
+      "grade": "excellent",
+      "samples": 8,
+      "lossPct": 0,
+      "latencyMs": 2
+    },
+    {
+      "ip": "192.168.2.211",
+      "grade": "excellent",
+      "samples": 8,
+      "lossPct": 0,
+      "latencyMs": 4.4
+    },
+    {
+      "ip": "192.168.2.225",
+      "grade": "fair",
+      "samples": 8,
+      "lossPct": 0,
+      "latencyMs": 49
+    },
+    {
+      "ip": "192.168.2.228",
+      "grade": "excellent",
+      "samples": 8,
+      "lossPct": 0,
+      "latencyMs": 0.3
+    },
+    {
+      "ip": "192.168.2.235",
+      "grade": "excellent",
+      "samples": 8,
+      "lossPct": 0,
+      "latencyMs": 1.6
+    },
+    {
+      "ip": "192.168.2.237",
+      "grade": "unknown",
+      "samples": 7,
+      "lossPct": 12.5,
+      "latencyMs": 12.6
+    }
+  ]
+}

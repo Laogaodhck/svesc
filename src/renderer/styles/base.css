@@ -1,0 +1,290 @@
+/* ==========================================================================
+   Base — reset / 排版 / 滚动条 / 焦点 / 通用工具类
+   ========================================================================== */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 13px;
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  overflow: hidden;
+  /* 桌面应用：禁止整页选中拖拽感，具体文本区域单独开启 */
+  user-select: none;
+}
+
+h1,
+h2,
+h3,
+h4,
+p,
+figure {
+  margin: 0;
+  font-size: inherit;
+  font-weight: inherit;
+}
+
+ul,
+ol {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+}
+
+input,
+select {
+  font: inherit;
+  color: inherit;
+}
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+}
+
+svg {
+  display: block;
+  flex: none;
+}
+
+/* ---- 滚动条：6px，细，仅 hover 变亮 ---- */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}
+
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #3c4a5b;
+}
+
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* ---- 焦点：仅键盘可见 ---- */
+:focus {
+  outline: none;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+  border-radius: 4px;
+}
+
+::selection {
+  background: var(--accent-a32);
+  color: #fff;
+}
+
+/* ==========================================================================
+   工具类
+   ========================================================================== */
+
+/* 数字/地址/MAC：等宽 + 表格数字，刷新时不跳动 */
+.mono {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: 'tnum' 1;
+  letter-spacing: -0.01em;
+}
+
+.num {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: 'tnum' 1;
+}
+
+.selectable {
+  user-select: text;
+  cursor: text;
+}
+
+.muted {
+  color: var(--text-muted);
+}
+
+.dim {
+  color: var(--text-dim);
+}
+
+.u-warn {
+  color: var(--warn);
+}
+
+.u-crit {
+  color: var(--crit);
+}
+
+.u-accent {
+  color: var(--accent);
+}
+
+.u-ok {
+  color: var(--ok);
+}
+
+/* 带宽箭头 */
+.u-arrow {
+  font-size: 12px;
+  line-height: 1;
+}
+
+/* 数据缺失占位：不是 0，不是空条，是一个诚实的破折号 */
+.na {
+  color: var(--text-dim);
+  font-family: var(--mono);
+}
+
+/* 文本截断 */
+.ellipsis {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 通用小工具（替代静态内联样式） */
+.u-105 {
+  font-size: 10.5px;
+}
+
+.u-11 {
+  font-size: 11px;
+}
+
+.u-115 {
+  font-size: 11.5px;
+}
+
+.u-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.u-stack-2 {
+  gap: 2px;
+}
+
+.u-stack-5 {
+  gap: 5px;
+}
+
+.u-caps {
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ==========================================================================
+   全局动画（克制：只有故障脉冲与刷新渐变）
+   ========================================================================== */
+
+@keyframes pulse-crit {
+  0%,
+  100% {
+    box-shadow: 0 0 0 3px rgba(255, 92, 92, 0.18);
+    opacity: 1;
+  }
+  50% {
+    box-shadow: 0 0 0 5px rgba(255, 92, 92, 0.04);
+    opacity: 0.65;
+  }
+}
+
+@keyframes pulse-crit-line {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.55;
+  }
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes shimmer {
+  from {
+    background-position: -160% 0;
+  }
+  to {
+    background-position: 260% 0;
+  }
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}

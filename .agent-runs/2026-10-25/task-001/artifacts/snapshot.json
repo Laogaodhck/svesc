@@ -1,0 +1,1490 @@
+{
+  "ts": 1792933227305,
+  "subnet": "192.168.2.0/24",
+  "dataSource": "live",
+  "devices": [
+    {
+      "id": "dev-192.168.2.1",
+      "ip": "192.168.2.1",
+      "mac": "e4-67-1e-12-68-a9",
+      "hostname": null,
+      "vendor": null,
+      "osHint": "网络设备固件",
+      "kind": "router",
+      "state": "online",
+      "firstSeen": 1792931480534,
+      "lastSeen": 1792933226200,
+      "openPorts": [
+        80,
+        443
+      ],
+      "quality": {
+        "latencyMs": 1.8,
+        "jitterMs": 2,
+        "packetLossPct": 0,
+        "score": 99,
+        "grade": "unknown",
+        "samples": 4
+      },
+      "bandwidth": {
+        "rxBps": 270737,
+        "txBps": 6200951,
+        "share": 1,
+        "connections": 1,
+        "attributable": true,
+        "estimated": true
+      },
+      "rttHistory": [
+        5,
+        0,
+        1,
+        1
+      ],
+      "isGateway": true,
+      "isSelf": false,
+      "displayName": null,
+      "ipConflict": false
+    },
+    {
+      "id": "dev-192.168.2.23",
+      "ip": "192.168.2.23",
+      "mac": "e4-67-1e-11-8a-69",
+      "hostname": null,
+      "vendor": null,
+      "osHint": null,
+      "kind": "unknown",
+      "state": "online",
+      "firstSeen": 1792931480534,
+      "lastSeen": 1792933226200,
+      "openPorts": [
+        80
+      ],
+      "quality": {
+        "latencyMs": 2.8,
+        "jitterMs": 4,
+        "packetLossPct": 0,
+        "score": 99,
+        "grade": "unknown",
+        "samples": 4
+      },
+      "bandwidth": {
+        "rxBps": 0,
+        "txBps": 0,
+        "share": 0,
+        "connections": 0,
+        "attributable": false,
+        "estimated": true
+      },
+      "rttHistory": [
+        0,
+        2,
+        7,
+        2
+      ],
+      "isGateway": false,
+      "isSelf": false,
+      "displayName": null,
+      "ipConflict": false
+    },
+    {
+      "id": "dev-192.168.2.24",
+      "ip": "192.168.2.24",
+      "mac": "48-5f-08-41-4f-d1",
+      "hostname": null,
+      "vendor": null,
+      "osHint": "监控摄像固件 (RTSP)",
+      "kind": "camera",
+      "state": "online",
+      "firstSeen": 1792931480534,
+      "lastSeen": 1792933226200,
+      "openPorts": [
+        80,
+        554
+      ],
+      "quality": {
+        "latencyMs": 4.8,
+        "jitterMs": 6.3,
+        "packetLossPct": 0,
+        "score": 98,
+        "grade": "unknown",
+        "samples": 4
+      },
+      "bandwidth": {
+        "rxBps": 0,
+        "txBps": 0,
+        "share": 0,
+        "connections": 0,
+        "attributable": false,
+        "estimated": true
+      },
+      "rttHistory": [
+        6,
+        1,
+        9,
+        3
+      ],
+      "isGateway": false,
+      "isSelf": false,
+      "displayName": null,
+      "ipConflict": false
+    },
+    {
+      "id": "dev-192.168.2.50",
+      "ip": "192.168.2.50",
+      "mac": "48-5f-08-41-62-43",
+      "hostname": null,
+      "vendor": null,
+      "osHint": "监控摄像固件 (RTSP)",
+      "kind": "camera",
+      "state": "online",
+      "firstSeen": 1792931480534,
+      "lastSeen": 1792933226200,
+      "openPorts": [
+        80,
+        554
+      ],
+      "quality": {
+        "latencyMs": 5,
+        "jitterMs": 4.7,
+        "packetLossPct": 0,
+        "score": 98,
+        "grade": "unknown",
+        "samples": 4
+      },
+      "bandwidth": {
+        "rxBps": 0,
+        "txBps": 0,
+        "share": 0,
+        "connections": 0,
+        "attributable": false,
+        "estimated": true
+      },
+      "rttHistory": [
+        5,
+        3,
+        9,
+        3
+      ],
+      "isGateway": false,
+      "isSelf": false,
+      "displayName": null,
+      "ipConflict": false
+    },
+    {
+      "id": "dev-192.168.2.75",
+      "ip": "192.168.2.75",
+      "mac": "48-5f-08-41-51-a6",
+      "hostname": null,
+      "vendor": null,
+      "osHint": "监控摄像固件 (RTSP)",
+      "kind": "camera",
+      "state": "online",
+      "firstSeen": 1792931480534,
+      "lastSeen": 1792933226200,
+      "openPorts": [
+        80,
+        554
+      ],
+      "quality": {
+        "latencyMs": 5.8,
+        "jitterMs": 7.7,
+        "packetLossPct": 0,
+        "score": 97,
+        "grade": "unknown",
+        "samples": 4
+      },
+      "bandwidth": {
+        "rxBps": 0,
+        "txBps": 0,
+        "share": 0,
+        "connections": 0,
+        "attributable": false,
+        "estimated": true
+      },
+      "rttHistory": [
+        2,
+        4,
+        14,
+        3
+      ],
+      "isGateway": false,
+      "isSelf": false,
+      "displayName": null,
+      "ipConflict": false
+    },
+    {
+      "id": "dev-192.168.2.76",
+      "ip": "192.168.2.76",
+      "mac": "e4-67-1e-11-ad-c8",
+      "hostname": null,
+      "vendor": null,
+      "osHint": null,
+      "kind": "unknown",
+      "state": "online",
+      "firstSeen": 1792931480534,
+      "lastSeen": 1792933226200,
+      "openPorts": [
+        80
+      ],
+      "quality": {
+        "latencyMs": 1.5,
+        "jitterMs": 4,
+        "packetLossPct": 0,
+        "score": 99,
+        "grade": "unknown",
+        "samples": 4
+      },
+      "bandwidth": {
+        "rxBps": 0,
+        "txBps": 0,
+        "share": 0,
+        "connections": 0,
+        "attributable": false,
+        "estimated": true
+      },
+      "rttHistory": [
+        0,
+        0,
+        6,
+        0
+      ],
+      "isGateway": false,
+      "isSelf": false,
+      "displayName": null,
+      "ipConflict": false
+    },
+    {
+      "id": "dev-192.168.2.85",
+      "ip": "192.168.2.85",
+      "mac": "48-5f-08-41-62-65",
+      "hostname": null,
+      "vendor": null,
+      "osHint": "监控摄像固件 (RTSP)",
+      "kind": "camera",
+      "state": "online",
+      "firstSeen": 1792931480534,
+      "lastSeen": 1792933226200,
+      "openPorts": [
+        80,
+        554
+      ],
+      "quality": {
+        "latencyMs": 5,
+        "jitterMs": 5.3,
+        "packetLossPct": 0,
+        "score": 98,
+        "grade": "unknown",
+        "samples": 4
+      },
+      "bandwidth": {
+        "rxBps": 0,
+        "txBps": 0,
+        "share": 0,
+        "connections": 0,
+        "attributable": false,
+        "estimated": true
+      },
+      "rttHistory": [
+        2,
+        3,
+        11,
+        4
+      ],
+      "isGateway": false,
+      "isSelf": false,
+      "displayName": null,
+      "ipConflict": false
+    },
+    {
+      "id": "dev-192.168.2.104",
+      "ip": "192.168.2.104",
+      "mac": "58-b3-8f-5f-b4-21",
+      "hostname": "S1224_B421.lan",
+      "vendor": null,
+      "osHint": null,
+      "kind": "unknown",
+      "state": "online",
+      "firstSeen": 1792931480534,
+      "lastSeen": 1792933226200,
+      "openPorts": [],
+      "quality": {
+        "latencyMs": 3.8,
+        "jitterMs": 7.3,
+        "packetLossPct": 0,
+        "score": 98,
+        "grade": "unknown",
+        "samples": 4
+      },
+      "bandwidth": {
+        "rxBps": 0,
+        "txBps": 0,
+        "share": 0,
+        "connections": 0,
+        "attributable": false,
+        "estimated": true
+      },
+      "rttHistory": [
+        1,
+        1,
+        12,
+        1
+      ],
+      "isGateway": false,
+      "isSelf": false,
+      "displayName": "S1224_B421.lan",
+      "ipConflict": false
+    },
+    {
+      "id": "dev-192.168.2.112",
+      "ip": "192.168.2.112",
+      "mac": "64-f0-ad-73-00-cf",
+      "hostname": "Tmall-Genie.lan",
+      "vendor": null,
+      "osHint": "嵌入式/网络设备固件（TTL 弱提示）",
+      "kind": "unknown",
+      "state": "online",
+      "firstSeen": 1792931480534,
+      "lastSeen": 1792933226200,
+      "openPorts": [],
+      "quality": {
+        "latencyMs": 2.5,
+        "jitterMs": 2,
+        "packetLossPct": 0,
+        "score": 99,
+        "grade": "unknown",
+        "samples": 4
+      },
+      "bandwidth": {
+        "rxBps": 0,
+        "txBps": 0,
+        "share": 0,
+        "connections": 0,
+        "attributable": false,
+        "estimated": true
+      },
+      "rttHistory": [
+        2,
+        3,
+        1,
+        4
+      ],
+      "isGateway": false,
+      "isSelf": false,
+      "displayName": "Tmall-Genie.lan",
+      "ipConflict": false
+    },
+    {
+      "id": "dev-192.168.2.148",
+      "ip": "192.168.2.148",
+      "mac": "90-0a-75-02-53-b0",
+      "hostname": "MiniS1506FX-0253B0.lan",
+      "vendor": null,
+      "osHint": null,
+      "kind": "unknown",
+      "state": "online",
+      "firstSeen": 1792931480534,
+      "lastSeen": 1792933226200,
+      "openPorts": [
+        80
+      ],
+      "quality": {
+        "latencyMs": 14,
+        "jitterMs": 7.7,
+        "packetLossPct": 0,
+        "score": 97,
+        "grade": "unknown",
+        "samples": 4
+      },
+      "bandwidth": {
+        "rxBps": 0,
+        "txBps": 0,
+        "share": 0,
+        "connections": 0,
+        "attributable": false,
+        "estimated": true
+      },
+      "rttHistory": [
+        23,
+        25,
+        4,
+        4
+      ],
+      "isGateway": false,
+      "isSelf": false,
+      "displayName": "MiniS1506FX-0253B0.lan",
+      "ipConflict": false
+    },
+    {
+      "id": "dev-192.168.2.170",
+      "ip": "192.168.2.170",
+      "mac": "8c-52-19-21-be-d0",
+      "hostname": null,
+      "vendor": null,
+      "osHint": "打印机固件",
+      "kind": "printer",
+      "state": "online",
+      "firstSeen": 1792931480534,
+      "lastSeen": 1792933226200,
+      "openPorts": [
+        80,
+        443,
+        515,
+        631,
+        9100
+      ],
+      "quality": {
+        "latencyMs": 3.3,
+        "jitterMs": 8.3,
+        "packetLossPct": 0,
+        "score": 97,
+        "grade": "unknown",
+        "samples": 4
+      },
+      "bandwidth": {
+        "rxBps": 0,
+        "txBps": 0,
+        "share": 0,
+        "connections": 0,
+        "attributable": false,
+        "estimated": true
+      },
+      "rttHistory": [
+        1,
+        0,
+        12,
+        0
+      ],
+      "isGateway": false,
+      "isSelf": false,
+      "displayName": null,
+      "ipConflict": false
+    },
+    {
+      "id": "dev-192.168.2.175",
+      "ip": "192.168.2.175",
+      "mac": "e4-67-1e-11-98-51",
+      "hostname": null,
+      "vendor": null,
+      "osHint": null,
+      "kind": "unknown",
+      "state": "online",
+      "firstSeen": 1792931480534,
+      "lastSeen": 1792933226200,
+      "openPorts": [
+        80
+      ],
+      "quality": {
+        "latencyMs": 0,
+        "jitterMs": 0,
+        "packetLossPct": 0,
+        "score": 100,
+        "grade": "unknown",
+        "samples": 4
+      },
+      "bandwidth": {
+        "rxBps": 0,
+        "txBps": 0,
+        "share": 0,
+        "connections": 0,
+        "attributable": false,
+        "estimated": true
+      },
+      "rttHistory": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "isGateway": false,
+      "isSelf": false,
+      "displayName": null,
+      "ipConflict": false
+    },
+    {
+      "id": "dev-192.168.2.176",
+      "ip": "192.168.2.176",
+      "mac": "48-5f-08-41-53-ac",
+      "hostname": null,
+      "vendor": null,
+      "osHint": "监控摄像固件 (RTSP)",
+      "kind": "camera",
+      "state": "online",
+      "firstSeen": 1792931480534,
+      "lastSeen": 1792933226200,
+      "openPorts": [
+        80,
+        554
+      ],
+      "quality": {
+        "latencyMs": null,
+        "jitterMs": null,
+        "packetLossPct": 0,
+        "score": 0,
+        "grade": "unknown",
+        "samples": 0
+      },
+      "bandwidth": {
+        "rxBps": 0,
+        "txBps": 0,
+        "share": 0,
+        "connections": 0,
+        "attributable": false,
+        "estimated": true
+      },
+      "rttHistory": [],
+      "isGateway": false,
+      "isSelf": false,
+      "displayName": null,
+      "ipConflict": false
+    },
+    {
+      "id": "dev-192.168.2.178",
+      "ip": "192.168.2.178",
+      "mac": "e4-67-1e-11-a8-37",
+      "hostname": null,
+      "vendor": null,
+      "osHint": null,
+      "kind": "unknown",
+      "state": "online",
+      "firstSeen": 1792931480534,
+      "lastSeen": 1792933226200,
+      "openPorts": [
+        80
+      ],
+      "quality": {
+        "latencyMs": null,
+        "jitterMs": null,
+        "packetLossPct": 0,
+        "score": 0,
+        "grade": "unknown",
+        "samples": 0
+      },
+      "bandwidth": {
+        "rxBps": 0,
+        "txBps": 0,
+        "share": 0,
+        "connections": 0,
+        "attributable": false,
+        "estimated": true
+      },
+      "rttHistory": [],
+      "isGateway": false,
+      "isSelf": false,
+      "displayName": null,
+      "ipConflict": false
+    },
+    {
+      "id": "dev-192.168.2.196",
+      "ip": "192.168.2.196",
+      "mac": "48-5f-08-41-52-f2",
+      "hostname": "IPC.lan",
+      "vendor": null,
+      "osHint": "监控摄像固件 (RTSP)",
+      "kind": "camera",
+      "state": "online",
+      "firstSeen": 1792931480534,
+      "lastSeen": 1792933226200,
+      "openPorts": [
+        80,
+        554
+      ],
+      "quality": {
+        "latencyMs": null,
+        "jitterMs": null,
+        "packetLossPct": 0,
+        "score": 0,
+        "grade": "unknown",
+        "samples": 0
+      },
+      "bandwidth": {
+        "rxBps": 0,
+        "txBps": 0,
+        "share": 0,
+        "connections": 0,
+        "attributable": false,
+        "estimated": true
+      },
+      "rttHistory": [],
+      "isGateway": false,
+      "isSelf": false,
+      "displayName": "IPC.lan",
+      "ipConflict": false
+    },
+    {
+      "id": "dev-192.168.2.205",
+      "ip": "192.168.2.205",
+      "mac": "00-e0-4c-3d-14-84",
+      "hostname": "pc01.lan",
+      "vendor": "Realtek",
+      "osHint": "Windows (SMB)",
+      "kind": "workstation",
+      "state": "online",
+      "firstSeen": 1792931480534,
+      "lastSeen": 1792933226200,
+      "openPorts": [
+        445
+      ],
+      "quality": {
+        "latencyMs": null,
+        "jitterMs": null,
+        "packetLossPct": 0,
+        "score": 0,
+        "grade": "unknown",
+        "samples": 0
+      },
+      "bandwidth": {
+        "rxBps": 0,
+        "txBps": 0,
+        "share": 0,
+        "connections": 0,
+        "attributable": false,
+        "estimated": true
+      },
+      "rttHistory": [],
+      "isGateway": false,
+      "isSelf": false,
+      "displayName": "pc01.lan",
+      "ipConflict": false
+    },
+    {
+      "id": "dev-192.168.2.228",
+      "ip": "192.168.2.228",
+      "mac": "e4-67-1e-11-96-e4",
+      "hostname": null,
+      "vendor": null,
+      "osHint": null,
+      "kind": "unknown",
+      "state": "online",
+      "firstSeen": 1792931480534,
+      "lastSeen": 1792933226200,
+      "openPorts": [
+        80
+      ],
+      "quality": {
+        "latencyMs": null,
+        "jitterMs": null,
+        "packetLossPct": 0,
+        "score": 0,
+        "grade": "unknown",
+        "samples": 0
+      },
+      "bandwidth": {
+        "rxBps": 0,
+        "txBps": 0,
+        "share": 0,
+        "connections": 0,
+        "attributable": false,
+        "estimated": true
+      },
+      "rttHistory": [],
+      "isGateway": false,
+      "isSelf": false,
+      "displayName": null,
+      "ipConflict": false
+    },
+    {
+      "id": "dev-192.168.2.235",
+      "ip": "192.168.2.235",
+      "mac": "9c-93-4e-9c-6a-76",
+      "hostname": "XRX9C934E9C6A76.lan",
+      "vendor": "Xerox",
+      "osHint": "打印机固件",
+      "kind": "printer",
+      "state": "online",
+      "firstSeen": 1792931480534,
+      "lastSeen": 1792933226200,
+      "openPorts": [
+        80,
+        443,
+        515,
+        631,
+        9100
+      ],
+      "quality": {
+        "latencyMs": null,
+        "jitterMs": null,
+        "packetLossPct": 0,
+        "score": 0,
+        "grade": "unknown",
+        "samples": 0
+      },
+      "bandwidth": {
+        "rxBps": 0,
+        "txBps": 0,
+        "share": 0,
+        "connections": 0,
+        "attributable": false,
+        "estimated": true
+      },
+      "rttHistory": [],
+      "isGateway": false,
+      "isSelf": false,
+      "displayName": "XRX9C934E9C6A76.lan",
+      "ipConflict": false
+    },
+    {
+      "id": "dev-192.168.2.237",
+      "ip": "192.168.2.237",
+      "mac": "60-3a-7c-c5-26-3f",
+      "hostname": "TL-IPC42C-4.lan",
+      "vendor": null,
+      "osHint": "监控摄像固件 (RTSP)",
+      "kind": "camera",
+      "state": "online",
+      "firstSeen": 1792931480534,
+      "lastSeen": 1792933226200,
+      "openPorts": [
+        80,
+        554
+      ],
+      "quality": {
+        "latencyMs": null,
+        "jitterMs": null,
+        "packetLossPct": 0,
+        "score": 0,
+        "grade": "unknown",
+        "samples": 0
+      },
+      "bandwidth": {
+        "rxBps": 0,
+        "txBps": 0,
+        "share": 0,
+        "connections": 0,
+        "attributable": false,
+        "estimated": true
+      },
+      "rttHistory": [],
+      "isGateway": false,
+      "isSelf": false,
+      "displayName": "TL-IPC42C-4.lan",
+      "ipConflict": false
+    }
+  ],
+  "printers": [
+    {
+      "id": "prn-192.168.2.235",
+      "name": "Xerox AltaLink C8055 (9C:93:4E:9C:6A:76)",
+      "alias": null,
+      "model": "Xerox AltaLink C8055",
+      "ip": "192.168.2.235",
+      "mac": "9c-93-4e-9c-6a-76",
+      "connection": "network",
+      "state": "idle",
+      "stateDetail": "spooler=Normal · win32=Idle · sysDescr: Xerox AltaLink C8055; SS 103.002.042.33200, NC 103.002.33200, UI 103.002.33200,  · Select Services to scan your job. Reorder Cyan Toner (C) but DO NOT replace until prompted. Some settings are monitored for setting changes.",
+      "isDefault": true,
+      "shared": false,
+      "manual": false,
+      "pageCount": 17773,
+      "consumables": [
+        {
+          "kind": "black",
+          "label": "Black Toner, PN 006R01509;SN0000000000000000",
+          "levelPct": null,
+          "maxCapacity": -2,
+          "current": null,
+          "source": "snmp"
+        },
+        {
+          "kind": "cyan",
+          "label": "Cyan Toner, PN 006R01512;SN0000000000000000",
+          "levelPct": null,
+          "maxCapacity": -2,
+          "current": null,
+          "source": "snmp"
+        },
+        {
+          "kind": "magenta",
+          "label": "Magenta Toner, PN 006R01511;SN0000000000000000",
+          "levelPct": null,
+          "maxCapacity": null,
+          "current": null,
+          "source": "snmp"
+        },
+        {
+          "kind": "yellow",
+          "label": "Yellow Toner, PN 006R01510;SN0000000000000000",
+          "levelPct": null,
+          "maxCapacity": null,
+          "current": null,
+          "source": "snmp"
+        },
+        {
+          "kind": "drum",
+          "label": "Drum Cartridge (R1), PN 013R00662;SN0000000000000000",
+          "levelPct": null,
+          "maxCapacity": null,
+          "current": null,
+          "source": "snmp"
+        },
+        {
+          "kind": "drum",
+          "label": "Drum Cartridge (R2), PN 013R00662;SN0000000000000000",
+          "levelPct": null,
+          "maxCapacity": null,
+          "current": null,
+          "source": "snmp"
+        },
+        {
+          "kind": "drum",
+          "label": "Drum Cartridge (R3), PN 013R00662;SN0000000000000000",
+          "levelPct": null,
+          "maxCapacity": null,
+          "current": null,
+          "source": "snmp"
+        },
+        {
+          "kind": "drum",
+          "label": "Drum Cartridge (R4), PN 013R00662;SN0000000000000000",
+          "levelPct": null,
+          "maxCapacity": null,
+          "current": null,
+          "source": "snmp"
+        },
+        {
+          "kind": "other",
+          "label": "Fuser, PN unknown;SNunknown",
+          "levelPct": null,
+          "maxCapacity": null,
+          "current": null,
+          "source": "snmp"
+        },
+        {
+          "kind": "waste",
+          "label": "Waste Toner Container, PN 008R13061;SNunknown",
+          "levelPct": null,
+          "maxCapacity": null,
+          "current": null,
+          "source": "snmp"
+        },
+        {
+          "kind": "other",
+          "label": "Transfer Belt Cleaner, PN 001R00613;SNunknown",
+          "levelPct": null,
+          "maxCapacity": null,
+          "current": null,
+          "source": "snmp"
+        },
+        {
+          "kind": "other",
+          "label": "Second Bias Transfer Roll, PN 008R13064;SNunknown",
+          "levelPct": null,
+          "maxCapacity": null,
+          "current": null,
+          "source": "snmp"
+        },
+        {
+          "kind": "other",
+          "label": "Fan Filter, PN  ;SNunknown",
+          "levelPct": null,
+          "maxCapacity": null,
+          "current": null,
+          "source": "snmp"
+        }
+      ],
+      "jobs": [],
+      "source": "both",
+      "lastSeen": 1792933222502
+    },
+    {
+      "id": "prn-adobe-pdf",
+      "name": "Adobe PDF",
+      "alias": null,
+      "model": "Adobe PDF Converter",
+      "ip": null,
+      "mac": null,
+      "connection": "virtual",
+      "state": "idle",
+      "stateDetail": "spooler=Normal · win32=Idle",
+      "isDefault": false,
+      "shared": false,
+      "manual": false,
+      "pageCount": null,
+      "consumables": [],
+      "jobs": [],
+      "source": "spooler",
+      "lastSeen": 1792933222502
+    },
+    {
+      "id": "prn-canon-g3030-series",
+      "name": "Canon G3030 series",
+      "alias": null,
+      "model": null,
+      "ip": null,
+      "mac": null,
+      "connection": "network",
+      "state": "idle",
+      "stateDetail": "spooler=Normal · win32=Idle",
+      "isDefault": false,
+      "shared": false,
+      "manual": false,
+      "pageCount": null,
+      "consumables": [],
+      "jobs": [],
+      "source": "spooler",
+      "lastSeen": 1792933222502
+    },
+    {
+      "id": "prn-fax",
+      "name": "Fax",
+      "alias": null,
+      "model": null,
+      "ip": null,
+      "mac": null,
+      "connection": "virtual",
+      "state": "idle",
+      "stateDetail": "spooler=Normal · win32=Idle",
+      "isDefault": false,
+      "shared": false,
+      "manual": false,
+      "pageCount": null,
+      "consumables": [],
+      "jobs": [],
+      "source": "spooler",
+      "lastSeen": 1792933222502
+    },
+    {
+      "id": "prn-192.168.2.213",
+      "name": "MF750C Series",
+      "alias": null,
+      "model": "Canon Generic Plus PCL6",
+      "ip": "192.168.2.213",
+      "mac": null,
+      "connection": "network",
+      "state": "offline",
+      "stateDetail": "spooler=Normal · win32=Idle · 网络探活失败 9100/631/515",
+      "isDefault": false,
+      "shared": false,
+      "manual": false,
+      "pageCount": null,
+      "consumables": [],
+      "jobs": [],
+      "source": "spooler",
+      "lastSeen": 1792933222502
+    },
+    {
+      "id": "prn-microsoft-print-to-pdf",
+      "name": "Microsoft Print to PDF",
+      "alias": null,
+      "model": null,
+      "ip": null,
+      "mac": null,
+      "connection": "virtual",
+      "state": "idle",
+      "stateDetail": "spooler=Normal · win32=Idle",
+      "isDefault": false,
+      "shared": false,
+      "manual": false,
+      "pageCount": null,
+      "consumables": [],
+      "jobs": [],
+      "source": "spooler",
+      "lastSeen": 1792933222502
+    },
+    {
+      "id": "prn-microsoft-xps-document-writer",
+      "name": "Microsoft XPS Document Writer",
+      "alias": null,
+      "model": null,
+      "ip": null,
+      "mac": null,
+      "connection": "virtual",
+      "state": "idle",
+      "stateDetail": "spooler=Normal · win32=Idle",
+      "isDefault": false,
+      "shared": false,
+      "manual": false,
+      "pageCount": null,
+      "consumables": [],
+      "jobs": [],
+      "source": "spooler",
+      "lastSeen": 1792933222502
+    },
+    {
+      "id": "prn-192.168.2.170",
+      "name": "SHARP MX-B4621R PCL6",
+      "alias": null,
+      "model": "SHARP MX-B4621R PCL6",
+      "ip": "192.168.2.170",
+      "mac": "8c-52-19-21-be-d0",
+      "connection": "network",
+      "state": "idle",
+      "stateDetail": "spooler=Normal · win32=Idle · sysDescr: SHARP MX-B4621R · hrDeviceStatus:2",
+      "isDefault": false,
+      "shared": false,
+      "manual": false,
+      "pageCount": 117483,
+      "consumables": [
+        {
+          "kind": "black",
+          "label": "Black Toner",
+          "levelPct": 75,
+          "maxCapacity": 100,
+          "current": 75,
+          "source": "snmp"
+        },
+        {
+          "kind": "waste",
+          "label": "Waste Toner",
+          "levelPct": null,
+          "maxCapacity": -2,
+          "current": 100,
+          "source": "snmp"
+        },
+        {
+          "kind": "drum",
+          "label": "Black Photoconductive Drum",
+          "levelPct": null,
+          "maxCapacity": -2,
+          "current": 33,
+          "source": "snmp"
+        },
+        {
+          "kind": "black",
+          "label": "Black Developer",
+          "levelPct": null,
+          "maxCapacity": -2,
+          "current": 67,
+          "source": "snmp"
+        },
+        {
+          "kind": "other",
+          "label": "Fusing Unit",
+          "levelPct": null,
+          "maxCapacity": -2,
+          "current": -2,
+          "source": "snmp"
+        }
+      ],
+      "jobs": [],
+      "source": "both",
+      "lastSeen": 1792933222502
+    }
+  ],
+  "alarms": [
+    {
+      "id": "alm-mvnsa2s4-3",
+      "severity": "critical",
+      "code": "DEVICE_OFFLINE",
+      "targetType": "device",
+      "targetId": "dev-192.168.2.45",
+      "targetName": "iPhone.lan",
+      "message": "设备离线：iPhone.lan",
+      "detail": "IP 192.168.2.45 · MAC fe-a8-1b-80-67-a3 · ARP 连续 3 轮缺席且 ICMP 无响应",
+      "raisedAt": 1792930083988,
+      "ackAt": null,
+      "ackBy": null,
+      "resolvedAt": null,
+      "lastRaisedAt": 1792930083988,
+      "occurrences": 1,
+      "trace": [
+        {
+          "at": 1792930083988,
+          "type": "raised",
+          "by": null
+        }
+      ]
+    },
+    {
+      "id": "alm-mvns9tc5-2",
+      "severity": "warning",
+      "code": "NET_QUALITY",
+      "targetType": "device",
+      "targetId": "dev-192.168.2.196",
+      "targetName": "IPC.lan",
+      "message": "网络质量劣化：IPC.lan",
+      "detail": "延迟 19.1 ms · 丢包 50.0% · 抖动 34.1 ms · 评分 29",
+      "raisedAt": 1792930071749,
+      "ackAt": null,
+      "ackBy": null,
+      "resolvedAt": 1792931491618,
+      "lastRaisedAt": 1792930071749,
+      "occurrences": 1,
+      "trace": [
+        {
+          "at": 1792930071749,
+          "type": "raised",
+          "by": null
+        },
+        {
+          "at": 1792931491618,
+          "type": "resolved",
+          "by": null
+        }
+      ]
+    },
+    {
+      "id": "alm-mvns7kb2-1",
+      "severity": "info",
+      "code": "DEVICE_NEW",
+      "targetType": "device",
+      "targetId": "dev-192.168.2.45",
+      "targetName": "iPhone.lan",
+      "message": "新设备接入：iPhone.lan",
+      "detail": "IP 192.168.2.45 · MAC fe-a8-1b-80-67-a3 · 厂商 未知",
+      "raisedAt": 1792929966734,
+      "ackAt": 1792929977917,
+      "ackBy": "Administrator",
+      "resolvedAt": 1792929977917,
+      "lastRaisedAt": 1792929966734,
+      "occurrences": 1,
+      "trace": [
+        {
+          "at": 1792929966734,
+          "type": "raised",
+          "by": null
+        },
+        {
+          "at": 1792929977917,
+          "type": "acked",
+          "by": "Administrator"
+        },
+        {
+          "at": 1792929977917,
+          "type": "resolved",
+          "by": null
+        }
+      ]
+    },
+    {
+      "id": "alm-mvnovl9y-1",
+      "severity": "warning",
+      "code": "NET_QUALITY",
+      "targetType": "device",
+      "targetId": "dev-192.168.2.196",
+      "targetName": "IPC.lan",
+      "message": "网络质量劣化：IPC.lan",
+      "detail": "延迟 6.1 ms · 丢包 33.3% · 抖动 4.4 ms · 评分 49",
+      "raisedAt": 1792924369270,
+      "ackAt": 1792924539649,
+      "ackBy": null,
+      "resolvedAt": 1792926587758,
+      "lastRaisedAt": 1792924369270,
+      "occurrences": 1,
+      "trace": [
+        {
+          "at": 1792924369270,
+          "type": "raised",
+          "by": null
+        },
+        {
+          "at": 1792924539649,
+          "type": "acked",
+          "by": null
+        },
+        {
+          "at": 1792926587758,
+          "type": "resolved",
+          "by": null
+        }
+      ]
+    },
+    {
+      "id": "alm-mvnooptv-1",
+      "severity": "warning",
+      "code": "NET_QUALITY",
+      "targetType": "device",
+      "targetId": "dev-192.168.2.196",
+      "targetName": "IPC.lan",
+      "message": "网络质量劣化：IPC.lan",
+      "detail": "延迟 3 ms · 丢包 50.0% · 抖动 2.4 ms · 评分 39",
+      "raisedAt": 1792924048579,
+      "ackAt": null,
+      "ackBy": null,
+      "resolvedAt": 1792924279297,
+      "lastRaisedAt": 1792924048579,
+      "occurrences": 1,
+      "trace": [
+        {
+          "at": 1792924048579,
+          "type": "raised",
+          "by": null
+        },
+        {
+          "at": 1792924279297,
+          "type": "resolved",
+          "by": null
+        }
+      ]
+    },
+    {
+      "id": "alm-mvno0dus-1",
+      "severity": "warning",
+      "code": "NET_QUALITY",
+      "targetType": "device",
+      "targetId": "dev-192.168.2.196",
+      "targetName": "IPC.lan",
+      "message": "网络质量劣化：IPC.lan",
+      "detail": "延迟 4.6 ms · 丢包 43.8% · 抖动 3.9 ms · 评分 39",
+      "raisedAt": 1792922913316,
+      "ackAt": null,
+      "ackBy": null,
+      "resolvedAt": 1792923254813,
+      "lastRaisedAt": 1792922913316,
+      "occurrences": 1,
+      "trace": [
+        {
+          "at": 1792922913316,
+          "type": "raised",
+          "by": null
+        },
+        {
+          "at": 1792923254813,
+          "type": "resolved",
+          "by": null
+        }
+      ]
+    },
+    {
+      "id": "alm-mvnmpuqn-1",
+      "severity": "info",
+      "code": "DEVICE_NEW",
+      "targetType": "device",
+      "targetId": "dev-192.168.2.189",
+      "targetName": "iPhone.lan",
+      "message": "新设备接入：iPhone.lan",
+      "detail": "IP 192.168.2.189 · MAC 82-39-03-43-49-20 · 厂商 未知",
+      "raisedAt": 1792920742367,
+      "ackAt": null,
+      "ackBy": null,
+      "resolvedAt": 1792921342367,
+      "lastRaisedAt": 1792920742367,
+      "occurrences": 1,
+      "trace": [
+        {
+          "at": 1792920742367,
+          "type": "raised",
+          "by": null
+        },
+        {
+          "at": 1792921342367,
+          "type": "resolved",
+          "by": null
+        }
+      ]
+    },
+    {
+      "id": "alm-mvnk0ibf-1",
+      "severity": "critical",
+      "code": "DEVICE_OFFLINE",
+      "targetType": "device",
+      "targetId": "dev-192.168.2.52",
+      "targetName": "computer.lan",
+      "message": "设备离线：computer.lan",
+      "detail": "IP 192.168.2.52 · MAC fc-34-97-bd-87-8d · ARP 连续 3 轮缺席且 ICMP 无响应",
+      "raisedAt": 1792916200635,
+      "ackAt": 1792922889642,
+      "ackBy": null,
+      "resolvedAt": null,
+      "lastRaisedAt": 1792916200635,
+      "occurrences": 1,
+      "trace": [
+        {
+          "at": 1792916200635,
+          "type": "raised",
+          "by": null
+        },
+        {
+          "at": 1792922889642,
+          "type": "acked",
+          "by": null
+        }
+      ]
+    },
+    {
+      "id": "alm-mvnfkwmk-3",
+      "severity": "critical",
+      "code": "DEVICE_OFFLINE",
+      "targetType": "device",
+      "targetId": "dev-192.168.2.213",
+      "targetName": "192.168.2.213",
+      "message": "设备离线：192.168.2.213",
+      "detail": "IP 192.168.2.213 · MAC 未知 · ARP 连续 3 轮缺席且 ICMP 无响应",
+      "raisedAt": 1792908754220,
+      "ackAt": 1792916139357,
+      "ackBy": null,
+      "resolvedAt": null,
+      "lastRaisedAt": 1792908754220,
+      "occurrences": 1,
+      "trace": [
+        {
+          "at": 1792908754220,
+          "type": "raised",
+          "by": null
+        },
+        {
+          "at": 1792916139357,
+          "type": "acked",
+          "by": null
+        }
+      ]
+    },
+    {
+      "id": "alm-mvnfih1e-2",
+      "severity": "info",
+      "code": "DEVICE_NEW",
+      "targetType": "device",
+      "targetId": "dev-192.168.2.213",
+      "targetName": "192.168.2.213",
+      "message": "新设备接入：192.168.2.213",
+      "detail": "IP 192.168.2.213 · MAC 未知 · 厂商 未知",
+      "raisedAt": 1792908640706,
+      "ackAt": null,
+      "ackBy": null,
+      "resolvedAt": 1792909240706,
+      "lastRaisedAt": 1792908640706,
+      "occurrences": 1,
+      "trace": [
+        {
+          "at": 1792908640706,
+          "type": "raised",
+          "by": null
+        },
+        {
+          "at": 1792909240706,
+          "type": "resolved",
+          "by": null
+        }
+      ]
+    },
+    {
+      "id": "alm-mvnfia6j-1",
+      "severity": "info",
+      "code": "DEVICE_NEW",
+      "targetType": "device",
+      "targetId": "dev-192.168.2.52",
+      "targetName": "192.168.2.52",
+      "message": "新设备接入：192.168.2.52",
+      "detail": "IP 192.168.2.52 · MAC fc-34-97-bd-87-8d · 厂商 未知",
+      "raisedAt": 1792908631819,
+      "ackAt": null,
+      "ackBy": null,
+      "resolvedAt": 1792909231819,
+      "lastRaisedAt": 1792908631819,
+      "occurrences": 1,
+      "trace": [
+        {
+          "at": 1792908631819,
+          "type": "raised",
+          "by": null
+        },
+        {
+          "at": 1792909231819,
+          "type": "resolved",
+          "by": null
+        }
+      ]
+    },
+    {
+      "id": "alm-mvn8fszx-1",
+      "severity": "info",
+      "code": "DEVICE_NEW",
+      "targetType": "device",
+      "targetId": "dev-192.168.2.102",
+      "targetName": "iPhone.lan",
+      "message": "新设备接入：iPhone.lan",
+      "detail": "IP 192.168.2.102 · MAC 36-0c-7b-be-1c-55 · 厂商 未知",
+      "raisedAt": 1792896758925,
+      "ackAt": null,
+      "ackBy": null,
+      "resolvedAt": 1792897358925,
+      "lastRaisedAt": 1792896758925,
+      "occurrences": 1,
+      "trace": [
+        {
+          "at": 1792896758925,
+          "type": "raised",
+          "by": null
+        },
+        {
+          "at": 1792897358925,
+          "type": "resolved",
+          "by": null
+        }
+      ]
+    },
+    {
+      "id": "alm-mvn8fszx-2",
+      "severity": "info",
+      "code": "DEVICE_NEW",
+      "targetType": "device",
+      "targetId": "dev-192.168.2.211",
+      "targetName": "computer333.lan",
+      "message": "新设备接入：computer333.lan",
+      "detail": "IP 192.168.2.211 · MAC 00-e0-4c-3c-d0-f3 · 厂商 Realtek",
+      "raisedAt": 1792896758925,
+      "ackAt": null,
+      "ackBy": null,
+      "resolvedAt": 1792897358925,
+      "lastRaisedAt": 1792896758925,
+      "occurrences": 1,
+      "trace": [
+        {
+          "at": 1792896758925,
+          "type": "raised",
+          "by": null
+        },
+        {
+          "at": 1792897358925,
+          "type": "resolved",
+          "by": null
+        }
+      ]
+    },
+    {
+      "id": "alm-mvmm9ho1-k",
+      "severity": "critical",
+      "code": "PRINTER_OFFLINE",
+      "targetType": "printer",
+      "targetId": "prn-192.168.2.213",
+      "targetName": "MF750C Series",
+      "message": "打印机网络不可达：MF750C Series",
+      "detail": "IP 192.168.2.213 · TCP 9100/631/515 均无响应 · spooler 状态 spooler=Normal · win32=Idle · 网络探活失败 9100/631/515",
+      "raisedAt": 1792859512753,
+      "ackAt": 1792916141135,
+      "ackBy": null,
+      "resolvedAt": null,
+      "lastRaisedAt": 1792859512753,
+      "occurrences": 1,
+      "trace": [
+        {
+          "at": 1792859512753,
+          "type": "raised",
+          "by": null
+        },
+        {
+          "at": 1792916141135,
+          "type": "acked",
+          "by": null
+        }
+      ]
+    }
+  ],
+  "system": {
+    "totalDevices": 19,
+    "online": 19,
+    "offline": 0,
+    "degraded": 0,
+    "printers": 8,
+    "printersWithFault": 1,
+    "rxBps": 270737,
+    "txBps": 6200951,
+    "alarmCounts": {
+      "critical": 4,
+      "warning": 0,
+      "info": 0
+    },
+    "scan": {
+      "active": false,
+      "pct": 100,
+      "phase": "idle",
+      "scanned": 0,
+      "total": 0,
+      "startedAt": null
+    },
+    "lastScanAt": 1792933212645,
+    "nextScanInMs": 45340,
+    "autoScan": true,
+    "autoScanIntervalSec": 60
+  },
+  "warnings": []
+}

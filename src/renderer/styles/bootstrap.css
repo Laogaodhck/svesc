@@ -1,0 +1,9 @@
+/* 首帧引导样式（由 index.html 内联迁移至此，规避 vite html-inline-proxy 的构建缺陷）。 */
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: #0a0e13;
+  color: #e7edf5;
+  font-family: 'Segoe UI', 'Microsoft YaHei UI', system-ui, sans-serif;
+}

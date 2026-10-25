@@ -1,0 +1,34 @@
+{
+  "ts": 1792904863075,
+  "phase": "ready",
+  "identity": {
+    "ip": "192.168.2.1",
+    "brand": "generic",
+    "modelHint": null,
+    "upnpFriendlyName": null
+  },
+  "capabilities": {
+    "upnp": false,
+    "openwrt": false,
+    "managementPage": true
+  },
+  "wan": {
+    "ip": null,
+    "totalBytesRx": null,
+    "totalBytesTx": null,
+    "rxBps": null,
+    "txBps": null
+  },
+  "dhcpLeases": [],
+  "wirelessClients": [],
+  "systemBoard": null,
+  "session": {
+    "loggedIn": false,
+    "user": null,
+    "error": null
+  },
+  "lastError": null,
+  "capabilityNotes": [
+    "该路由器不提供 UPnP IGD（WAN 信息与远程重启不可用）"
+  ]
+}
