@@ -53,8 +53,11 @@
 | `discovery/arp.ts` | `arp -a`（GBK）主路径 + `Get-NetNeighbor` 回退 | 双 locale 正则；过滤组播/广播/全零 MAC；解析空 → `[]` + `parseWarning`，不抛错 |
 | `discovery/ping.ts` | `ping -n 1 -w 800` 存活与 RTT；`ping -n 4` 质量采样 | 解析失败不抛错；`<1ms` 记 0；**禁止 `ping -a`** |
 | `discovery/ports.ts` | `net.connect` 探活（700ms/端口），只对候选主机 | 禁止 254×10 全打 |
-| `discovery/oui.ts` | ≥60 条 OUI 前缀表，未命中返回 `null` | 不按概率猜厂商 |
-| `discovery/fingerprint.ts` | 端口优先的 `kind`/`osHint` 推断 | TTL 只作弱提示，绝不单独判 workstation/server |
+| `discovery/oui.ts` | OUI 前缀表（手写主表 + `oui-extended.ts` IEEE 官方数据生成表），未命中返回 `null` | 不按概率猜厂商；`isRandomizedMac` 识别本地管理位 MAC（随机化 Wi-Fi MAC 查不到厂商属预期） |
+| `discovery/oui-extended.ts` | `scripts/build-oui.mjs` 从 IEEE oui.txt 过滤白名单厂商生成（802 条/41 厂商，task-023） | 生成结果入库，原始 10MB 数据不入库；主表优先于扩充表 |
+| `discovery/wsdiscovery.ts` | ONVIF WS-Discovery（UDP 3702）摄像头自报发现：Probe → ProbeMatches Types → ipc/nvr（task-023） | 只认 Types 明确写摄像头类别的响应（Windows WSD/打印不猜）；异常静默 `[]` |
+| `discovery/ssdp-devices.ts` | SSDP `ssdp:all` M-SEARCH + 描述页 deviceType → router/ap/iot 自报发现（task-023） | MediaServer 等拿不准的不定 kind 只给 osHint；异常静默 `[]` |
+| `discovery/fingerprint.ts` | 端口优先的 `kind`/`osHint` 推断：打印机端口 → Windows 管理端口 → 网关（硬事实）→ 自报层（WS-D/SSDP/mDNS）→ 端口 → 主机名 → OUI → TTL 弱提示 | TTL 只作弱提示，绝不单独判 workstation/server；手机厂商 OUI 需"非网关+无管理端口"，osHint 明示推断来源 |
 | `network/quality.ts` | **纯函数**质量评分（公式冻结） | 系数、取整时机不允许改；`samples < QUALITY_MIN_SAMPLES(8)` → `grade='unknown'`（score 保留），`>=8` 才出 85/70/50 分级 |
 | `network/monitor.ts` | 每设备滑窗（20 采样）+ RTT 历史（60 点） | 未响应只算丢包，不产生离线结论；数据源只有 `ping -n 4` 批量采样 |
 | `network/bandwidth.ts` | `netstat -e` 差分 + `netstat -ano` 连接归集 | 不与网卡计数器混算；无归集时 `attributable:false` |

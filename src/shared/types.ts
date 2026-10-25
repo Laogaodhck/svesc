@@ -9,8 +9,11 @@ export type DeviceKind =
   | 'router'
   | 'server'
   | 'mobile'
+  | 'tablet'
   | 'camera'
   | 'iot'
+  | 'ap'
+  | 'switch'
   | 'unknown';
 
 export type LinkState = 'online' | 'offline' | 'degraded' | 'scanning';

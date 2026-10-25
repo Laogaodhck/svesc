@@ -39,9 +39,11 @@ import { readArp, type ArpEntry, type ArpScanResult } from './discovery/arp';
 import { pingSweep, pingQuality } from './discovery/ping';
 import { probeHosts } from './discovery/ports';
 import { inferFingerprint } from './discovery/fingerprint';
-import { lookupVendor } from './discovery/oui';
+import { lookupVendor, isRandomizedMac } from './discovery/oui';
 import { ReverseDnsCache } from './discovery';
 import { discoverMdnsDevices, type MdnsDeviceHint } from './discovery/mdns-devices';
+import { discoverCamerasWsdiscovery, type WsdCameraHint } from './discovery/wsdiscovery';
+import { discoverSsdpDevices, type SsdpDeviceHint } from './discovery/ssdp-devices';
 import { queryNetbiosNames, NBTSTAT_MAX_HOSTS } from './discovery/netbios';
 import { QualityTracker } from './network/monitor';
 import { isDegraded } from './network/quality';
@@ -205,6 +207,10 @@ export class Scheduler {
   private dns: ReverseDnsCache;
   /** mDNS 自报类型提示（task-020）：ip → {name, kind}，phaseFingerprint 每轮刷新。 */
   private mdnsHints = new Map<string, MdnsDeviceHint>();
+  /** task-023：WS-Discovery 摄像头自报（ip → ipc/nvr）。 */
+  private wsdiscoveryHints = new Map<string, WsdCameraHint>();
+  /** task-023：SSDP 设备自报（ip → kind/osHint）。 */
+  private ssdpHints = new Map<string, SsdpDeviceHint>();
   /**
    * 路由器通道提示（task-022 C-1）：DHCP 租约 hostname 回填。
    * 内存态不持久化；主进程在路由器状态推送回调里每轮重灌，未登录时为空数组（不猜）。
@@ -706,18 +712,30 @@ export class Scheduler {
   }
 
   /**
-   * 设备身份增强（task-020，全部为尽力而为的增强路径）：
-   *  ① mDNS 类型侦测（1s 窗口）：自报服务 → iot/mobile 提示；
-   *  ② NetBIOS 名采集（≤8 台/轮，轮转覆盖）：回填 hostname，进入既有主机名指纹管线。
+   * 设备身份增强（task-020/023，全部为尽力而为的增强路径）：
+   *  ① mDNS 类型侦测（1s 窗口）：自报服务 → iot/mobile/printer/camera 提示；
+   *  ② WS-Discovery 摄像头自报（1.2s 窗口，task-023）：ONVIF Types → ipc/nvr；
+   *  ③ SSDP 设备自报（1.5s 窗口，task-023）：UPnP deviceType → router/ap/iot；
+   *  ④ NetBIOS 名采集（≤8 台/轮，轮转覆盖）：回填 hostname，进入既有主机名指纹管线。
+   * ①②③④ 四路并行（总耗时≈最长一路而非相加，保住 phaseFingerprint 1.6s 旅标）；
    * 任何一步失败静默跳过，绝不拖垮扫描。
    */
   private async augmentDeviceIdentity(): Promise<void> {
-    try {
-      const hints = await discoverMdnsDevices();
-      for (const hint of hints) this.mdnsHints.set(hint.ip, hint);
-    } catch {
-      /* 增强路径失败静默 */
-    }
+    // nbtstat 与三个侦测窗口并行（都只写 hostname/hints，互不依赖）：
+    // 总耗时 ≈ max(1.0, 1.2, 1.5, nbtstat) 而非相加，保住 phaseFingerprint ≤1.6s 旅标
+    const [mdnsHints, wsdHints, ssdpHints, _nbt] = await Promise.all([
+      discoverMdnsDevices().catch(() => [] as MdnsDeviceHint[]),
+      discoverCamerasWsdiscovery().catch(() => [] as WsdCameraHint[]),
+      discoverSsdpDevices().catch(() => [] as SsdpDeviceHint[]),
+      this.queryNetbiosNamesForCandidates().catch(() => undefined),
+    ]);
+    for (const hint of mdnsHints) this.mdnsHints.set(hint.ip, hint);
+    for (const hint of wsdHints) this.wsdiscoveryHints.set(hint.ip, hint);
+    for (const hint of ssdpHints) this.ssdpHints.set(hint.ip, hint);
+  }
+
+  /** nbtstat 名采集（≤8 台/轮，轮转覆盖；失败静默）。独立方法便于与侦测窗口并行。 */
+  private async queryNetbiosNamesForCandidates(): Promise<void> {
     try {
       const candidates = Array.from(this.records.values())
         .filter((r) => r.arpPresent && !r.hostname)
@@ -882,14 +900,21 @@ export class Scheduler {
       const isSelf = this.cfg.selfIp !== null && rec.ip === this.cfg.selfIp;
       const isGateway = this.cfg.gateway !== null && rec.ip === this.cfg.gateway;
       const quality = this.tracker.quality(rec.ip);
-      const vendor = lookupVendor(rec.mac);
       // task-020：mDNS 自报类型（上轮 phaseFingerprint 采集）作为指纹输入；
       // mDNS 实例名（如"客厅的 Chromecast"）在无主机名时兜底显示名
       const mdnsHint = this.mdnsHints.get(rec.ip) ?? null;
+      // task-023：WS-Discovery / SSDP 自报身份（上轮 phaseFingerprint 采集）
+      const wsdHint = this.wsdiscoveryHints.get(rec.ip) ?? null;
+      const ssdpHint = this.ssdpHints.get(rec.ip) ?? null;
       // task-022 C-1：设备自身 hostname 为空时用 DHCP 租约自报回填（单点回填，
       // 同时服务指纹管线与展示）。不覆盖 rDNS/mDNS 已有值，不 mutate 记录。
       const leaseHostname = rec.hostname === null ? this.leaseHostnameByMac(rec.mac) : null;
       const effectiveHostname = rec.hostname ?? leaseHostname;
+      // task-023：OUI 查不到时，本地管理位 MAC（安卓 10+/iOS 14+ 默认随机化）给出诚实
+      // 标签——绝不猜厂商
+      const lookedUpVendor = lookupVendor(rec.mac);
+      const vendor =
+        lookedUpVendor ?? (rec.mac !== null && isRandomizedMac(rec.mac) ? '随机 MAC（厂商不可判）' : null);
       const fingerprint = inferFingerprint({
         openPorts: rec.openPorts,
         hostname: effectiveHostname,
@@ -897,6 +922,9 @@ export class Scheduler {
         ttl: rec.ttl,
         isGateway,
         mdnsKind: mdnsHint?.kind ?? null,
+        wsdiscoveryKind: wsdHint?.kind ?? null,
+        ssdpKind: ssdpHint?.kind ?? null,
+        ssdpOsHint: ssdpHint?.osHint ?? null,
       });
       const state = resolveLinkState({
         isSelf,
@@ -914,7 +942,7 @@ export class Scheduler {
         hostname: effectiveHostname,
         vendor,
         osHint: fingerprint.osHint,
-        kind: isGateway ? 'router' : fingerprint.kind,
+        kind: fingerprint.kind,
         state,
         firstSeen: rec.firstSeen,
         lastSeen: rec.lastSeen,

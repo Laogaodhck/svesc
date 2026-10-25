@@ -129,7 +129,9 @@ console.log(`  printers > 0           : ${snapshot.printers.length > 0 ? 'PASS' 
 console.log(`  PRINTER_OFFLINE 产生   : ${printerOffline.length > 0 ? `PASS (${printerOffline.map((a) => a.targetName).join(', ')})` : 'FAIL(无离线打印机)'}`);
 assert('扫描 ≤ 预算+2.5s', timings?.total ?? Number.POSITIVE_INFINITY, budget + 2500);
 tripwire('ping ≤ 预算+1.5s', phaseMs('ping(254@64)'), budget + 1500);
-tripwire('hostnames ≤ 1.6s', phaseMs('fingerprint/dns'), 1600);
+// task-023：指纹阶段现在并行跑 4 路增强（mDNS 1s / WS-Discovery 1.2s / SSDP 1.5s+0.6s 描述页 / nbtstat ≤2s），
+// 并行总耗时上限 ≈2.1s，旅标随之从 1.6s 调到 2.6s（仍远小于扫描预算的 1/4）
+tripwire('hostnames ≤ 2.6s', phaseMs('fingerprint/dns'), 2600);
 console.log(`  设备必备键齐全         : ${realDevices.every(hasRequiredKeys) ? 'PASS' : 'FAIL'}`);
 
 fs.mkdirSync(path.dirname(outPath), { recursive: true });

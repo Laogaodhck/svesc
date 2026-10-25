@@ -59,6 +59,111 @@ describe('G. TTL 不得单独决定 kind', () => {
   });
 });
 
+// —— task-023：自报身份层 / 平板/交换机/AP / 随机 MAC 不误判 ——
+
+describe('G. task-023 自报身份层', () => {
+  it('WS-Discovery 自报 NetworkVideoTransmitter → camera + ONVIF 提示', () => {
+    expect(inferFingerprint({ ...base, openPorts: [], wsdiscoveryKind: 'ipc' })).toEqual({
+      osHint: '网络摄像机 (ONVIF)',
+      kind: 'camera',
+    });
+  });
+
+  it('WS-Discovery 自报 NetworkVideoRecorder → camera（NVR）', () => {
+    expect(inferFingerprint({ ...base, openPorts: [], wsdiscoveryKind: 'nvr' })).toEqual({
+      osHint: 'NVR 录像机 (ONVIF)',
+      kind: 'camera',
+    });
+  });
+
+  it('SSDP WLANAccessPointDevice → ap（自报优先于主机名猜测）', () => {
+    expect(
+      inferFingerprint({ ...base, openPorts: [], hostname: 'device-a1', ssdpKind: 'ap', ssdpOsHint: '无线AP (UPnP)' }).kind,
+    ).toBe('ap');
+  });
+
+  it('SSDP IGD → router', () => {
+    expect(inferFingerprint({ ...base, openPorts: [], ssdpKind: 'router', ssdpOsHint: 'UPnP IGD（网关）' }).kind).toBe(
+      'router',
+    );
+  });
+
+  it('SSDP MediaRenderer → iot', () => {
+    expect(inferFingerprint({ ...base, openPorts: [], ssdpKind: 'iot', ssdpOsHint: '投屏/音响 (UPnP)' }).kind).toBe(
+      'iot',
+    );
+  });
+
+  it('SSDP MediaServer（kind=null）只给 osHint 兜底，kind 仍 unknown——不猜', () => {
+    const fp = inferFingerprint({ ...base, openPorts: [], ssdpOsHint: '媒体服务器 (UPnP)' });
+    expect(fp.kind).toBe('unknown');
+    expect(fp.osHint).toBe('媒体服务器 (UPnP)');
+  });
+
+  it('mDNS 自报 camera → camera；printer → printer', () => {
+    expect(inferFingerprint({ ...base, openPorts: [], mdnsKind: 'camera' }).kind).toBe('camera');
+    expect(inferFingerprint({ ...base, openPorts: [], mdnsKind: 'printer' }).kind).toBe('printer');
+  });
+
+  it('自报层让位于硬端口证据：有 445 时仍判 Windows workstation', () => {
+    expect(inferFingerprint({ ...base, openPorts: [445], wsdiscoveryKind: 'ipc' }).kind).toBe('workstation');
+  });
+});
+
+describe('G. task-023 网关是硬事实', () => {
+  it('isGateway 高于自报与 OUI：Huawei 厂商的网关必须判 router 而非 mobile', () => {
+    const fp = inferFingerprint({ ...base, openPorts: [], vendor: 'Huawei', isGateway: true, mdnsKind: 'iot' });
+    expect(fp.kind).toBe('router');
+  });
+});
+
+describe('G. task-023 主机名新词根', () => {
+  it('ipad/matepad/tablet → tablet（判在 mobile 之前）', () => {
+    for (const h of ['iPad-of-user', 'MatePad-11', 'mi-pad-3', 'living-room-tablet']) {
+      expect(inferFingerprint({ ...base, openPorts: [], hostname: h }).kind, h).toBe('tablet');
+    }
+  });
+
+  it('switch/sw+编号/交换机 → switch', () => {
+    for (const h of ['sw-1', 'switch01', 'core-switch', '交换机-2']) {
+      expect(inferFingerprint({ ...base, openPorts: [], hostname: h }).kind, h).toBe('switch');
+    }
+  });
+
+  it('ap+编号/wireless ap/wap+编号 → ap', () => {
+    for (const h of ['ap-1', 'AP3', 'wireless-ap-2', 'wap-01']) {
+      expect(inferFingerprint({ ...base, openPorts: [], hostname: h }).kind, h).toBe('ap');
+    }
+  });
+
+  it('手机词根仍判 mobile，不受新词根影响', () => {
+    expect(inferFingerprint({ ...base, openPorts: [], hostname: 'redmi-k60' }).kind).toBe('mobile');
+  });
+});
+
+describe('G. task-023 手机厂商 OUI 推断', () => {
+  it('Samsung OUI + 非网关 + 无管理端口 → mobile（osHint 明示厂商推断）', () => {
+    const fp = inferFingerprint({ ...base, openPorts: [], vendor: 'Samsung', isGateway: false });
+    expect(fp.kind).toBe('mobile');
+    expect(fp.osHint).toContain('OUI 厂商');
+  });
+
+  it('Samsung OUI + 管理端口开放（可能是打印机/设备管理页）→ 不判 mobile', () => {
+    expect(inferFingerprint({ ...base, openPorts: [80], vendor: 'Samsung' }).kind).not.toBe('mobile');
+  });
+
+  it('Huawei OUI 手机（无端口）→ mobile；Huawei ONU（开 80 管理页）→ 网络设备 router', () => {
+    expect(inferFingerprint({ ...base, openPorts: [], vendor: 'Huawei' }).kind).toBe('mobile');
+    expect(inferFingerprint({ ...base, openPorts: [80], vendor: 'Huawei' }).kind).toBe('router');
+  });
+
+  it('网络厂商扩充：Ruijie/Fortinet/Aruba → router', () => {
+    for (const v of ['Ruijie', 'Fortinet', 'Aruba', 'MikroTik']) {
+      expect(inferFingerprint({ ...base, openPorts: [], vendor: v }).kind, v).toBe('router');
+    }
+  });
+});
+
 describe('G. 主机名 / 厂商 / 网关', () => {
   it('主机名 XRX9C934E9C6A76.lan 应判为 printer（本机 .235 实测名）', () => {
     expect(inferFingerprint({ ...base, openPorts: [], hostname: 'XRX9C934E9C6A76.lan' }).kind).toBe(

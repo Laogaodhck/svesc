@@ -129,7 +129,7 @@ export function fmtMac(mac: string | null): string | null {
     .join(':')
 }
 
-/** 设备类型中文名。 */
+/** 设备类型中文名。task-023 新增 tablet/ap/switch。 */
 export const KIND_LABEL: Record<string, string> = {
   workstation: '工作站',
   printer: '打印机',
@@ -137,7 +137,10 @@ export const KIND_LABEL: Record<string, string> = {
   camera: '监控摄像',
   server: '服务器',
   mobile: '手机',
+  tablet: '平板',
   iot: '物联网',
+  ap: '无线AP',
+  switch: '交换机',
   unknown: '未知',
 }
 

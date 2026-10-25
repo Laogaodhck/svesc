@@ -57,7 +57,13 @@ describe('G4. hintsFromHits 服务映射', () => {
     expect(DEVICE_MDNS_SERVICES['_airplay._tcp.local']).toBe('apple');
     expect(DEVICE_MDNS_SERVICES['_raop._tcp.local']).toBe('apple');
     expect(DEVICE_MDNS_SERVICES['_companion._tcp.local']).toBe('mobile');
-    expect(Object.keys(DEVICE_MDNS_SERVICES).length).toBe(9);
+    // task-023 扩充（9 → 17）
+    expect(DEVICE_MDNS_SERVICES['_nvstream._tcp.local']).toBe('workstation');
+    expect(DEVICE_MDNS_SERVICES['_ipp._tcp.local']).toBe('printer');
+    expect(DEVICE_MDNS_SERVICES['_axis-video._tcp.local']).toBe('camera');
+    expect(DEVICE_MDNS_SERVICES['_sleep-proxy._tcp.local']).toBe('apple');
+    expect(DEVICE_MDNS_SERVICES['_googlerpc._tcp.local']).toBe('iot');
+    expect(Object.keys(DEVICE_MDNS_SERVICES).length).toBe(17);
   });
 
   it('超时预算默认 1s（phaseFingerprint 预算内）', () => {

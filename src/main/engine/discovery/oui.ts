@@ -2,7 +2,9 @@
  * OUI（MAC 前缀）厂商表。
  * 只收录常见厂商，未命中一律返回 null —— 不猜、不按概率归类（数据诚实原则）。
  * 键格式统一为小写连字符前 3 段：`00-e0-4c`。
+ * task-023：新增 oui-extended.ts（IEEE 官方数据脚本生成）与 isRandomizedMac。
  */
+import { OUI_EXTENDED } from './oui-extended';
 
 /** ≥60 条常见 OUI 前缀（打印机 / 网络设备 / 终端 / 虚拟化）。 */
 export const OUI_TABLE: Readonly<Record<string, string>> = {
@@ -165,14 +167,25 @@ export function isValidMac(mac: string): boolean {
 
 /**
  * 厂商查询：命中返回厂商名，未命中返回 null（绝不猜）。
+ * 查找顺序：手写主表 → IEEE 扩充表（task-023）→ null。
  */
 export function lookupVendor(mac: string | null | undefined): string | null {
   if (!mac) return null;
   if (!isValidMac(mac)) return null;
   const key = normalizeMac(mac).slice(0, 8);
-  return OUI_TABLE[key] ?? null;
+  return OUI_TABLE[key] ?? OUI_EXTENDED[key] ?? null;
+}
+
+/**
+ * 是否为本地管理/随机化 MAC（task-023）：首字节第二 nibble ∈ {2,6,a,e}
+ * （IEEE 802 本地管理位）。安卓 10+/iOS 14+ 默认按网络随机化 Wi-Fi MAC，
+ * 此类前缀查不到厂商属预期；调用方应展示"随机 MAC"而不是猜厂商。
+ */
+export function isRandomizedMac(mac: string): boolean {
+  if (!isValidMac(mac)) return false;
+  return /^[0-9a-f][26ae]-/.test(normalizeMac(mac));
 }
 
 export function ouiTableSize(): number {
-  return Object.keys(OUI_TABLE).length;
+  return Object.keys(OUI_TABLE).length + Object.keys(OUI_EXTENDED).length;
 }

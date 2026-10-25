@@ -1,7 +1,9 @@
 /** 全局常量：端口表、超时预算、分频、并发、阈值。引擎与测试共用的唯一定义处。 */
 
-/** 端口探测集合（plan.md 第 3 节冻结）。 */
-export const PROBE_PORTS = [22, 80, 443, 445, 515, 631, 9100, 3389, 554, 62078] as const;
+/** 端口探测集合。任务 023 扩充监控/设备私有端口（8000 海康 / 37777,37778 大华 / 8899 ONVIF / 8080 管理页 / 5000 群晖）。 */
+export const PROBE_PORTS = [
+  22, 80, 443, 445, 515, 631, 9100, 3389, 554, 62078, 8000, 37777, 37778, 8899, 8080, 5000,
+] as const;
 
 /** 判定"网络打印机"的端口：9100(JetDirect) / 631(IPP) / 515(LPD)。 */
 export const PRINTER_PORTS = [9100, 631, 515] as const;
@@ -20,6 +22,12 @@ export const PORT_SERVICE: Readonly<Record<number, string>> = {
   3389: 'RDP',
   9100: 'JetDirect',
   62078: 'iPhone Sync',
+  8000: '海康 SDK',
+  37777: '大华 SDK',
+  37778: '大华 代理',
+  8899: 'ONVIF',
+  8080: 'HTTP 备用',
+  5000: '群晖 DSM',
 };
 
 /** 硬超时（毫秒）。实测依据见 investigation-report.md §2.11。 */

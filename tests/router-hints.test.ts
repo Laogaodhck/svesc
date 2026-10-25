@@ -79,10 +79,24 @@ vi.mock('../src/main/engine/printers/mdns', () => ({
   discoverMdnsPrinters: async () => [],
 }));
 
-// augmentDeviceIdentity 的两个真实网络出口（mDNS 侦测窗口 + nbtstat spawn）：替成空桩
+// augmentDeviceIdentity 的真实网络出口（mDNS/WS-Discovery/SSDP 侦测窗口 + nbtstat spawn）：替成空桩
 vi.mock('../src/main/engine/discovery/mdns-devices', () => ({
   discoverMdnsDevices: async () => [],
 }));
+vi.mock('../src/main/engine/discovery/wsdiscovery', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/main/engine/discovery/wsdiscovery')>();
+  return {
+    ...actual,
+    discoverCamerasWsdiscovery: async () => [],
+  };
+});
+vi.mock('../src/main/engine/discovery/ssdp-devices', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/main/engine/discovery/ssdp-devices')>();
+  return {
+    ...actual,
+    discoverSsdpDevices: async () => [],
+  };
+});
 vi.mock('../src/main/engine/discovery/netbios', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/main/engine/discovery/netbios')>();
   return {

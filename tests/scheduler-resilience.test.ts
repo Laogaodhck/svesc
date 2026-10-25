@@ -107,6 +107,23 @@ vi.mock('../src/main/engine/printers/mdns', () => ({
   discoverMdnsPrinters: async () => [],
 }));
 
+// task-023：WS-Discovery / SSDP 是新的网络 IO 出口，测试里同样必须替掉（不碰网络）
+vi.mock('../src/main/engine/discovery/wsdiscovery', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/main/engine/discovery/wsdiscovery')>();
+  return {
+    ...actual,
+    discoverCamerasWsdiscovery: async () => [],
+  };
+});
+
+vi.mock('../src/main/engine/discovery/ssdp-devices', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/main/engine/discovery/ssdp-devices')>();
+  return {
+    ...actual,
+    discoverSsdpDevices: async () => [],
+  };
+});
+
 // 反向 DNS 会 spawn nslookup：测试里必须替掉，否则一轮扫描就是一次真实网络调用
 vi.mock('../src/main/engine/discovery/index', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/main/engine/discovery/index')>();
