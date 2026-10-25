@@ -61,6 +61,15 @@ export const SCHEDULE = {
   fullScan: 60000,
 } as const;
 
+/** 持续 Ping 监控（task-025）：独立 5s 轮询，60 点环形窗口（≈5 分钟）。 */
+export const WATCH = {
+  intervalMs: 5000,
+  windowSize: 60,
+  pingTimeoutMs: 1000,
+  /** 端口扫描单次上限（task-025） */
+  portScanMaxPorts: 1024,
+} as const;
+
 /** 单轮全量子网扫描预算；超预算即用已得结果出快照。 */
 export const SCAN_BUDGET_MS = 10000;
 

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState, type ChangeEvent } from 'react'
 import type { AppSettings, SettingsPayload } from '../../shared/types'
 import { EmptyState } from '../components/atoms/EmptyState'
 import { Icon } from '../components/Icon'
@@ -124,6 +124,18 @@ export function SettingsView({
   const [exportBusy, setExportBusy] = useState(false)
   const [exportPath, setExportPath] = useState<string | null>(null)
 
+  // 告警 Webhook（task-025）
+  const [webhookDraft, setWebhookDraft] = useState('')
+  const [webhookTesting, setWebhookTesting] = useState(false)
+  const [webhookMsg, setWebhookMsg] = useState<string | null>(null)
+  const [webhookTone, setWebhookTone] = useState<'ok' | 'crit'>('ok')
+
+  // 配置导入/导出（task-025）
+  const [cfgBusy, setCfgBusy] = useState(false)
+  const [cfgMsg, setCfgMsg] = useState<string | null>(null)
+  const [cfgTone, setCfgTone] = useState<'ok' | 'crit'>('ok')
+  const cfgFileRef = useRef<HTMLInputElement | null>(null)
+
   const hasApi = typeof window !== 'undefined' && window.lanApi !== undefined
 
   /** 扫描间隔即时校验：输入非法值时就地提示，不等点保存（输入为空不提示） */
@@ -140,6 +152,7 @@ export function SettingsView({
         if (!alive) return
         setSettings(s)
         setIntervalDraft(String(s.autoScanIntervalSec))
+        setWebhookDraft(s.notifyWebhookUrl ?? '')
       })
       .catch((err: unknown) => {
         if (alive) setMsg({ tone: 'crit', text: err instanceof Error ? err.message : String(err) })
@@ -186,6 +199,102 @@ export function SettingsView({
       setExportBusy(false)
     }
   }, [hasApi, exportBusy])
+
+  /* -------- 告警 Webhook（task-025） -------- */
+  const saveWebhook = useCallback(async () => {
+    const url = webhookDraft.trim()
+    if (url && !/^https?:\/\//i.test(url)) {
+      setWebhookMsg('URL 需以 http:// 或 https:// 开头')
+      setWebhookTone('crit')
+      return
+    }
+    await update({ notifyWebhookUrl: url }, url ? 'Webhook 已保存' : 'Webhook 已清空（通知停用）')
+  }, [webhookDraft, update])
+
+  const testWebhook = useCallback(async () => {
+    if (webhookTesting) return
+    const url = webhookDraft.trim()
+    if (!url) {
+      setWebhookMsg('请先填写 Webhook URL')
+      setWebhookTone('crit')
+      return
+    }
+    setWebhookTesting(true)
+    setWebhookMsg(null)
+    try {
+      const res = await window.lanApi.webhookTest(url)
+      if (res.ok) {
+        setWebhookMsg(`测试成功：服务端返回 ${res.status}`)
+        setWebhookTone('ok')
+      } else if (res.status !== null) {
+        setWebhookMsg(`服务端返回 ${res.status}（非 2xx），消息未确认送达`)
+        setWebhookTone('crit')
+      } else {
+        setWebhookMsg(`发送失败：${res.error ?? '未知原因'}`)
+        setWebhookTone('crit')
+      }
+    } catch (err) {
+      setWebhookMsg(err instanceof Error ? err.message : String(err))
+      setWebhookTone('crit')
+    } finally {
+      setWebhookTesting(false)
+    }
+  }, [webhookDraft, webhookTesting])
+
+  /* -------- 配置导入/导出（task-025） -------- */
+  const onConfigExport = useCallback(async () => {
+    if (cfgBusy) return
+    setCfgBusy(true)
+    setCfgMsg(null)
+    try {
+      const res = await window.lanApi.configExport()
+      if (res.ok) {
+        setCfgTone('ok')
+        setCfgMsg(`配置已导出：${res.path ?? '（路径未知）'}`)
+      } else {
+        setCfgTone('crit')
+        setCfgMsg(res.error ?? '导出失败')
+      }
+    } catch (err) {
+      setCfgTone('crit')
+      setCfgMsg(err instanceof Error ? err.message : String(err))
+    } finally {
+      setCfgBusy(false)
+    }
+  }, [cfgBusy])
+
+  const onConfigFile = useCallback(async (e: ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    e.target.value = ''
+    if (!file) return
+    setCfgBusy(true)
+    setCfgMsg(null)
+    try {
+      const text = await file.text()
+      const res = await window.lanApi.configImport(text)
+      if (res.ok) {
+        setCfgTone('ok')
+        setCfgMsg(
+          `导入完成：更新 ${res.imported.length} 项${
+            res.skipped.length > 0 ? `，跳过 ${res.skipped.length} 项（${res.skipped.join('、')}）` : ''
+          }`,
+        )
+        // 导入可能改了扫描间隔等运行时设置：回读对齐
+        const s = await window.lanApi.settingsGet()
+        setSettings(s)
+        setIntervalDraft(String(s.autoScanIntervalSec))
+        setWebhookDraft(s.notifyWebhookUrl ?? '')
+      } else {
+        setCfgTone('crit')
+        setCfgMsg(res.error ?? '导入失败')
+      }
+    } catch (err) {
+      setCfgTone('crit')
+      setCfgMsg(err instanceof Error ? err.message : String(err))
+    } finally {
+      setCfgBusy(false)
+    }
+  }, [])
 
   if (!hasApi) {
     return (
@@ -282,6 +391,41 @@ export function SettingsView({
         </div>
       </div>
 
+      {/* —— 告警 Webhook（task-025） —— */}
+      <div className="card">
+        <div className="card__head">
+          <span className="card__title">告警 Webhook</span>
+          <span className="card__hint">告警产生/恢复时 POST JSON；服务端返回 2xx 才算送达；留空停用</span>
+        </div>
+        <div className="settings-stack">
+          <div className="settings-row">
+            <span className="u-115">Webhook URL</span>
+            <div className="alias-edit">
+              <input
+                className="input alias-edit__input"
+                type="text"
+                placeholder="https://example.com/hook"
+                value={webhookDraft}
+                onChange={(e) => {
+                  setWebhookDraft(e.target.value)
+                  setWebhookMsg(null)
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') void saveWebhook()
+                }}
+              />
+              <button type="button" className="btn btn--ghost btn--sm" disabled={busy} onClick={() => void saveWebhook()}>
+                保存
+              </button>
+              <button type="button" className="btn btn--ghost btn--sm" disabled={webhookTesting} onClick={() => void testWebhook()}>
+                {webhookTesting ? '发送中…' : '发送测试'}
+              </button>
+            </div>
+          </div>
+          {webhookMsg && <div className="u-11" data-tone={webhookTone === 'ok' ? undefined : 'crit'}>{webhookMsg}</div>}
+        </div>
+      </div>
+
       {/* —— 打印机采集 —— */}
       <div className="card">
         <div className="card__head">
@@ -321,7 +465,7 @@ export function SettingsView({
       <div className="card">
         <div className="card__head">
           <span className="card__title">数据</span>
-          <span className="card__hint">导出为 JSON</span>
+          <span className="card__hint">报告导出 / 配置迁移</span>
         </div>
         <div className="settings-stack">
           <div className="settings-row">
@@ -337,6 +481,41 @@ export function SettingsView({
             </button>
           </div>
           {exportPath && <div className="u-11 dim mono">{exportPath}</div>}
+
+          <div className="settings-row">
+            <span className="u-115">导出配置</span>
+            <button
+              type="button"
+              className="btn btn--ghost btn--sm"
+              onClick={() => void onConfigExport()}
+              disabled={cfgBusy}
+              title="设置、别名、备注、标签、监控目标、打印机管理与首次发现时间，打包为一个 JSON 文件"
+            >
+              <Icon name="export" size={13} />
+              导出
+            </button>
+          </div>
+          <div className="settings-row">
+            <span className="u-115">导入配置</span>
+            <button
+              type="button"
+              className="btn btn--ghost btn--sm"
+              onClick={() => cfgFileRef.current?.click()}
+              disabled={cfgBusy}
+              title="选择此前导出的 JSON 配置文件；逐项合并，非法项跳过不会破坏现有配置"
+            >
+              <Icon name="refresh" size={13} />
+              {cfgBusy ? '导入中…' : '选择文件导入'}
+            </button>
+            <input
+              ref={cfgFileRef}
+              type="file"
+              accept=".json,application/json"
+              style={{ display: 'none' }}
+              onChange={(e) => void onConfigFile(e)}
+            />
+          </div>
+          {cfgMsg && <div className="u-11" data-tone={cfgTone === 'ok' ? undefined : 'crit'}>{cfgMsg}</div>}
         </div>
       </div>
 

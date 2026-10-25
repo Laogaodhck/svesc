@@ -118,3 +118,46 @@ export async function openRouterAdminWindow(
   }
   return { ok: true, error: null, url };
 }
+
+/** 打印机管理页分区：与路由器分区隔离，互不串 Cookie/登录态（task-024）。 */
+const PRINTER_PARTITION = 'persist:printer-admin';
+let printerAdminWin: BrowserWindow | null = null;
+
+/**
+ * 用内置浏览器打开打印机 Web 管理页（task-024）。
+ * 打印机管理页的凭据形态各异（Basic 弹窗/表单/免登录），本模块不做任何登录判定
+ * ——Chromium 原生处理 Basic 401 弹窗与表单，窗口只负责展示。
+ * 同一时刻只保留一个窗口：重复调用聚焦并导航到目标打印机。
+ */
+export async function openPrinterAdminWindow(
+  ip: string,
+): Promise<{ ok: boolean; error: string | null; url: string | null }> {
+  const url = `http://${ip}/`;
+  if (!printerAdminWin || printerAdminWin.isDestroyed()) {
+    printerAdminWin = new BrowserWindow({
+      width: 1024,
+      height: 720,
+      title: `打印机管理页 ${ip}（内置浏览器）`,
+      autoHideMenuBar: true,
+      webPreferences: {
+        // 与 openRouterAdminWindow 同级的浏览器安全基线：只给浏览器能力，不给 Node
+        session: electronSession.fromPartition(PRINTER_PARTITION),
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: true,
+      },
+    });
+    printerAdminWin.on('closed', () => {
+      printerAdminWin = null;
+    });
+  }
+  printerAdminWin.focus();
+  try {
+    await printerAdminWin.loadURL(url);
+  } catch (err) {
+    // loadURL 失败（打印机不提供 HTTP 管理页等）：窗口留着展示错误页，原因如实带回
+    const msg = err instanceof Error ? err.message : String(err);
+    return { ok: false, error: `打印机管理页打开失败：${msg}`, url };
+  }
+  return { ok: true, error: null, url };
+}

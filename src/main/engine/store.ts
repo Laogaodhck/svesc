@@ -7,7 +7,7 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
-import type { Alarm, ManualPrinterEntry, PrinterManageConfig } from '../../shared/types';
+import type { Alarm, ManualPrinterEntry, PrinterManageConfig, WatchTarget } from '../../shared/types';
 
 export interface PersistedSettings {
   autoScan: boolean;
@@ -24,6 +24,8 @@ export interface PersistedSettings {
   closeToTray: boolean;
   /** 是否记住路由器登录凭据（task-022 B-1，默认 true；关闭即清盘上凭据并停用自动重登） */
   rememberRouterPassword: boolean;
+  /** 告警 Webhook 推送地址（task-025，默认空 = 停用） */
+  notifyWebhookUrl: string;
 }
 
 export interface PersistedState {
@@ -36,6 +38,12 @@ export interface PersistedState {
   settings: PersistedSettings;
   /** 打印管理页配置：手动添加的打印机 + 被忽略的自动发现条目 */
   printers: { manual: ManualPrinterEntry[]; ignored: string[] };
+  /** 设备备注（key = deviceId，task-025） */
+  deviceNotes: Record<string, string>;
+  /** 设备标签（key = deviceId，task-025；已归一化） */
+  deviceTags: Record<string, string[]>;
+  /** 持续 Ping 监控目标（task-025） */
+  watchList: WatchTarget[];
 }
 
 export const STORE_VERSION = 1;
@@ -57,6 +65,14 @@ export interface PersistStore {
   setPrinterIgnored(printerId: string, ignored: boolean): void;
   setAlarmHistory(alarms: Alarm[], knownDeviceKeys: string[]): void;
   setFirstSeen(map: Record<string, number>): void;
+  // —— 设备备注 / 标签 / 监控目标（task-025，SqliteStore 与 JsonStore 同构实现） ——
+  noteOf(deviceId: string): string | null;
+  setNote(deviceId: string, note: string | null): void;
+  tagsOf(deviceId: string): string[] | null;
+  setTags(deviceId: string, tags: string[] | null): void;
+  watchTargets(): WatchTarget[];
+  addWatchTarget(ip: string, note: string | null): { ok: boolean; error: string | null };
+  removeWatchTarget(ip: string): { ok: boolean };
   /** 退出前同步落盘（SQLite 为 WAL checkpoint + no-op）。 */
   flush(): void;
   /** 设备实时状态同步（task-018 SQLite 扩展；JSON 后端无此能力，可选实现）。 */
@@ -67,14 +83,30 @@ export interface PersistStore {
   getDeviceStatusHistory?(ip: string, limit?: number): { state: string; at: number; latencyMs: number | null }[];
 }
 
+/** 标签归一化（task-025）：trim、去空、去重、每标签 ≤24 字符、≤8 个。接受未知来源数组（导入/磁盘脏数据）。 */
+export function normalizeTags(tags: readonly unknown[] | null | undefined): string[] {
+  if (!Array.isArray(tags)) return [];
+  const out: string[] = [];
+  for (const raw of tags) {
+    if (typeof raw !== 'string') continue;
+    const tag = raw.trim().slice(0, 24);
+    if (tag && !out.includes(tag)) out.push(tag);
+    if (out.length >= 8) break;
+  }
+  return out;
+}
+
 export const defaultState = (): PersistedState => ({
   version: STORE_VERSION,
   aliases: {},
   alarms: [],
   knownDeviceKeys: [],
   firstSeen: {},
-  settings: { autoScan: true, autoScanIntervalSec: 60, showVirtualPrinters: false, snmpEnabled: true, useMdns: false, notifyDesktop: true, closeToTray: true, rememberRouterPassword: true },
+  settings: { autoScan: true, autoScanIntervalSec: 60, showVirtualPrinters: false, snmpEnabled: true, useMdns: false, notifyDesktop: true, closeToTray: true, rememberRouterPassword: true, notifyWebhookUrl: '' },
   printers: { manual: [], ignored: [] },
+  deviceNotes: {},
+  deviceTags: {},
+  watchList: [],
 });
 
 /** 严格 IPv4 校验（每段 0-255，不接受前导零溢出写法由 Number 转换兜底）。 */
@@ -164,7 +196,42 @@ export class JsonStore implements PersistStore {
           notifyDesktop: obj.settings?.notifyDesktop ?? true,
           closeToTray: obj.settings?.closeToTray ?? true,
           rememberRouterPassword: obj.settings?.rememberRouterPassword ?? true,
+          notifyWebhookUrl: typeof obj.settings?.notifyWebhookUrl === 'string' ? obj.settings.notifyWebhookUrl : '',
         },
+        // task-025：备注/标签/监控目标（形状脏数据直接丢弃，不猜）
+        deviceNotes: (() => {
+          const raw = obj.deviceNotes;
+          if (!raw || typeof raw !== 'object') return {};
+          const out: Record<string, string> = {};
+          for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+            if (typeof value === 'string' && value.trim()) out[key] = value.trim().slice(0, 200);
+          }
+          return out;
+        })(),
+        deviceTags: (() => {
+          const raw = obj.deviceTags;
+          if (!raw || typeof raw !== 'object') return {};
+          const out: Record<string, string[]> = {};
+          for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+            if (Array.isArray(value)) {
+              const tags = normalizeTags(value as unknown[]);
+              if (tags.length > 0) out[key] = tags;
+            }
+          }
+          return out;
+        })(),
+        watchList: Array.isArray(obj.watchList)
+          ? obj.watchList
+              .filter(
+                (w): w is WatchTarget =>
+                  typeof w === 'object' && w !== null && isValidIpv4((w as WatchTarget).ip),
+              )
+              .map((w) => ({
+                ip: w.ip,
+                addedAt: typeof w.addedAt === 'number' && w.addedAt > 0 ? w.addedAt : Date.now(),
+                note: typeof w.note === 'string' && w.note.trim() ? w.note.trim().slice(0, 40) : null,
+              }))
+          : [],
         printers: {
           manual: Array.isArray(obj.printers?.manual)
             ? obj.printers.manual.filter(
@@ -263,6 +330,52 @@ export class JsonStore implements PersistStore {
   setFirstSeen(map: Record<string, number>): void {
     this.state.firstSeen = map;
     this.save();
+  }
+
+  // —— 设备备注 / 标签 / 监控目标（task-025） ——
+
+  noteOf(deviceId: string): string | null {
+    return this.state.deviceNotes[deviceId] ?? null;
+  }
+
+  setNote(deviceId: string, note: string | null): void {
+    if (note && note.trim()) this.state.deviceNotes[deviceId] = note.trim().slice(0, 200);
+    else delete this.state.deviceNotes[deviceId];
+    this.save();
+  }
+
+  tagsOf(deviceId: string): string[] | null {
+    return this.state.deviceTags[deviceId] ?? null;
+  }
+
+  setTags(deviceId: string, tags: string[] | null): void {
+    const normalized = normalizeTags(tags as readonly unknown[]);
+    if (normalized.length > 0) this.state.deviceTags[deviceId] = normalized;
+    else delete this.state.deviceTags[deviceId];
+    this.save();
+  }
+
+  watchTargets(): WatchTarget[] {
+    return this.state.watchList.map((w) => ({ ...w }));
+  }
+
+  addWatchTarget(ip: string, note: string | null): { ok: boolean; error: string | null } {
+    const trimmed = String(ip ?? '').trim();
+    if (!isValidIpv4(trimmed)) return { ok: false, error: `IP 地址无效：${ip}` };
+    const cleanNote = note && note.trim() ? note.trim().slice(0, 40) : null;
+    const existing = this.state.watchList.find((w) => w.ip === trimmed);
+    if (existing) existing.note = cleanNote;
+    else this.state.watchList.push({ ip: trimmed, addedAt: Date.now(), note: cleanNote });
+    this.save();
+    return { ok: true, error: null };
+  }
+
+  removeWatchTarget(ip: string): { ok: boolean } {
+    const trimmed = String(ip ?? '').trim();
+    const before = this.state.watchList.length;
+    this.state.watchList = this.state.watchList.filter((w) => w.ip !== trimmed);
+    if (this.state.watchList.length !== before) this.save();
+    return { ok: true };
   }
 
   /** debounce 落盘。 */

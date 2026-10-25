@@ -1,5 +1,5 @@
-import { useEffect, useMemo } from 'react'
-import type { Alarm, Printer } from '../../shared/types'
+import { useEffect, useMemo, useState } from 'react'
+import type { Alarm, PrintJob, PrintJobAction, Printer } from '../../shared/types'
 import { StatusPill } from '../components/atoms/StatusPill'
 import { LevelBar } from '../components/atoms/LevelBar'
 import { Bar } from '../components/atoms/Bar'
@@ -142,12 +142,51 @@ function Supplies({ printer }: { printer: Printer }) {
   )
 }
 
+/** 任务操作文案（task-024）。 */
+const JOB_ACTION_LABEL: Record<PrintJobAction, string> = { cancel: '取消', pause: '暂停', resume: '恢复' }
+
+/**
+ * 按任务自报 status 判定可用操作（数据诚实：状态是 spooler 原文，只做子串匹配）：
+ *  - 含 paus → 提供「恢复」
+ *  - 正在打印/spooling → 提供「暂停」
+ *  - 「取消」恒可用（对已完成的任务下发会得到 spooler 的明确报错，如实透出）
+ */
+function jobActions(job: PrintJob): PrintJobAction[] {
+  const s = job.status.toLowerCase()
+  const acts: PrintJobAction[] = []
+  if (s.includes('paus')) acts.push('resume')
+  else if (s.includes('print') || s.includes('spool')) acts.push('pause')
+  acts.push('cancel')
+  return acts
+}
+
 function PrinterCard({ printer, now, focus }: { printer: Printer; now: number; focus: boolean }) {
   const tone = printerStateTone(printer.state)
   const isFault = printer.state === 'error' || printer.state === 'warning'
   const jobs = printer.jobs
-  const shownJobs = jobs.slice(0, 5)
-  const overflow = jobs.length - shownJobs.length
+  const [expanded, setExpanded] = useState(false)
+  const [confirmJobId, setConfirmJobId] = useState<string | null>(null)
+  const [busyJobId, setBusyJobId] = useState<string | null>(null)
+  const [opError, setOpError] = useState<string | null>(null)
+  const SHOWN_LIMIT = 5
+  const shownJobs = expanded ? jobs : jobs.slice(0, SHOWN_LIMIT)
+  const overflow = expanded ? 0 : Math.max(0, jobs.length - SHOWN_LIMIT)
+
+  /** 任务操作（task-024）：取消带内联确认（破坏性），暂停/恢复直接执行；失败原因如实透出。 */
+  const runJobAction = async (action: PrintJobAction, job: PrintJob): Promise<void> => {
+    if (busyJobId !== null) return
+    setBusyJobId(job.id)
+    setOpError(null)
+    setConfirmJobId(null)
+    try {
+      const res = await window.lanApi.printerJobAction(action, printer.name, job.id)
+      if (!res.ok) setOpError(`${JOB_ACTION_LABEL[action]}任务失败：${res.error ?? '未知错误'}`)
+    } catch (err) {
+      setOpError(`${JOB_ACTION_LABEL[action]}任务失败：${err instanceof Error ? err.message : String(err)}`)
+    } finally {
+      setBusyJobId(null)
+    }
+  }
 
   return (
     <article
@@ -218,14 +257,59 @@ function PrinterCard({ printer, now, focus }: { printer: Printer; now: number; f
               {shownJobs.map((job) => {
                 const pct =
                   job.pages > 0 ? Math.min(100, (job.pagesPrinted / job.pages) * 100) : null
+                // 非常态任务（打印中/spooling）才显示原文状态，常态不打扰
+                const showStatus = job.status !== '' && !/print|spool/i.test(job.status)
                 return (
                   <div className="job" key={job.id}>
                     <span className="job__doc" title={job.documentName}>
                       {job.documentName}
                     </span>
                     <span className="job__meta">
+                      {showStatus ? `${job.status} · ` : ''}
                       {job.owner} · {job.pages > 0 ? `${job.pagesPrinted}/${job.pages}` : '页数未知'}
                     </span>
+                    <div className="job__actions">
+                      {confirmJobId === job.id ? (
+                        <>
+                          <button
+                            type="button"
+                            className="btn btn--sm btn--ghost btn--danger job__act"
+                            disabled={busyJobId !== null}
+                            onClick={() => void runJobAction('cancel', job)}
+                            title="确认从打印队列删除该任务"
+                          >
+                            确认取消
+                          </button>
+                          <button
+                            type="button"
+                            className="btn btn--sm btn--ghost job__act"
+                            disabled={busyJobId !== null}
+                            onClick={() => setConfirmJobId(null)}
+                          >
+                            算了
+                          </button>
+                        </>
+                      ) : (
+                        jobActions(job).map((a) => (
+                          <button
+                            key={a}
+                            type="button"
+                            className={`btn btn--sm btn--ghost job__act${a === 'cancel' ? ' btn--danger' : ''}`}
+                            disabled={busyJobId !== null}
+                            title={
+                              a === 'cancel'
+                                ? `从打印队列删除「${job.documentName}」`
+                                : `${JOB_ACTION_LABEL[a]}该任务`
+                            }
+                            onClick={() =>
+                              a === 'cancel' ? setConfirmJobId(job.id) : void runJobAction(a, job)
+                            }
+                          >
+                            {JOB_ACTION_LABEL[a]}
+                          </button>
+                        ))
+                      )}
+                    </div>
                     <div className="job__bar">
                       <Bar value={pct} max={100} color="var(--accent)" />
                     </div>
@@ -234,7 +318,22 @@ function PrinterCard({ printer, now, focus }: { printer: Printer; now: number; f
               })}
             </div>
           )}
-          {overflow > 0 && <span className="jobs__more">+{overflow} 项排队</span>}
+          {overflow > 0 && (
+            <button type="button" className="jobs__toggle" onClick={() => setExpanded(true)}>
+              展开全部 {jobs.length} 项（还有 {overflow} 项）
+            </button>
+          )}
+          {expanded && overflow === 0 && jobs.length > SHOWN_LIMIT && (
+            <button type="button" className="jobs__toggle" onClick={() => setExpanded(false)}>
+              收起队列
+            </button>
+          )}
+          {opError && (
+            <span className="job-op-error">
+              <Icon name="warn" size={12} />
+              {opError}
+            </span>
+          )}
         </div>
       </div>
     </article>

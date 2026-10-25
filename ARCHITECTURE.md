@@ -66,12 +66,19 @@
 | `printers/printer-mib.ts` | RFC 3805 OID 常量与解析；`sanitizeModel` 纯函数清洗型号 | `maxCapacity<=0` → `levelPct:null`（-2/-3 是有语义的负数）；型号取首个 `;` 前、≤40 字符 |
 | `printers/spooler.ts` | `Get-Printer` / `Win32_Printer` / `Get-PrintJob` 全量取回 + 纯映射函数 | 空队列空字符串 → `[]`；单条结果包成数组；打印机名绝不拼进命令 |
 | `printers/ipp.ts` | IPP 2.0 `Get-Printer-Attributes`（opt-in 耗材通路，148 行 / 仅 `node:http`） | 只试 `/ipp/print`、`/ipp`；statusCode≠0x0000 立即放弃；`marker-levels<0` → `levelPct:null` |
+| `printers/print-ops.ts` | 打印操作（task-024）：任务取消/暂停/恢复（PrintJob cmdlet）、测试页（rundll32 printui.dll）、设默认（CIM SetDefaultPrinter） | 打印机名 `'`→`''` 转义 + 拒绝换行/反引号/双引号（≤220 字符）；jobId 强制正整数；printui 走 args 数组分离（MUI 铁律）；失败如实 `{ok:false,error}` 不吞错 |
 | `printers/printer-service.ts` | 三源合并 + **TCP 探活覆盖 state** + 耗材 provider 链（`snmp → ipp → unknown`，命中即短路） | `.213` 假在线必须被覆盖为 `offline`；网络不可达的打印机不查耗材（不为离线设备"猜"数据） |
 | `printers/mdns.ts` | `_ipp/_pdl-datastream` 组播发现（可选） | 任何异常静默返回 `[]` |
-| `alarms.ts` | 7 条规则、`(code,targetId)` 去重、自动恢复、历史上限 500 | 禁止为 ICMP 不可达告警；`DEVICE_NEW` 是事件型：保持 active 至 ack 或 `NEW_DEVICE_TTL_MS`(10min) 到期，**不参与"条件消失自动恢复"**；`NET_QUALITY` 需 `samples >= QUALITY_MIN_SAMPLES`（与 `computeQuality`/`isDegraded` 同源） |
-| `scheduler.ts` | 分频调度、4 相位扫描、质量采样、快照组装、状态判定 | `resolveLinkState` 是纯函数；**质量窗口只由 15s `ping -n 4` 填充**，扫描/心跳的存活 ping 不写入 |
+| `alarms.ts` | 7 条规则、`(code,targetId)` 去重、自动恢复、历史上限 500 | 禁止为 ICMP 不可达告警；`DEVICE_NEW` 是事件型：保持 active 至 ack 或 `NEW_DEVICE_TTL_MS`(10min) 到期，**不参与"条件消失自动恢复"**；`NET_QUALITY` 需 `samples >= QUALITY_MIN_SAMPLES`（与 `computeQuality`/`isDegraded` 同源）；`ingestExternal/ingestResolve`（task-025）供外部模块注入告警，复用去重/冷静期/抑制窗口语义 |
+| `scheduler.ts` | 分频调度、4 相位扫描、质量采样、快照组装、状态判定 | `resolveLinkState` 是纯函数；**质量窗口只由 15s `ping -n 4` 填充**，扫描/心跳的存活 ping 不写入；带宽历史环（60 点，失败轮入 null 点）与 WatchManager 挂载于此（task-025） |
 | `soak.ts` | 长跑取证（真实 95s 采样 + 注入时钟的 DEVICE_NEW 生命周期检查） | 纯 Node，`npm run soak` 驱动 |
-| `store.ts` | JSON 持久化（别名/告警历史/设置） | 目录注入；300ms debounce；损坏文件自动重建 |
+| `store.ts` | JSON 持久化（别名/告警历史/设置/备注/标签/监控目标） | 目录注入；300ms debounce；损坏文件自动重建；`normalizeTags` 归一化（≤8 个/单个 ≤24 字符） |
+| `db/` | SqliteStore（better-sqlite3）与 JsonStore 同构；migrations 版本管理 | v2：`device_notes/device_tags/watch_targets`（task-025） |
+| `watch.ts` | 持续 Ping 监控（task-025）：`WatchManager` 每 5s ICMP 探测目标，环形窗口 60 点，宕机/恢复经 `ingestExternal/ingestResolve` 联动 AlarmEngine | 目标存 store（Json+Sqlite 同构）；`tickInFlight` 闸门防重入；宕机告警 WATCH_DOWN critical；无样本诚实 `unknown` |
+| `wol.ts` | WOL 网络唤醒（task-025）：Magic Packet（6×0xFF+16×MAC，102 字节）UDP 广播 9/7 端口 | 只承诺"包已发出"；本机/网关/跨网段/未知 MAC/演示设备诚实拒绝 |
+| `diag/portscan.ts` | 自定义 TCP 端口扫描（task-025）：worker pool 并发 64，单次 ≤1024 端口 | `validateDiagTarget` 白名单校验；结果 `{ports,openPorts,durationMs}` |
+| `notify/webhook.ts` | 告警 Webhook（task-025）：`postWebhook` POST JSON，2xx 才算送达 | 仅 http/https；非 2xx 返回 status；绝不抛错，失败进 netlog |
+| `report-html.ts` | HTML 巡检报告（task-025）：自包含单文件（内联 CSS），设备/打印机/告警/降级四节 | `escapeHtml` 转义五字符；空数据占位「暂无」，不伪造内容 |
 | `simulator.ts` | mulberry32 种子生成的 12 设备 + 4 打印机 | 与真实数据凭 `sim-` 前缀区分 |
 
 ---
@@ -272,6 +279,17 @@ printers 采集 4520ms（独立任务，不在扫描预算内；SNMP 命中即�
 - **别名**：复用 `store.aliases`（key = printer id）；`applyAliases` 对 devices（displayName）与 printers（alias 字段）统一投影。别名只改显示名，告警 targetName 保持原队列名，便于对账。
 - **刷新联动**：IPC 变更落盘后 `void scheduler.refreshPrinters()` 立即重采并推送快照。
 
+## 9.6 打印操作通道（task-024）
+
+四条新 IPC：`printer:jobAction` / `printer:printTestPage` / `printer:setDefault` / `printer:openAdmin`，引擎实现收敛在 `printers/print-ops.ts`。
+
+- **任务操作**：`printerJobAction('cancel'|'pause'|'resume', printerName, jobId)` → PowerShell `Remove/Suspend/Resume-PrintJob`。UI（PrintersView）在队列行内联操作：取消需二次确认、暂停/恢复按任务状态动态出现、忙碌中单飞防重复；默认只展示 5 条任务，展开可看全队列。
+- **测试页**：`rundll32 printui.dll,PrintUIEntry /k /n <name>`——MUI 程序铁律：不经 PowerShell、GBK 解码、args 数组分离。
+- **设默认**：CIM `Win32_Printer.SetDefaultPrinter`（结构化 JSON 回包），`ReturnValue≠0` 如实透出 CIM 错误码。
+- **打印机 HTTP 管理页**：`printerOpenAdmin(ip)` → `router-browser.ts` 以 `persist:printer-admin` 独立 partition 开 1024×720 窗口（contextIsolation + sandbox），与路由器内置浏览器的会话隔离。
+- **安全边界**（打印机名是不可信字符串）：PowerShell 单引号转义（`escapePsSingleQuoted`：`'`→`''`）+ `isSafePrinterName` 拒绝换行/反引号/双引号；jobId 强制正整数（非数字不进命令）；IPC 层先做 action 白名单与 IPv4 格式校验。
+- **管理页监控增强（PrinterManageView）**：耗材摘要（仅 `levelPct` 非 null 条目，缺失显示"—"）、队列长度列、默认打印机标识 + 测试页/设默认/管理页操作按钮，全部 busy 单飞 + 失败如实反馈。
+
 ## 9.7 全面审计修复（2026-10-25，两路并行调查 → 10 项落地）
 
 - **世代号（L4）**：`RouterManager.generation` 在 logout 时自增；`doRefresh` 入口捕获、写回前比对，不一致整体丢弃——堵住"logout 后在飞一轮把旧会话数据写回 status"的竞态。
@@ -289,10 +307,11 @@ printers 采集 4520ms（独立任务，不在扫描预算内；SNMP 命中即�
 
 | 通道 | 协议 | 拿到什么 | 不支持时 |
 |------|------|----------|----------|
-| UPnP IGD | SSDP M-SEARCH → 描述 XML → SOAP（WANIPConnection） | WAN IP、累计流量计数器、Reboot | 标注"该路由器不提供 UPnP IGD"，字段一律 null |
-| OpenWrt ubus | HTTP POST /ubus（JSON-RPC，session.login） | system board、DHCP 租约、无线客户端、reboot | 登录表单 + "登录后可查看"（404 时文案指引改用内置浏览器） |
-| HTTP 管理页 | GET :80/:8080/:443，跟随 30x（≤2 跳），品牌指纹 | 品牌/型号提示（OpenWrt/TP-Link/小米/华硕/华为/NETGEAR）+ 落点 URL（`identity.adminUrl`） | "品牌未识别"，绝不猜 |
+| UPnP IGD | SSDP M-SEARCH → 描述 XML → SOAP（WANIPConnection） | WAN IP、累计流量计数器、**连接状态/连接时长（GetStatusInfo，task-024）**、Reboot | 标注"该路由器不提供 UPnP IGD"；不支持 GetStatusInfo 的固件两字段为 null |
+| OpenWrt ubus | HTTP POST /ubus（JSON-RPC，session.login） | system board、DHCP 租约、无线客户端、**无线频段状态（iwinfo，task-024）**、reboot | 登录表单 + "登录后可查看"（404 时文案指引改用内置浏览器）；未装 rpcd-mod-iwinfo → `wirelessStatus:null` |
+| HTTP 管理页 | GET :80/:8080/:443，跟随 30x（≤2 跳），品牌指纹 | 品牌/型号提示（OpenWrt/TP-Link/小米/华硕/华为/NETGEAR）+ 落点 URL（`identity.adminUrl`）；**401 Basic 质询 → `auth:'basic'`（reachable 但 brand=null，task-024）** | "品牌未识别"，绝不猜 |
 | 内置浏览器登录（推荐） | 主进程 BrowserWindow（`router-browser.ts`）加载 `adminUrl`，用户在真实管理页登录 | 管理页会话（`session.kind='web'`，Cookie 关键词检测：sysauth/session/token/stok/auth…） | 无 Cookie → 不标记会话，绝不猜 |
+| Basic-Auth 通用登录（task-024） | ubus 登录失败且管理页给出 `WWW-Authenticate: Basic` 质询 → 账密经 `Authorization` 头 GET 验证（HTTP 200 即通过） | 会话 `kind='basic'`（登录态展示；**不提供任何 ubus 数据**） | 无质询不降级、不发凭据 GET，沿用 ubus 错误文案 |
 
 ### 10.2 关键实现决策
 
@@ -305,3 +324,31 @@ printers 采集 4520ms（独立任务，不在扫描预算内；SNMP 命中即�
 - **独立 IPC**：路由器状态走 `router:*` 通道 + `router:status` 推送，不污染 Snapshot 冻结契约。
 - **会话正交性（404 修复的架构结论）**：ubus 会话（kind='ubus'）与管理页会话（kind='web'，Cookie 检测）是两个独立事实，合成规则"ubus 优先、web 独立存续"——ubus 登录失败不得清 web 会话，反之亦然；web 会话**不**点亮 `caps.openwrt`（Cookie 证明不了 ubus 可用，点亮就是撒谎）。DHCP/无线数据卡只在 kind='ubus' 下展示。非 OpenWrt 固件登录 ubus 拿到 HTTP 404 时，登录语境文案明确指引"改用内置浏览器登录"。
 - **实测结果（本机网关 192.168.2.1）**：管理页可达（302 落点 `/view/admin_login/tologin.html` 已被 `adminUrl` 捕获）、无 UPnP IGD、非 OpenWrt（generic）——界面如实展示"该路由器不支持"，内置浏览器登录直达登录页。
+
+### 10.3 task-024 增补（打印与路由器页面功能增强）
+
+- **UPnP GetStatusInfo**：`upnpQuery` 在流量计数器之后追加 GetStatusInfo——`NewConnectionStatus`/`NewUptime` 进 `wan.connectionStatus`/`wan.uptimeSec`；固件不支持该 action（HTTP 501 等）→ 两字段保持 null（不填 0）。
+- **iwinfo 无线频段状态**：登录成功后第 4 个 ubus 调用 `iwinfo devices` → 逐设备（**最多 4 个**，防超时膨胀）`iwinfo info` → `wirelessStatus: WirelessBandStatus[]`（设备名/SSID/信道/关联客户端数）。语义三分：列表成功但空 = `[]`（无射频）；列表失败/未装 `rpcd-mod-iwinfo`（-32000）= `null` + capabilityNotes 说明——两种"空"不混用。解析器（`parseIwinfoDevices`/`parseIwinfoInfo`）为纯函数。
+- **Basic-Auth 通用登录**：ubus 登录失败时若管理页给出 Basic 质询，账密经 `Authorization` 头 GET 验证一次，200 即 `kind='basic'` **进程内粘性**（`basicAuthOk`/`basicUser`，不存明文密码、不逐轮重验）；与 ubus/web 会话正交，合成优先级 ubus > web > basic；logout 全通道清除。**只看状态码不解析页面内容**——basic 会话不提供任何 ubus 数据（DHCP/无线卡在 basic 会话下展示引导文案，不硬凑）。`caps.openwrt` 不因 basic 会话置位（能力与会话正交）。
+- **401 质询的 reachable 语义**：`detect.ts` 探测到 `401 + WWW-Authenticate: Basic` → `reachable:true`（网络层可达，内置浏览器可打开、Chromium 原生弹凭据框）但 `brand:null`——看不到正文不做指纹，且编排层不覆盖既有品牌；Digest 等非 Basic 质询 → `auth:null`，不猜。
+- **login 返回值与状态一致（t8 测试抓到的真实 bug）**：登录失败分支原实现把组合后的"Basic 认证失败：…"写进 `status.session.error`，但 `return res` 带回的仍是 ubus 结果（"用户名或密码错误"）——UI 读返回值就显示错文案。修复后返回 `{ok:false, error: failError}` 与 status 同源。教训：**同一事实的两个出口必须说同一句话**。
+- **设备联动**：RouterView 接收 `devices` 快照——DHCP 租约行按 IP、无线客户端行按 MAC 匹配设备，可点击行打开设备详情抽屉；匹配不到的行不可点击（不硬凑）。
+- **WAN 流量趋势**：渲染侧 useRef 累积 60 点 rx/tx 速率序列，按 `status.ts` 去重（手动 refresh 与同轮轮询推送共享时间戳）；Sparkline 断线（null）画红点，全 null 画虚线基准。UPnP 计数器需 ≥2 次采样才出速率，UI 如实提示"等待速率样本"。
+- **测试面扩展（+30 用例）**：`print-ops.test.ts`（转义/校验/cmdlet 映射/rundll32 args/CIM 返回码）；`router-upnp` GetStatusInfo 四态；`router-openwrt` iwinfo 解析防御；`router-manager` Basic-Auth 登录四投影（成功不编数据/401 文案以 Basic 为准/无质询不降级/logout 全通道清除）；`router-detect` 401 Basic 质询与 Digest 反例。
+
+### 10.4 task-025（局域网运维功能与联动机制完善）
+
+- **链路审计结论**：6 条主链路（快照推送/告警联动/打印操作/路由器采集/诊断中心/持久化）全通；唯一断点是设备详情抽屉只在打开时取一次 `getDeviceDetail`，端口/连接/RTT 历史冻结——已改为打开期间每 5s 重取（轮询失败保留旧数据，仅首次加载失败置错误）。
+- **持续 Ping 监控（`engine/watch.ts`）**：`WatchManager` 每 5s 对目标 ICMP 探测，环形窗口 60 点；宕机/恢复经 `AlarmEngine.ingestExternal/ingestResolve` 注入 WATCH_DOWN（critical）告警，复用既有去重/冷静期/抑制窗口语义并走完整告警链路（推送/Webhook/确认）。`tickInFlight` 闸门防重入；目标持久化于 JsonStore 与 Sqlite v2 `watch_targets`（同构）。无样本诚实 `unknown`，不猜在线。
+- **WOL 网络唤醒（`engine/wol.ts`）**：Magic Packet（6×0xFF + 16×MAC = 102 字节）UDP 广播至 255.255.255.255 端口 9+7 各一次。数据诚实边界：发送成功只承诺"包已发出"；本机/网关/跨网段/未知 MAC/`sim-` 演示设备直接拒绝并说明原因。
+- **告警 Webhook（`engine/notify/webhook.ts`）**：告警产生/恢复时 `postWebhook` POST JSON（node:http/https，5s 超时，消费响应体）；服务端返回 2xx 才算送达，非 2xx 如实回传 status；URL 留空停用；失败进 netlog 不静默。设置页可保存 URL 并发送测试。
+- **自定义端口扫描（`engine/diag/portscan.ts`）**：TCP connect 探测，worker pool 并发 64，单次 ≤1024 端口（1-65535 内），`validateDiagTarget` 白名单校验。诊断中心新增端口扫描卡（起止端口预填 1-1024）。
+- **tracert 结构化（`parseTracertHopsDetailed`）**：跳数表（跳数/IP/主机名/三次延迟）；`<1 ms`→0、`*`→null（超时不伪造）；解析为空诚实降级只看原始输出（可折叠）。
+- **全网带宽历史**：scheduler 带宽采样（2s）入 60 点环形历史 `system.bandwidthHistory`，失败轮入 null 点（曲线断开诚实呈现）；总览页新增 rx/tx 双曲线卡。
+- **设备备注/标签**：store（Json+Sqlite v2 `device_notes/device_tags`）+ `normalizeTags`（trim/去空/去重/单个 ≤24 字符/≤8 个）；详情抽屉内联编辑，设备列表支持标签筛选 chips、备注图标、快照搜索覆盖 note/tags。
+- **设备列表增强**：行内 RTT 迷你条（复用 Sparkline，null 断点红点）；「监控」列快捷加入/移出持续监控；监控中设备显示徽标。
+- **监控页（WatchesView）**：目标表（状态灯/可用率/宕机时长/最近探测/RTT 迷你曲线）+ IP/备注添加表单（datalist 联想设备）+ 移出；宕机目标可点击跳转设备详情。
+- **导出体系**：TopBar 导出改为下拉——JSON 结构化快照 / HTML 巡检报告（`engine/report-html.ts`，自包含单文件、内联 CSS、`escapeHtml` 五字符转义、空数据占位「暂无」不伪造）。
+- **配置导入/导出**：`configExport`（schemaVersion:1：设置/别名/备注/标签/监控目标/打印机管理/首次发现）与 `configImport`（JSON.parse → schemaVersion 校验 → 逐键合并，非法键计入 skipped 绝不整包失败；运行时生效 setAutoScan/setPrinterSources/hydrateWatches/refreshPrinters）。设置页操作，导入后回读设置对齐 UI。
+- **契约层**：`shared/channels.ts` +10 通道；`shared/types.ts` 新增 TracertHop/PortScanResult/BandwidthPoint/WatchTarget/WatchSample/WatchStatus，Device 加 `note/tags`，AppSettings 加 `notifyWebhookUrl`，Snapshot 加 `watches`；preload 全量暴露。
+- **验证**：新增 `tests/task025-lan-ops.test.ts` 26 用例（WOL 字节级/WatchManager 窗口与变迁/端口扫描真监听/HTML 转义/Webhook 真 server/tracert 解析/ingestExternal 语义/JsonStore 往返）；全量 636 用例通过；node+web 双 typecheck 通过；`src/main/engine` electron 引用恒 0。

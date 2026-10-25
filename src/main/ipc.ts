@@ -12,6 +12,7 @@ import type {
   Alarm,
   DiagKind,
   DiagResult,
+  PrintJobAction,
   RouterStatus,
   ScanProgress,
   Snapshot,
@@ -19,10 +20,11 @@ import type {
 import type { Engine } from './engine';
 import type { RouterManager } from './engine/router';
 import { runDiag, readAdapters } from './engine/diag/netdiag';
+import { scanPortRange } from './engine/diag/portscan';
 import { remoteOpen } from './remote-ops';
 import { terminalRun } from './terminal';
 import { clearCredentials, saveCredentials } from './router-store';
-import { clearAdminCookies, openRouterAdminWindow } from './router-browser';
+import { clearAdminCookies, openPrinterAdminWindow, openRouterAdminWindow } from './router-browser';
 
 let target: BrowserWindow | null = null;
 
@@ -67,15 +69,53 @@ export function registerIpc(win: BrowserWindow, engine: Engine, router: RouterMa
     const list = Array.isArray(ids) ? ids.map((v) => String(v)) : [];
     engine.clearAlarms(list, by);
   });
-  ipcMain.handle(CH.exportReport, () =>
+  ipcMain.handle(CH.exportReport, (_event, format: unknown) =>
     // 审计 L6：导出附上路由器状态与打印管理配置（旧实现只有 Snapshot）
-    engine.exportReport({ routerStatus: router.getStatus(), printerManage: engine.getPrinterManage() }),
+    // task-025：format 支持 json（缺省）/ html
+    engine.exportReport(String(format) === 'html' ? 'html' : 'json', {
+      routerStatus: router.getStatus(),
+      printerManage: engine.getPrinterManage(),
+    }),
   );
   ipcMain.handle(
     CH.setDeviceAlias,
     (_event, deviceId: string, alias: string | null): { ok: boolean } =>
       engine.setDeviceAlias(String(deviceId), alias == null ? null : String(alias)),
   );
+
+  // —— 设备运维通道（task-025） ——
+  ipcMain.handle(CH.deviceWake, (_event, deviceId: string) => engine.deviceWake(String(deviceId ?? '')));
+  ipcMain.handle(CH.deviceSetNote, (_event, deviceId: string, note: string | null) =>
+    engine.deviceSetNote(String(deviceId ?? ''), note == null ? null : String(note)),
+  );
+  ipcMain.handle(CH.deviceSetTags, (_event, deviceId: string, tags: unknown) => {
+    // 归一化在引擎层（normalizeTags）；这里只保证传进引擎的是 string[] | null
+    const list = Array.isArray(tags) ? tags.map((t) => String(t)) : null;
+    return engine.deviceSetTags(String(deviceId ?? ''), list);
+  });
+
+  // —— 持续 Ping 监控通道（task-025） ——
+  ipcMain.handle(CH.watchList, () => engine.watchList());
+  ipcMain.handle(CH.watchAdd, (_event, ip: string, note: string | null) =>
+    engine.watchAdd(String(ip ?? ''), note == null ? null : String(note)),
+  );
+  ipcMain.handle(CH.watchRemove, (_event, ip: string) => engine.watchRemove(String(ip ?? '')));
+
+  // —— 诊断扩展：端口扫描（task-025） ——
+  ipcMain.handle(CH.diagPortScan, async (_event, ip: string, from: unknown, to: unknown) => {
+    const res = await scanPortRange(String(ip ?? ''), Number(from), Number(to));
+    engine.logs.push(
+      res.ok ? 'info' : 'warn',
+      'diag',
+      `portscan ${String(ip ?? '')} ${String(from)}-${String(to)}：${res.error ?? `${res.openPorts.length} 个开放 / ${res.ports.length} 个探测`}`,
+    );
+    return res;
+  });
+
+  // —— 通知 / 配置通道（task-025） ——
+  ipcMain.handle(CH.webhookTest, async (_event, url: string) => engine.webhookTest(String(url ?? '')));
+  ipcMain.handle(CH.configExport, () => engine.configExport());
+  ipcMain.handle(CH.configImport, (_event, json: string) => engine.configImport(String(json ?? '')));
 
   // —— 路由器管理通道 ——
   ipcMain.handle(CH.routerGetStatus, (): RouterStatus => router.getStatus());
@@ -120,6 +160,34 @@ export function registerIpc(win: BrowserWindow, engine: Engine, router: RouterMa
     engine.setPrinterAlias(String(printerId), alias == null ? null : String(alias)),
   );
 
+  // —— 打印操作通道（task-024）：action 白名单 / jobId 整数 / ip 格式在此校验，
+  // 打印机名安全性与 jobId 再校验由引擎层 print-ops 兜底（纵深防御）——
+  ipcMain.handle(CH.printerJobAction, (_e, action: string, printerName: string, jobId: string) => {
+    const actions: readonly string[] = ['cancel', 'pause', 'resume'];
+    if (!actions.includes(String(action))) {
+      return { ok: false, error: `未知的打印任务操作：${String(action)}` };
+    }
+    const idNum = Number(jobId);
+    if (!Number.isInteger(idNum) || idNum <= 0) {
+      return { ok: false, error: `无效的打印任务 ID：${String(jobId)}` };
+    }
+    return engine.printerJobAction(String(action) as PrintJobAction, String(printerName ?? ''), String(idNum));
+  });
+  ipcMain.handle(CH.printerPrintTestPage, (_e, printerName: string) =>
+    engine.printerPrintTestPage(String(printerName ?? '')),
+  );
+  ipcMain.handle(CH.printerSetDefault, (_e, printerName: string) =>
+    engine.printerSetDefault(String(printerName ?? '')),
+  );
+  ipcMain.handle(CH.printerOpenAdmin, (_e, ip: string) => {
+    const ipStr = String(ip ?? '').trim();
+    // 点分十进制格式校验（拒斜杠/冒号等注入字符；八位组范围由浏览器侧自然处理）
+    if (!/^(\d{1,3}\.){3}\d{1,3}$/.test(ipStr)) {
+      return { ok: false, error: `无效的打印机 IP：${ipStr}`, url: null };
+    }
+    return openPrinterAdminWindow(ipStr);
+  });
+
   // —— 设置通道（appVersion 由主进程注入，引擎层不 import electron） ——
   ipcMain.handle(CH.settingsGet, () => ({
     ...engine.getSettings(),
@@ -139,6 +207,7 @@ export function registerIpc(win: BrowserWindow, engine: Engine, router: RouterMa
       'notifyDesktop',
       'closeToTray',
       'rememberRouterPassword',
+      'notifyWebhookUrl',
     ] as const;
     const clean: Record<string, unknown> = {};
     for (const key of allowed) if (key in patch) clean[key] = patch[key];

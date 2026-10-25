@@ -3,6 +3,7 @@ import type { Alarm, Device, Printer, Snapshot } from '../../shared/types'
 import { StatusDot } from '../components/atoms/StatusDot'
 import { StatusPill } from '../components/atoms/StatusPill'
 import { QualityBar } from '../components/atoms/QualityBar'
+import { Sparkline } from '../components/atoms/Sparkline'
 import { Icon } from '../components/Icon'
 import { EmptyState } from '../components/atoms/EmptyState'
 import { printerStateTone, severityTone, stateTone, qualityPhase } from '../lib/semantics'
@@ -120,6 +121,12 @@ export function OverviewView({
   const realPrinters = printers.filter((p) => p.connection !== 'virtual')
   const virtualPrinterCount = printers.length - realPrinters.length
   const faultPrinters = realPrinters.filter((p) => p.state === 'error').length
+
+  // 全网带宽历史（task-025）：2s/点、最多 60 点；失败轮为 null（画断点，不补 0）
+  const bwHistory = system.bandwidthHistory ?? []
+  const rxSeries = useMemo(() => bwHistory.map((p) => p.rxBps), [bwHistory])
+  const txSeries = useMemo(() => bwHistory.map((p) => p.txBps), [bwHistory])
+  const bwHasData = rxSeries.some((v) => v !== null) || txSeries.some((v) => v !== null)
 
   return (
     <>
@@ -271,6 +278,40 @@ export function OverviewView({
             <span className="dim">仅统计与本机的 TCP 会话</span>
           </span>
         </div>
+      </div>
+
+      {/* 带宽趋势（task-025） */}
+      <div className="card mt-10">
+        <div className="card__head">
+          <span className="card__title">带宽趋势</span>
+          <span className="card__hint">
+            {bwHistory.length > 0
+              ? `最近 ${bwHistory.length} 点 · 约 2s/点 · 无采样画断点`
+              : '2s 采样 · 保留最近 60 点'}
+          </span>
+        </div>
+        {bwHasData ? (
+          <div className="bw-charts">
+            <div className="chart-box">
+              <div className="chart-box__head">
+                <span className="chart-box__title">↓ 接收 bit/s</span>
+              </div>
+              <Sparkline values={rxSeries} height={48} stroke="var(--accent)" area />
+            </div>
+            <div className="chart-box">
+              <div className="chart-box__head">
+                <span className="chart-box__title">↑ 发送 bit/s</span>
+              </div>
+              <Sparkline values={txSeries} height={48} stroke="var(--text-muted)" area />
+            </div>
+          </div>
+        ) : (
+          <EmptyState
+            icon="activity"
+            title="暂无带宽采样"
+            desc="带宽按 2 秒采样一次并保留最近 60 点；刚启动或网卡计数器读取失败时没有曲线，采集恢复后自动出现。"
+          />
+        )}
       </div>
 
       {/* 中部：设备健康表 + 打印机状态 */}

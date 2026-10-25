@@ -1003,6 +1003,102 @@
   user-select: text;
 }
 
+/* ---------- 下拉菜单（task-025：TopBar 导出下拉；details/summary 实现，零依赖） ---------- */
+
+.dropdown {
+  position: relative;
+}
+
+.dropdown > summary {
+  list-style: none;
+  cursor: pointer;
+}
+
+.dropdown > summary::-webkit-details-marker {
+  display: none;
+}
+
+.dropdown[open] > summary {
+  background: var(--accent-a18, rgba(47, 129, 247, 0.18));
+  border-color: var(--accent-a40, #2f81f780);
+}
+
+.dropdown__menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 60;
+  min-width: 210px;
+  padding: 5px;
+  background: #0d131b;
+  border: 1px solid var(--line-strong, #2a3441);
+  border-radius: 9px;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.dropdown__item {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: 7px 9px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.dropdown__item:hover {
+  background: var(--accent-a12, rgba(47, 129, 247, 0.12));
+}
+
+.dropdown__hint {
+  font-size: 10.5px;
+  color: var(--text-dim);
+}
+
+/* ---------- 标签筛选 chips（task-025：设备列表） ---------- */
+
+.tag-filter {
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.tag-chip {
+  cursor: pointer;
+  border: 1px solid var(--line);
+  background: transparent;
+}
+
+.tag-chip[data-active='true'] {
+  color: var(--accent);
+  border-color: var(--accent-a40, #2f81f780);
+  background: var(--accent-a12, rgba(47, 129, 247, 0.12));
+}
+
+/* ---------- 设备行备注图标（task-025） ---------- */
+
+.u-note-ico {
+  margin-left: 5px;
+  vertical-align: -1px;
+  color: var(--text-dim);
+}
+
+/* ---------- 设备行 RTT 迷你条（task-025）：紧跟延迟数字，不挤占列宽 ---------- */
+
+.rtt-mini {
+  margin-left: 8px;
+  vertical-align: -4px;
+  opacity: 0.9;
+}
+
 /* ---------- 数据缺失说明行 ---------- */
 
 .note {

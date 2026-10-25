@@ -11,6 +11,24 @@ export const CH = {
   exportReport: 'lan:exportReport',
   setDeviceAlias: 'lan:setDeviceAlias',
 
+  // 设备运维（task-025）
+  deviceWake: 'device:wol',
+  deviceSetNote: 'device:setNote',
+  deviceSetTags: 'device:setTags',
+
+  // 持续 Ping 监控（task-025）
+  watchList: 'watch:list',
+  watchAdd: 'watch:add',
+  watchRemove: 'watch:remove',
+
+  // 诊断扩展（task-025）
+  diagPortScan: 'diag:portScan',
+
+  // 通知 / 配置（task-025）
+  webhookTest: 'webhook:test',
+  configExport: 'config:export',
+  configImport: 'config:import',
+
   // 路由器管理
   routerGetStatus: 'router:getStatus',
   routerRefresh: 'router:refresh',
@@ -25,6 +43,12 @@ export const CH = {
   printerRemoveManual: 'printer:removeManual',
   printerSetIgnored: 'printer:setIgnored',
   printerSetAlias: 'printer:setAlias',
+  /** 打印任务操作（task-024）：cancel/pause/resume */
+  printerJobAction: 'printer:jobAction',
+  printerPrintTestPage: 'printer:printTestPage',
+  printerSetDefault: 'printer:setDefault',
+  /** 用内置浏览器窗口打开打印机 Web 管理页（task-024） */
+  printerOpenAdmin: 'printer:openAdmin',
 
   // 设置
   settingsGet: 'settings:get',

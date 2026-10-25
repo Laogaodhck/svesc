@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import type { Device, DeviceDetail, LanApi, RemoteOpKind } from '../../shared/types'
+import type { Device, DeviceDetail, LanApi, RemoteOpKind, WatchStatus } from '../../shared/types'
 import { ScoreRing } from '../components/atoms/ScoreRing'
 import { Sparkline } from '../components/atoms/Sparkline'
 import { StatusPill } from '../components/atoms/StatusPill'
@@ -31,13 +31,22 @@ export interface DeviceDetailDrawerProps {
   onClose: () => void
   /** 点"网络诊断"时由 App 跳转诊断页并预填目标（可选：测试环境/旧调用方未传则隐藏入口行为降级） */
   onRunDiagnostics?: (ip: string) => void
+  /** 监控目标列表（task-025：判断该设备是否已在持续监控中） */
+  watches?: WatchStatus[]
 }
 
 function readApi(): LanApi | null {
   return window.lanApi ?? null
 }
 
-export function DeviceDetailDrawer({ deviceId, device, now, onClose, onRunDiagnostics }: DeviceDetailDrawerProps) {
+export function DeviceDetailDrawer({
+  deviceId,
+  device,
+  now,
+  onClose,
+  onRunDiagnostics,
+  watches,
+}: DeviceDetailDrawerProps) {
   const [open, setOpen] = useState(false)
   const [activeId, setActiveId] = useState<string | null>(null)
   const [detail, setDetail] = useState<DeviceDetail | null>(null)
@@ -46,15 +55,25 @@ export function DeviceDetailDrawer({ deviceId, device, now, onClose, onRunDiagno
   /** 别名草稿（审计 H-1：别名持久化与快照投影早已存在，此前 UI 无入口） */
   const [aliasDraft, setAliasDraft] = useState('')
   const [aliasMsg, setAliasMsg] = useState<string | null>(null)
-  /** 远程操作（RDP/共享；task-019 移除 SSH）结果提示，模式同 aliasMsg */
+  /** 备注 / 标签草稿（task-025：store 已支持，此前 UI 无入口） */
+  const [noteDraft, setNoteDraft] = useState('')
+  const [noteMsg, setNoteMsg] = useState<string | null>(null)
+  const [tagsDraft, setTagsDraft] = useState('')
+  const [tagsMsg, setTagsMsg] = useState<string | null>(null)
+  /** 远程操作（RDP/共享/WOL）结果提示，模式同 aliasMsg */
   const [remoteMsg, setRemoteMsg] = useState<string | null>(null)
   const closeRef = useRef<HTMLButtonElement | null>(null)
+  /** 备注/标签草稿只在切换到该设备后首次拿到数据时同步一次，避免 5s 快照把用户输入冲掉 */
+  const draftsSyncedFor = useRef<string | null>(null)
 
-  // 换设备时重置别名草稿与远程操作提示
+  // 换设备时重置各草稿与提示
   useEffect(() => {
     setAliasDraft('')
     setAliasMsg(null)
     setRemoteMsg(null)
+    setNoteMsg(null)
+    setTagsMsg(null)
+    draftsSyncedFor.current = null
   }, [activeId])
 
   const saveAlias = async (): Promise<void> => {
@@ -65,6 +84,66 @@ export function DeviceDetailDrawer({ deviceId, device, now, onClose, onRunDiagno
       setAliasMsg(aliasDraft.trim() ? '别名已保存' : '别名已清除')
     } catch (err) {
       setAliasMsg(err instanceof Error ? err.message : String(err))
+    }
+  }
+
+  const saveNote = async (): Promise<void> => {
+    const api = readApi()
+    if (!api || !activeId) return
+    try {
+      await api.deviceSetNote(activeId, noteDraft.trim() || null)
+      setNoteMsg(noteDraft.trim() ? '备注已保存' : '备注已清除')
+    } catch (err) {
+      setNoteMsg(err instanceof Error ? err.message : String(err))
+    }
+  }
+
+  /** 标签：逗号/空白分隔；store 侧会归一化（去重/上限 8 个/单个 ≤24 字符） */
+  const saveTags = async (): Promise<void> => {
+    const api = readApi()
+    if (!api || !activeId) return
+    const tags = tagsDraft
+      .split(/[,，\s]+/)
+      .map((t) => t.trim())
+      .filter(Boolean)
+    try {
+      await api.deviceSetTags(activeId, tags.length > 0 ? tags : null)
+      setTagsMsg(tags.length > 0 ? `已保存 ${tags.length} 个标签` : '标签已清除')
+    } catch (err) {
+      setTagsMsg(err instanceof Error ? err.message : String(err))
+    }
+  }
+
+  /** WOL 网络唤醒（数据诚实：只承诺"包已发出"，不承诺设备被唤醒） */
+  const wakeDevice = async (): Promise<void> => {
+    const api = readApi()
+    if (!api || !activeId || !device?.mac) return
+    try {
+      const res = await api.deviceWake(activeId)
+      setRemoteMsg(
+        res.ok ? `唤醒包已发送至 ${device.mac}，等待设备回转在线` : (res.error ?? '唤醒失败')
+      )
+    } catch (err) {
+      setRemoteMsg(err instanceof Error ? err.message : String(err))
+    }
+  }
+
+  /** 加入/移出持续 Ping 监控（宕机会自动产生 WATCH_DOWN 告警） */
+  const toggleWatch = async (): Promise<void> => {
+    const api = readApi()
+    if (!api || !device?.ip) return
+    try {
+      if (watched) {
+        await api.watchRemove(device.ip)
+        setRemoteMsg(`已移出持续监控：${device.ip}`)
+      } else {
+        const res = await api.watchAdd(device.ip)
+        setRemoteMsg(
+          res.ok ? `已加入持续监控：${device.ip}（宕机将自动告警）` : (res.error ?? '加入监控失败')
+        )
+      }
+    } catch (err) {
+      setRemoteMsg(err instanceof Error ? err.message : String(err))
     }
   }
 
@@ -100,7 +179,8 @@ export function DeviceDetailDrawer({ deviceId, device, now, onClose, onRunDiagno
     setOpen(true)
   }, [deviceId])
 
-  // 只在打开时取一次详情：端口 / 连接 / 历史曲线
+  // 详情轮询（task-025：修复链路断点——旧实现只在打开时取一次，端口/连接/RTT 历史会冻结）。
+  // 打开期间每 5s 重取一次；轮询失败保留旧数据不打断展示，仅首次加载失败才置错误。
   useEffect(() => {
     if (!activeId || !deviceId) return
     const api = readApi()
@@ -110,20 +190,31 @@ export function DeviceDetailDrawer({ deviceId, device, now, onClose, onRunDiagno
       return
     }
     let alive = true
-    api
-      .getDeviceDetail(activeId)
-      .then((d) => {
-        if (!alive) return
-        setDetail(d)
-        setLoading(false)
-      })
-      .catch((err: unknown) => {
-        if (!alive) return
-        setError(err instanceof Error ? err.message : String(err))
-        setLoading(false)
-      })
+    let hasData = false
+    const fetchDetail = (): void => {
+      api
+        .getDeviceDetail(activeId)
+        .then((d) => {
+          if (!alive) return
+          setDetail(d)
+          hasData = true
+          setError(null)
+          setLoading(false)
+        })
+        .catch((err: unknown) => {
+          if (!alive) return
+          if (!hasData) {
+            setError(err instanceof Error ? err.message : String(err))
+            setLoading(false)
+          }
+          // 已有数据时的轮询失败：保留旧数据，等下一轮成功后自动恢复
+        })
+    }
+    fetchDetail()
+    const timer = window.setInterval(fetchDetail, 5000)
     return () => {
       alive = false
+      window.clearInterval(timer)
     }
   }, [activeId, deviceId])
 
@@ -143,6 +234,15 @@ export function DeviceDetailDrawer({ deviceId, device, now, onClose, onRunDiagno
       window.clearTimeout(t)
     }
   }, [deviceId, onClose])
+
+  // 备注/标签草稿同步：只在首次拿到该设备数据时灌入一次（后续快照更新不冲掉输入）
+  useEffect(() => {
+    if (!device || !activeId || draftsSyncedFor.current === activeId) return
+    if (device.id !== activeId) return
+    draftsSyncedFor.current = activeId
+    setNoteDraft(device.note ?? '')
+    setTagsDraft((device.tags ?? []).join(', '))
+  }, [device, activeId])
 
   // 样本不足（< 8）时不给评级，但延迟/丢包仍是真实测量值
   const phase = device ? qualityPhase(device.quality.samples, device.quality.grade) : 'unavailable'
@@ -179,6 +279,8 @@ export function DeviceDetailDrawer({ deviceId, device, now, onClose, onRunDiagno
 
   const connections = detail?.connections.slice(0, 10) ?? []
   const mac = fmtMac(device?.mac ?? null)
+  /** 该设备是否已在持续监控中（按 IP 匹配监控目标） */
+  const watched = !!(device && watches?.some((w) => w.ip === device.ip))
 
   // 只有"已评级且为 poor"才把 RTT 曲线画成红；采样中保持强调色（样本不足 ≠ 差）
   const rttColor = rated && device?.quality.grade === 'poor' ? 'var(--crit)' : 'var(--accent)'
@@ -283,6 +385,68 @@ export function DeviceDetailDrawer({ deviceId, device, now, onClose, onRunDiagno
                   <dd>{device.vendor ?? <span className="na">—</span>}</dd>
                   <dt>类型</dt>
                   <dd>{KIND_LABEL[device.kind] ?? device.kind}</dd>
+                  <dt>备注</dt>
+                  <dd>
+                    <div className="alias-edit">
+                      <input
+                        className="input alias-edit__input"
+                        type="text"
+                        placeholder="添加备注（可选）"
+                        value={noteDraft}
+                        onChange={(e) => {
+                          setNoteDraft(e.target.value)
+                          setNoteMsg(null)
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') void saveNote()
+                        }}
+                      />
+                      <button type="button" className="btn btn--ghost btn--sm" onClick={() => void saveNote()}>
+                        保存
+                      </button>
+                    </div>
+                    {noteMsg && <span className="u-11 dim">{noteMsg}</span>}
+                  </dd>
+                  <dt>标签</dt>
+                  <dd>
+                    <div className="alias-edit">
+                      <input
+                        className="input alias-edit__input"
+                        type="text"
+                        placeholder="逗号分隔，如：办公室, 打印机"
+                        value={tagsDraft}
+                        onChange={(e) => {
+                          setTagsDraft(e.target.value)
+                          setTagsMsg(null)
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') void saveTags()
+                        }}
+                      />
+                      <button type="button" className="btn btn--ghost btn--sm" onClick={() => void saveTags()}>
+                        保存
+                      </button>
+                    </div>
+                    {tagsMsg && <span className="u-11 dim">{tagsMsg}</span>}
+                    {(device.tags?.length ?? 0) > 0 && (
+                      <div className="chip-row">
+                        {device.tags!.map((t) => (
+                          <span className="chip chip--plain" key={t}>
+                            {t}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                  </dd>
+                  <dt>监控</dt>
+                  <dd>
+                    <div className="alias-edit">
+                      <button type="button" className="btn btn--ghost btn--sm" onClick={() => void toggleWatch()}>
+                        {watched ? '移出监控' : '加入监控'}
+                      </button>
+                      {watched && <span className="chip chip--accent">监控中</span>}
+                    </div>
+                  </dd>
                   <dt>首次发现</dt>
                   <dd className="detail-value u-11">
                     {fmtDateTime(device.firstSeen)}
@@ -314,6 +478,16 @@ export function DeviceDetailDrawer({ deviceId, device, now, onClose, onRunDiagno
                       >
                         打开共享
                       </button>
+                      {device.state === 'offline' && device.mac && (
+                        <button
+                          type="button"
+                          className="btn btn--ghost btn--sm"
+                          title="UDP 广播 Magic Packet（端口 9/7）；只保证包已发出，不保证设备被唤醒"
+                          onClick={() => void wakeDevice()}
+                        >
+                          网络唤醒(WOL)
+                        </button>
+                      )}
                       <button
                         type="button"
                         className="btn btn--ghost btn--sm"

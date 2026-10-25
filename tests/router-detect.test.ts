@@ -78,3 +78,38 @@ describe('detectManagementPage 落点 URL', () => {
     expect(dead.url).toBeNull();
   });
 });
+
+describe('401 Basic 质询（task-024）', () => {
+  it('401 + WWW-Authenticate: Basic → reachable 但 brand=null、auth=basic（看不到正文不猜品牌）', async () => {
+    h.routes.clear();
+    h.routes.set('http://10.0.0.4/', {
+      status: 401,
+      headers: { 'www-authenticate': 'Basic realm="ASUS Router"' },
+      body: '',
+    });
+
+    const res = await detectManagementPage('10.0.0.4');
+    expect(res).toEqual({
+      reachable: true,
+      brand: null,
+      hint: null,
+      error: null,
+      url: 'http://10.0.0.4/',
+      auth: 'basic',
+    });
+  });
+
+  it('401 非 Basic 质询（Digest）→ auth=null，不猜 basic', async () => {
+    h.routes.clear();
+    h.routes.set('http://10.0.0.5/', {
+      status: 401,
+      headers: { 'www-authenticate': 'Digest realm="rt", nonce="abc"' },
+      body: '',
+    });
+
+    const res = await detectManagementPage('10.0.0.5');
+    expect(res.reachable).toBe(false);
+    expect(res.auth).toBeNull();
+    expect(res.brand).toBeNull();
+  });
+});

@@ -1,7 +1,8 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { Device } from '../../shared/types'
+import type { Device, WatchStatus } from '../../shared/types'
 import { StatusDot } from '../components/atoms/StatusDot'
 import { QualityBar } from '../components/atoms/QualityBar'
+import { Sparkline } from '../components/atoms/Sparkline'
 import { EmptyState } from '../components/atoms/EmptyState'
 import { Icon } from '../components/Icon'
 import { stateTone } from '../lib/semantics'
@@ -19,6 +20,8 @@ export interface DevicesViewProps {
   onOpenDetail: (id: string) => void
   scanning: boolean
   totalDevices: number
+  /** 监控目标（task-025：行内徽标与快捷开关的数据源） */
+  watches?: WatchStatus[]
 }
 
 const SORT_LABEL: Record<SortKey, string> = {
@@ -39,11 +42,21 @@ interface DeviceRowProps {
   device: Device
   selected: boolean
   onOpen: (id: string) => void
+  /** 是否已在持续监控中（task-025） */
+  watched: boolean
+  /** 加入/移出持续监控 */
+  onToggleWatch: (device: Device) => void
+}
+
+function sameTags(a: string[] | undefined, b: string[] | undefined): boolean {
+  if (a === b) return true
+  if (!a || !b || a.length !== b.length) return false
+  return a.every((t, i) => t === b[i])
 }
 
 function sameRow(a: DeviceRowProps, b: DeviceRowProps): boolean {
-  if (a.device === b.device && a.selected === b.selected && a.onOpen === b.onOpen) return true
-  if (a.selected !== b.selected || a.onOpen !== b.onOpen) return false
+  if (a.device === b.device && a.selected === b.selected && a.onOpen === b.onOpen && a.watched === b.watched && a.onToggleWatch === b.onToggleWatch) return true
+  if (a.selected !== b.selected || a.onOpen !== b.onOpen || a.watched !== b.watched || a.onToggleWatch !== b.onToggleWatch) return false
   const x = a.device
   const y = b.device
   return (
@@ -60,6 +73,9 @@ function sameRow(a: DeviceRowProps, b: DeviceRowProps): boolean {
     x.isSelf === y.isSelf &&
     x.ipConflict === y.ipConflict &&
     x.firstSeen === y.firstSeen &&
+    x.note === y.note &&
+    sameTags(x.tags, y.tags) &&
+    x.rttHistory === y.rttHistory &&
     x.quality.latencyMs === y.quality.latencyMs &&
     x.quality.packetLossPct === y.quality.packetLossPct &&
     x.quality.score === y.quality.score &&
@@ -71,7 +87,7 @@ function sameRow(a: DeviceRowProps, b: DeviceRowProps): boolean {
   )
 }
 
-const DeviceRow = memo(function DeviceRow({ device, selected, onOpen }: DeviceRowProps) {
+const DeviceRow = memo(function DeviceRow({ device, selected, onOpen, watched, onToggleWatch }: DeviceRowProps) {
   // 有样本就能显示测量值（延迟/丢包是真的），只是样本 < 8 时不给评级
   const hasSamples = device.quality.samples > 0
   const bw = device.bandwidth
@@ -103,6 +119,11 @@ const DeviceRow = memo(function DeviceRow({ device, selected, onOpen }: DeviceRo
         <span className="dev-ip">{device.ip}</span>
         {device.isGateway && <span className="dev-badge">网关</span>}
         {device.isSelf && <span className="dev-badge">本机</span>}
+        {watched && (
+          <span className="dev-badge" title="该 IP 在持续 Ping 监控中（宕机自动告警）">
+            监控中
+          </span>
+        )}
         {device.ipConflict && (
           <span className="dev-badge dev-badge--conflict" title="ARP 表中该 IP 解析出多个 MAC，疑似地址冲突或 ARP 欺骗">
             IP 冲突
@@ -113,6 +134,14 @@ const DeviceRow = memo(function DeviceRow({ device, selected, onOpen }: DeviceRo
         <span className="dev-name" title={name ?? undefined}>
           {name ?? <span className="na">—</span>}
         </span>
+        {device.note && (
+          <Icon
+            name="info"
+            size={12}
+            className="u-note-ico"
+            label={`备注：${device.note}`}
+          />
+        )}
       </td>
       <td className="mono u-115">{mac ?? <span className="na">—</span>}</td>
       <td className="muted">{device.vendor ?? <span className="na">—</span>}</td>
@@ -126,6 +155,13 @@ const DeviceRow = memo(function DeviceRow({ device, selected, onOpen }: DeviceRo
       </td>
       <td className="mono u-115">
         {hasSamples ? fmtMs(device.quality.latencyMs) : <span className="na">—</span>}
+        <Sparkline
+          values={device.rttHistory}
+          width={64}
+          height={18}
+          maxPoints={60}
+          className="rtt-mini"
+        />
       </td>
       <td className="mono u-115">
         {hasSamples ? fmtPct(device.quality.packetLossPct) : <span className="na">—</span>}
@@ -157,6 +193,19 @@ const DeviceRow = memo(function DeviceRow({ device, selected, onOpen }: DeviceRo
           </span>
         )}
       </td>
+      <td>
+        <button
+          type="button"
+          className="btn btn--ghost btn--sm"
+          title={watched ? '移出持续 Ping 监控' : '加入持续 Ping 监控（宕机自动告警）'}
+          onClick={(e) => {
+            e.stopPropagation()
+            onToggleWatch(device)
+          }}
+        >
+          {watched ? '移出监控' : '监控'}
+        </button>
+      </td>
     </tr>
   )
 }, sameRow)
@@ -177,13 +226,24 @@ function ipValue(ip: string): number {
 
 const STATE_RANK: Record<string, number> = { offline: 0, degraded: 1, scanning: 2, online: 3 }
 
-export function DevicesView({ devices, selectedId, onOpenDetail, scanning, totalDevices }: DevicesViewProps) {
+export function DevicesView({
+  devices,
+  selectedId,
+  onOpenDetail,
+  scanning,
+  totalDevices,
+  watches,
+}: DevicesViewProps) {
   const [query, setQuery] = useState('')
   const [status, setStatus] = useState<StatusFilter>('all')
   const [kind, setKind] = useState<string>('all')
   const [traffic, setTraffic] = useState<TrafficFilter>('all')
   const [sort, setSort] = useState<SortKey>('ip')
   const [sortDir, setSortDir] = useState<SortDir>('asc')
+  /** 标签筛选（task-025）：点标签 chip 过滤，再点取消 */
+  const [activeTag, setActiveTag] = useState<string | null>(null)
+  /** 监控操作失败提示（成功靠快照回流更新徽标） */
+  const [watchMsg, setWatchMsg] = useState<string | null>(null)
   /** 增量分页：大网段（200+ 设备）时先渲染前 100 行，"显示更多"逐页放量 */
   const [visibleCount, setVisibleCount] = useState(100)
   const searchRef = useRef<HTMLInputElement | null>(null)
@@ -208,6 +268,34 @@ export function DevicesView({ devices, selectedId, onOpenDetail, scanning, total
     for (const d of devices) set.add(d.kind)
     return Array.from(set).sort()
   }, [devices])
+
+  /** 全部标签（按出现次数排序）——标签筛选 chips 数据源 */
+  const allTags = useMemo(() => {
+    const m = new Map<string, number>()
+    for (const d of devices) {
+      for (const t of d.tags ?? []) m.set(t, (m.get(t) ?? 0) + 1)
+    }
+    return Array.from(m.entries()).sort((a, b) => b[1] - a[1])
+  }, [devices])
+
+  const watchedIps = useMemo(() => new Set((watches ?? []).map((w) => w.ip)), [watches])
+
+  /** 行内加入/移出持续监控；失败红字提示，成功靠 5s 快照回流更新徽标 */
+  const toggleWatch = useCallback(
+    (device: Device) => {
+      const api = window.lanApi
+      if (!api || !device.ip) return
+      const ip = device.ip
+      const call = watchedIps.has(ip) ? api.watchRemove(ip) : api.watchAdd(ip, null)
+      Promise.resolve(call)
+        .then((res) => {
+          if ('error' in res && res.error) setWatchMsg(`${ip}：${res.error}`)
+          else setWatchMsg(null)
+        })
+        .catch((err: unknown) => setWatchMsg(err instanceof Error ? err.message : String(err)))
+    },
+    [watchedIps],
+  )
 
   const counts = useMemo(() => {
     let online = 0
@@ -235,13 +323,16 @@ export function DevicesView({ devices, selectedId, onOpenDetail, scanning, total
       if (kind !== 'all' && d.kind !== kind) return false
       if (traffic === 'attributable' && !d.bandwidth.attributable) return false
       if (traffic === 'unattributable' && d.bandwidth.attributable) return false
+      if (activeTag && !(d.tags ?? []).includes(activeTag)) return false
       if (!q) return true
       return (
         d.ip.includes(q) ||
         (d.mac ?? '').toLowerCase().includes(q) ||
         (d.hostname ?? '').toLowerCase().includes(q) ||
         (d.displayName ?? '').toLowerCase().includes(q) ||
-        (d.vendor ?? '').toLowerCase().includes(q)
+        (d.vendor ?? '').toLowerCase().includes(q) ||
+        (d.note ?? '').toLowerCase().includes(q) ||
+        (d.tags ?? []).some((t) => t.toLowerCase().includes(q))
       )
     })
 
@@ -298,12 +389,12 @@ export function DevicesView({ devices, selectedId, onOpenDetail, scanning, total
       }
     })
     return out
-  }, [devices, query, status, kind, traffic, sort, sortDir])
+  }, [devices, query, status, kind, traffic, activeTag, sort, sortDir])
 
   // 筛选/排序变化时回到第一页，避免停留在深处看不到新结果的首行
   useEffect(() => {
     setVisibleCount(100)
-  }, [query, status, kind, traffic, sort, sortDir])
+  }, [query, status, kind, traffic, activeTag, sort, sortDir])
 
   const visibleRows = useMemo(
     () => (rows.length > visibleCount ? rows.slice(0, visibleCount) : rows),
@@ -317,6 +408,7 @@ export function DevicesView({ devices, selectedId, onOpenDetail, scanning, total
     setStatus('all')
     setKind('all')
     setTraffic('all')
+    setActiveTag(null)
   }, [])
 
   const header = (key: SortKey, label: string, alignRight = false) => {
@@ -461,9 +553,39 @@ export function DevicesView({ devices, selectedId, onOpenDetail, scanning, total
         </select>
       </div>
 
+      {/* 标签筛选 chips（task-025）：与搜索并存，再点取消 */}
+      {(allTags.length > 0 || activeTag) && (
+        <div className="chip-row tag-filter" role="group" aria-label="标签筛选">
+          {allTags.map(([tag, count]) => (
+            <button
+              key={tag}
+              type="button"
+              className="chip chip--plain tag-chip"
+              data-active={activeTag === tag ? 'true' : undefined}
+              onClick={() => setActiveTag((cur) => (cur === tag ? null : tag))}
+              title={activeTag === tag ? '取消该标签筛选' : `只看标签「${tag}」的设备`}
+            >
+              {tag} <span className="dim">{count}</span>
+            </button>
+          ))}
+          {activeTag && (
+            <button type="button" className="btn btn--ghost btn--sm" onClick={() => setActiveTag(null)}>
+              清除标签筛选
+            </button>
+          )}
+        </div>
+      )}
+
+      {watchMsg && (
+        <div className="u-11 u-crit mt-10" role="alert">
+          {watchMsg}
+        </div>
+      )}
+
       <div className="card table-wrap">
         <table className="table table--devices">
           <colgroup className="cols-devices">
+            <col />
             <col />
             <col />
             <col />
@@ -491,26 +613,34 @@ export function DevicesView({ devices, selectedId, onOpenDetail, scanning, total
               {header('loss', '丢包')}
               <th>质量</th>
               {header('bandwidth', '↓/↑ bit/s', true)}
+              <th>监控</th>
             </tr>
           </thead>
           <tbody>
             {visibleRows.map((d) => (
-              <DeviceRow key={d.id} device={d} selected={d.id === selectedId} onOpen={onOpen} />
+              <DeviceRow
+                key={d.id}
+                device={d}
+                selected={d.id === selectedId}
+                onOpen={onOpen}
+                watched={watchedIps.has(d.ip)}
+                onToggleWatch={toggleWatch}
+              />
             ))}
           </tbody>
         </table>
 
         {rows.length === 0 && (
           <EmptyState
-            icon={query || status !== 'all' || kind !== 'all' ? 'search' : 'devices'}
-            title={query || status !== 'all' || kind !== 'all' ? '没有匹配的设备' : '尚未发现设备'}
+            icon={query || status !== 'all' || kind !== 'all' || activeTag ? 'search' : 'devices'}
+            title={query || status !== 'all' || kind !== 'all' || activeTag ? '没有匹配的设备' : '尚未发现设备'}
             desc={
-              query || status !== 'all' || kind !== 'all'
+              query || status !== 'all' || kind !== 'all' || activeTag
                 ? '当前筛选条件下没有设备。清空筛选可查看全部扫描结果。'
                 : '本轮扫描未返回任何设备。请确认网卡已连接目标网段，或手动触发一次刷新。'
             }
             actions={
-              query || status !== 'all' || kind !== 'all' ? (
+              query || status !== 'all' || kind !== 'all' || activeTag ? (
                 <button type="button" className="btn" onClick={resetFilters}>
                   清空筛选
                 </button>

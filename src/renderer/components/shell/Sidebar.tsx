@@ -7,6 +7,7 @@ export type ViewKey =
   | 'printermanage'
   | 'alarms'
   | 'router'
+  | 'watches'
   | 'diagnostics'
   | 'terminal'
   | 'settings'
@@ -26,6 +27,7 @@ const ITEMS: Array<{ key: ViewKey; label: string; icon: IconName }> = [
   { key: 'printermanage', label: '打印管理', icon: 'wrench' },
   { key: 'alarms', label: '告警', icon: 'alarm' },
   { key: 'router', label: '路由器', icon: 'router' },
+  { key: 'watches', label: '监控', icon: 'activity' },
   { key: 'diagnostics', label: '诊断', icon: 'activity' },
   { key: 'terminal', label: '终端', icon: 'terminal' },
   { key: 'settings', label: '设置', icon: 'info' },

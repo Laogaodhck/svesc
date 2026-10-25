@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { DiagKind, DiagResult, LogBundle, NetAdapter } from '../../shared/types'
+import type { DiagKind, DiagResult, LogBundle, NetAdapter, PortScanResult } from '../../shared/types'
 import { EmptyState } from '../components/atoms/EmptyState'
 import { Icon } from '../components/Icon'
 
@@ -48,6 +48,13 @@ export function DiagnosticsView({
   const [diagMsg, setDiagMsg] = useState<string | null>(null)
   const [diag, setDiag] = useState<DiagResult | null>(null)
 
+  // 自定义端口扫描（task-025）：目标与快速诊断共用同一个输入框
+  const [scanFrom, setScanFrom] = useState('1')
+  const [scanTo, setScanTo] = useState('1024')
+  const [scanBusy, setScanBusy] = useState(false)
+  const [scanResult, setScanResult] = useState<PortScanResult | null>(null)
+  const [scanErr, setScanErr] = useState<string | null>(null)
+
   const [adapters, setAdapters] = useState<NetAdapter[] | null>(null)
   const [adapterErr, setAdapterErr] = useState<string | null>(null)
   const [adapterLoading, setAdapterLoading] = useState(false)
@@ -92,6 +99,30 @@ export function DiagnosticsView({
     },
     [hasApi, busy, target, fail],
   )
+
+  /* -------- 自定义端口扫描（task-025） -------- */
+  const runPortScan = useCallback(async () => {
+    if (!hasApi || scanBusy) return
+    const t = targetTrimmed
+    // 与主进程白名单一致：目标不合法就不发 IPC
+    if (!t || !isValidTarget(t)) return
+    const from = Number(scanFrom)
+    const to = Number(scanTo)
+    if (!Number.isInteger(from) || !Number.isInteger(to) || from < 1 || to > 65535 || from > to) {
+      setScanErr('端口范围不合法：1-65535，起始 ≤ 结束（单次最多 1024 个端口）')
+      return
+    }
+    setScanBusy(true)
+    setScanErr(null)
+    setScanResult(null)
+    try {
+      setScanResult(await window.lanApi.diagPortScan(t, from, to))
+    } catch (err) {
+      setScanErr(err instanceof Error ? err.message : String(err))
+    } finally {
+      setScanBusy(false)
+    }
+  }, [hasApi, scanBusy, targetTrimmed, scanFrom, scanTo])
 
   /* -------- presetTarget：填入目标并自动跑一次 ping（ref 防重复） --------
    * P1 时序缺陷修复：busy 时不标记 ref、不清 preset——否则 runDiag 因 busy return
@@ -226,7 +257,125 @@ export function DiagnosticsView({
             <div className={diag.ok ? 'u-115' : 'u-115 u-crit'}>
               {diag.ok ? diag.summary : (diag.error ?? diag.summary ?? '诊断失败')}
             </div>
-            <pre className="diag-output">{diag.lines.join('\n')}</pre>
+
+            {/* tracert 结构化跳数表（task-025）：解析失败/为空则诚实降级，只看原始输出 */}
+            {diag.kind === 'tracert' && diag.hops && diag.hops.length > 0 && (
+              <table className="conn-table mt-10">
+                <thead>
+                  <tr>
+                    <th>跳数</th>
+                    <th>IP</th>
+                    <th>主机名</th>
+                    <th>延迟 ×3</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {diag.hops.map((h) => (
+                    <tr key={h.idx}>
+                      <td className="mono">{h.idx}</td>
+                      <td className="mono">{h.ip ?? <span className="na">*（超时，未响应）</span>}</td>
+                      <td>{h.hostname ?? <span className="na">—</span>}</td>
+                      <td className="mono">
+                        {h.rtts.every((r) => r === null)
+                          ? '* * *'
+                          : h.rtts.map((r) => (r === null ? '*' : `${r} ms`)).join('  ')}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+
+            <details className="diag-raw mt-10">
+              <summary className="u-11 dim">原始输出（{diag.lines.length} 行）</summary>
+              <pre className="diag-output">{diag.lines.join('\n')}</pre>
+            </details>
+          </div>
+        )}
+      </div>
+
+      {/* —— 自定义端口扫描（task-025） —— */}
+      <div className="card">
+        <div className="card__head">
+          <span className="card__title">端口扫描</span>
+          <span className="card__hint">TCP 连接探测 · 单次最多 1024 个端口 · 目标与上方共用</span>
+        </div>
+        <div className="manage-add">
+          <input
+            className="input"
+            style={{ width: 110 }}
+            type="text"
+            inputMode="numeric"
+            placeholder="起始端口"
+            value={scanFrom}
+            aria-label="起始端口"
+            onChange={(e) => {
+              setScanFrom(e.target.value)
+              setScanErr(null)
+            }}
+          />
+          <span className="dim">–</span>
+          <input
+            className="input"
+            style={{ width: 110 }}
+            type="text"
+            inputMode="numeric"
+            placeholder="结束端口"
+            value={scanTo}
+            aria-label="结束端口"
+            onChange={(e) => {
+              setScanTo(e.target.value)
+              setScanErr(null)
+            }}
+          />
+          <button
+            type="button"
+            className="btn"
+            disabled={scanBusy || targetInvalid || !targetTrimmed}
+            onClick={() => void runPortScan()}
+          >
+            {scanBusy ? '扫描中…' : '开始扫描'}
+          </button>
+        </div>
+        {targetInvalid && (
+          <div className="router-msg" data-tone="crit">
+            先在上方填写合法目标（仅允许字母、数字与 . _ -）
+          </div>
+        )}
+        {scanErr && (
+          <div className="router-msg" data-tone="crit">
+            {scanErr}
+          </div>
+        )}
+        {scanResult && (
+          <div className="mt-10">
+            {scanResult.error ? (
+              <div className="router-msg" data-tone="crit">
+                扫描失败：{scanResult.error}
+              </div>
+            ) : (
+              <>
+                <div className="u-115">
+                  扫描 <span className="mono">{scanResult.ports.length}</span> 个端口 · 开放{' '}
+                  <span className="mono">{scanResult.openPorts.length}</span> 个 · 耗时{' '}
+                  <span className="mono">{scanResult.durationMs}</span> ms
+                </div>
+                {scanResult.openPorts.length === 0 ? (
+                  <p className="note mt-10">
+                    <Icon name="info" size={13} className="note__icon" />
+                    该范围内未发现开放端口。注意：主机防火墙可能对未监听端口丢弃而非拒绝，"无开放"不等于"主机关机"。
+                  </p>
+                ) : (
+                  <div className="chip-row mt-10">
+                    {scanResult.openPorts.map((p) => (
+                      <span className="chip chip--port" key={p}>
+                        {p}
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </>
+            )}
           </div>
         )}
       </div>

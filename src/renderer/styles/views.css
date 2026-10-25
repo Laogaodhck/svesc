@@ -455,7 +455,7 @@
 
 .job {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) auto auto;
   gap: 2px 10px;
   font-size: 11px;
 }
@@ -479,10 +479,42 @@
   grid-column: 1 / -1;
 }
 
-.jobs__more {
+/* task-024：队列任务操作（取消/暂停/恢复） */
+.job__actions {
+  display: flex;
+  gap: 3px;
+  align-items: center;
+}
+
+.job__act {
+  padding: 0 5px;
+  font-size: 10px;
+  line-height: 16px;
+  height: auto;
+}
+
+.job-op-error {
+  display: flex;
+  align-items: center;
+  gap: 4px;
   font-size: 10.5px;
-  color: var(--text-dim);
-  padding-top: 1px;
+  color: var(--crit);
+  word-break: break-all;
+}
+
+/* 队列展开/收起（task-024：全量队列展示） */
+.jobs__toggle {
+  font-size: 10.5px;
+  color: var(--accent);
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  text-align: left;
+}
+
+.jobs__toggle:hover {
+  text-decoration: underline;
 }
 
 .src-badge {
@@ -1411,6 +1443,38 @@
 
 .router-footer__err {
   color: var(--crit);
+}
+
+/* task-024：WAN 流量趋势 */
+.router-wan-chart {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 2px 4px;
+}
+
+.router-wan-chart__row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.router-wan-chart__label {
+  width: 30px;
+  flex: none;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.router-wan-chart__now {
+  min-width: 96px;
+  text-align: right;
+  font-size: 12px;
+}
+
+/* task-024：租约/无线客户端行 → 设备抽屉联动 */
+tr.router-row-link {
+  cursor: pointer;
 }
 
 .spin {

@@ -1,8 +1,9 @@
 /**
- * UPnP IGD 通道纯函数测试（`src/main/engine/router/upnp.ts`）。
- * 真实样例取自 Vera 抓包的局域网网关描述页（已脱敏）。
+ * UPnP IGD 通道测试（`src/main/engine/router/upnp.ts`）。
+ * 纯函数用真实样例（Vera 抓包的局域网网关描述页，已脱敏）；
+ * upnpQuery 全流程用 httpx 替身（按 SOAPACTION 分发）覆盖 GetStatusInfo。
  */
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   buildMsearch,
   buildSoap,
@@ -11,7 +12,23 @@ import {
   parseSoapFields,
   resolveControlUrl,
   soapActionHeader,
+  upnpQuery,
 } from '../src/main/engine/router/upnp';
+
+const httpMock = vi.hoisted(() => vi.fn());
+
+vi.mock('../src/main/engine/router/httpx', () => ({
+  httpRequest: (url: string, opts?: { headers?: Record<string, string>; method?: string }) =>
+    httpMock(url, opts),
+}));
+
+/** 组装 SOAP 响应（测试替身用）。 */
+function soapXml(action: string, fields: Record<string, string>): string {
+  const inner = Object.entries(fields)
+    .map(([k, v]) => `<${k}>${v}</${k}>`)
+    .join('');
+  return `<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body><u:${action}Response xmlns:u="urn:schemas-upnp-org:service:WANIPConnection:1">${inner}</u:${action}Response></s:Body></s:Envelope>`;
+}
 
 const DESC_XML = `<?xml version="1.0"?>
 <root xmlns="urn:schemas-upnp-org:device-1-0">
@@ -114,5 +131,73 @@ describe('SOAP', () => {
   it('parseSoapFields 对 Fault 返回空对象', () => {
     const fault = '<s:Envelope><s:Body><s:Fault><faultcode>s:Client</faultcode></s:Fault></s:Body></s:Envelope>';
     expect(parseSoapFields(fault, 'GetTotalBytesReceivedResponse')).toEqual({});
+  });
+});
+
+describe('upnpQuery GetStatusInfo（task-024）', () => {
+  beforeEach(() => {
+    httpMock.mockReset();
+  });
+
+  /** 按 SOAPACTION 分发的标准替身：描述页 + 全部四个 action。 */
+  function mockAllOk(statusInfoBody: string | null): void {
+    httpMock.mockImplementation(
+      async (_url: string, opts?: { headers?: Record<string, string>; method?: string }) => {
+        if (opts?.method !== 'POST') {
+          return { status: 200, body: DESC_XML, error: null, headers: {} };
+        }
+        const action = opts?.headers?.SOAPACTION ?? '';
+        if (action.includes('#GetExternalIPAddress')) {
+          return { status: 200, body: soapXml('GetExternalIPAddress', { NewExternalIPAddress: '116.21.63.84' }), error: null, headers: {} };
+        }
+        if (action.includes('#GetTotalBytesReceived')) {
+          return { status: 200, body: soapXml('GetTotalBytesReceived', { NewTotalBytesReceived: '123456' }), error: null, headers: {} };
+        }
+        if (action.includes('#GetTotalBytesSent')) {
+          return { status: 200, body: soapXml('GetTotalBytesSent', { NewTotalBytesSent: '654321' }), error: null, headers: {} };
+        }
+        if (action.includes('#GetStatusInfo')) {
+          if (statusInfoBody === null) return { status: 501, body: '', error: null, headers: {} };
+          return { status: 200, body: statusInfoBody, error: null, headers: {} };
+        }
+        return { status: 501, body: '', error: null, headers: {} };
+      },
+    );
+  }
+
+  it('解析 NewConnectionStatus / NewUptime，其余字段照常', async () => {
+    mockAllOk(
+      soapXml('GetStatusInfo', { NewConnectionStatus: 'Connected', NewLastConnectionError: 'ERROR_NONE', NewUptime: '987654' }),
+    );
+    const snap = await upnpQuery('http://192.168.1.1/igd.xml');
+    expect(snap.error).toBeNull();
+    expect(snap.wanIp).toBe('116.21.63.84');
+    expect(snap.totalBytesRx).toBe(123456);
+    expect(snap.totalBytesTx).toBe(654321);
+    expect(snap.connectionStatus).toBe('Connected');
+    expect(snap.uptimeSec).toBe(987654);
+  });
+
+  it('GetStatusInfo 失败（固件不实现，HTTP 501）→ 两字段保持 null，不影响其余数据', async () => {
+    mockAllOk(null);
+    const snap = await upnpQuery('http://192.168.1.1/igd.xml');
+    expect(snap.connectionStatus).toBeNull();
+    expect(snap.uptimeSec).toBeNull();
+    expect(snap.wanIp).toBe('116.21.63.84');
+    expect(snap.totalBytesRx).toBe(123456);
+  });
+
+  it('NewUptime 非数字 → uptimeSec null；NewConnectionStatus 照常取', async () => {
+    mockAllOk(soapXml('GetStatusInfo', { NewConnectionStatus: 'Disconnected', NewUptime: 'abc' }));
+    const snap = await upnpQuery('http://192.168.1.1/igd.xml');
+    expect(snap.connectionStatus).toBe('Disconnected');
+    expect(snap.uptimeSec).toBeNull();
+  });
+
+  it('NewConnectionStatus 为空串 → 保持 null（不编造状态）', async () => {
+    mockAllOk(soapXml('GetStatusInfo', { NewConnectionStatus: '', NewUptime: '10' }));
+    const snap = await upnpQuery('http://192.168.1.1/igd.xml');
+    expect(snap.connectionStatus).toBeNull();
+    expect(snap.uptimeSec).toBe(10);
   });
 });

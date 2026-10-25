@@ -26,7 +26,8 @@ export interface LiveFeed {
   dismissError: () => void
   refresh: () => void
   setAutoScan: (enabled: boolean) => void
-  exportReport: () => Promise<{ ok: boolean; path: string | null; error?: string }>
+  /** 导出报告（task-025：format 缺省 json，可传 html） */
+  exportReport: (format?: 'json' | 'html') => Promise<{ ok: boolean; path: string | null; error?: string }>
   ackAlarm: (alarmId: string) => Promise<boolean>
 }
 
@@ -125,11 +126,11 @@ export function useLiveFeed(): LiveFeed {
       })
   }, [])
 
-  const exportReport = useCallback(async () => {
+  const exportReport = useCallback(async (format?: 'json' | 'html') => {
     const api = apiRef.current
     if (!api) return { ok: false, path: null, error: '未连接主进程，无法导出报告' }
     try {
-      const res = await api.exportReport()
+      const res = await api.exportReport(format)
       if (!res.ok) {
         setError(res.error ?? '导出失败')
         return res

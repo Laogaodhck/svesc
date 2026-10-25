@@ -63,6 +63,7 @@ describe('JsonStore.settings 扩展字段', () => {
       notifyDesktop: true,
       closeToTray: true,
       rememberRouterPassword: true,
+      notifyWebhookUrl: '',
     });
   });
 
@@ -76,6 +77,7 @@ describe('JsonStore.settings 扩展字段', () => {
       notifyDesktop: true,
       closeToTray: true,
       rememberRouterPassword: true,
+      notifyWebhookUrl: '',
     });
   });
 });

@@ -12,6 +12,7 @@
  */
 import type {
   Alarm,
+  BandwidthPoint,
   DataSource,
   Device,
   DeviceDetail,
@@ -22,6 +23,8 @@ import type {
   Snapshot,
   SystemStat,
   WarningEntry,
+  WatchStatus,
+  WatchTarget,
 } from '../../shared/types';
 import {
   ALARM_THRESHOLDS,
@@ -33,8 +36,11 @@ import {
   SCAN_BUDGET_MS,
   SCHEDULE,
   TIMEOUTS,
+  WATCH,
   WINDOW,
 } from '../../shared/constants';
+import { WatchManager } from './watch';
+import { ALARM_CODES } from './alarms';
 import { readArp, type ArpEntry, type ArpScanResult } from './discovery/arp';
 import { pingSweep, pingQuality } from './discovery/ping';
 import { probeHosts } from './discovery/ports';
@@ -74,6 +80,8 @@ export interface SchedulerHooks {
   onSnapshot?: (snapshot: Snapshot) => void;
   onScanProgress?: (progress: ScanProgress) => void;
   onAlarm?: (alarm: Alarm) => void;
+  /** 本轮自动恢复的告警（task-025：webhook resolved 触发点） */
+  onAlarmResolved?: (alarms: Alarm[]) => void;
   nextRequestId?: () => number;
   /** 打印管理页配置提供者（手动打印机 + 忽略列表）；未注入 = 无管理配置 */
   getPrinterManage?: () => { manual: { ip: string; note: string | null; addedAt: number }[]; ignored: string[] };
@@ -240,6 +248,10 @@ export class Scheduler {
   private autoScan: boolean;
   private heartbeatCursor = 0;
   private running = false;
+  /** 持续 Ping 监控（task-025）：独立 5s 轮询，变迁直接进告警引擎 */
+  private watches: WatchManager;
+  /** 总带宽历史环（task-025，60 点；失败轮为 null 点，曲线断开呈现） */
+  private bandwidthHistory: BandwidthPoint[] = [];
 
   lastTimings: ScanTimings | null = null;
 
@@ -253,6 +265,60 @@ export class Scheduler {
     this.alarms = alarmEngine ?? new AlarmEngine(WINDOW.alarmHistory);
     this.dns = new ReverseDnsCache();
     this.autoScan = cfg.autoScanIntervalSec > 0;
+    // task-025：监控目标宕机/恢复变迁 → WATCH_DOWN 告警（外部注入通道）+ 立即推帧
+    this.watches = new WatchManager({
+      intervalMs: WATCH.intervalMs,
+      windowSize: WATCH.windowSize,
+      pingTimeoutMs: WATCH.pingTimeoutMs,
+      onTransition: (down, target) => this.handleWatchTransition(down, target),
+      onError: (message) => this.replaceWarnings('system', [message]),
+    });
+  }
+
+  /** 监控目标状态变迁 → 告警联动（task-025）。 */
+  private handleWatchTransition(down: boolean, target: WatchTarget): void {
+    const targetId = target.ip;
+    const name = target.note ?? target.ip;
+    if (down) {
+      const alarm = this.alarms.ingestExternal(
+        ALARM_CODES.WATCH_DOWN,
+        'critical',
+        'device',
+        targetId,
+        name,
+        `监控目标宕机：${name}`,
+        `IP ${target.ip} · 持续 Ping 连续无响应`,
+        Date.now(),
+      );
+      if (alarm) this.hooks.onAlarm?.(alarm);
+    } else {
+      const resolved = this.alarms.ingestResolve(ALARM_CODES.WATCH_DOWN, targetId, Date.now());
+      if (resolved) this.hooks.onAlarmResolved?.([resolved]);
+    }
+    this.emitSnapshotNow();
+  }
+
+  /** 引擎门面：监控目标增删（持久化由调用方负责落 store，这里只改运行态）。 */
+  watchAdd(ip: string, note: string | null): { ok: boolean; error: string | null } {
+    const result = this.watches.add(ip, note);
+    if (result.ok) this.emitSnapshotNow();
+    return result;
+  }
+
+  watchRemove(ip: string): { ok: boolean } {
+    const existed = this.watches.list().some((t) => t.ip === ip);
+    const result = this.watches.remove(ip);
+    if (existed) this.emitSnapshotNow();
+    return result;
+  }
+
+  watchStatus(): WatchStatus[] {
+    return this.watches.status();
+  }
+
+  /** 启动前恢复持久化目标列表。 */
+  hydrateWatches(targets: WatchTarget[]): void {
+    this.watches.hydrate(targets);
   }
 
   get alarmEngine(): AlarmEngine {
@@ -323,11 +389,14 @@ export class Scheduler {
         /* runFullScan 内部已兜底；此处防 unhandled rejection */
       });
     this.installTimers();
+    // task-025：持续 Ping 监控独立定时器（与观测类定时器同生命周期）
+    this.watches.start();
   }
 
   stop(): void {
     this.running = false;
     this.clearTimers();
+    this.watches.stop();
   }
 
   private clearTimers(): void {
@@ -368,6 +437,13 @@ export class Scheduler {
       const sample = await this.meter.sample();
       // R-02：采样失败必须可感知（快照里 rxBps/txBps 会是 null，绝不兜成 0）
       this.replaceWarnings('bandwidth', sample.error ? [`带宽采样失败：${sample.error}`] : []);
+      // task-025：总带宽历史环（60 点）。失败轮入 null 点（曲线断开，诚实呈现）；
+      // 尚无差分基线（intervalMs=0）不入点——那是"还没开始计量"，不是 0 也不是失败
+      if (sample.error) {
+        this.pushBandwidthPoint({ ts: sample.at, rxBps: null, txBps: null });
+      } else if (sample.intervalMs > 0) {
+        this.pushBandwidthPoint({ ts: sample.at, rxBps: sample.rxBps, txBps: sample.txBps });
+      }
       // 带宽采样不推进告警的"连续轮次"计数
       this.emitSnapshot(false);
     } catch (err) {
@@ -375,6 +451,12 @@ export class Scheduler {
     } finally {
       this.bandwidthInFlight = false;
     }
+  }
+
+  /** 总带宽历史环推入（60 点 ≈ 2 分钟，与快照 UI 曲线一致）。 */
+  private pushBandwidthPoint(point: BandwidthPoint): void {
+    this.bandwidthHistory.push(point);
+    if (this.bandwidthHistory.length > 60) this.bandwidthHistory.splice(0, this.bandwidthHistory.length - 60);
   }
 
   /** 5s 心跳：只重读 ARP（85ms）+ 轮转 ping 最多 32 台，避免每 5s 打 254 个地址。 */
@@ -1006,6 +1088,11 @@ export class Scheduler {
       });
       this.lastAlarmEval = evaluation;
       for (const alarm of evaluation.created) this.hooks.onAlarm?.(alarm);
+      // task-025：本轮自动恢复的告警上抛（webhook resolved 触发点）
+      if (evaluation.resolved.length > 0) {
+        const resolvedAlarms = evaluation.alarms.filter((a) => evaluation.resolved.includes(a.id));
+        this.hooks.onAlarmResolved?.(resolvedAlarms);
+      }
       alarms = evaluation.alarms;
     } else {
       alarms = this.lastAlarmEval.alarms;
@@ -1027,6 +1114,8 @@ export class Scheduler {
       // R-02：绝不把"没采到"写成 0
       rxBps: bandwidth?.rxBps ?? null,
       txBps: bandwidth?.txBps ?? null,
+      // task-025：总带宽历史环（副本，防渲染层直接改引擎内存）
+      bandwidthHistory: this.bandwidthHistory.map((p) => ({ ...p })),
       alarmCounts: this.alarms.counts(),
       scan: this.progress,
       lastScanAt: this.lastScanAt,
@@ -1043,6 +1132,8 @@ export class Scheduler {
       printers: composed.printers,
       alarms,
       system,
+      // task-025：持续 Ping 监控状态（无目标时为空数组）
+      watches: this.watches.status(),
       warnings: this.snapshotWarnings(sample),
     };
     this.lastSnapshot = snapshot;

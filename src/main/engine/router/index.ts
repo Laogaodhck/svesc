@@ -13,10 +13,18 @@ import type {
   RouterCapabilities,
   RouterIdentity,
   RouterStatus,
+  WirelessBandStatus,
   WirelessClient,
 } from '../../../shared/types';
 import { detectManagementPage } from './detect';
-import { UbusClient, parseBoard, parseDhcpLeases, parseWirelessDevices } from './openwrt';
+import {
+  UbusClient,
+  parseBoard,
+  parseDhcpLeases,
+  parseIwinfoDevices,
+  parseIwinfoInfo,
+  parseWirelessDevices,
+} from './openwrt';
 import { ssdpDiscover, upnpQuery, upnpReboot, resolveControlUrl, parseDeviceDescription } from './upnp';
 import { httpRequest } from './httpx';
 
@@ -70,6 +78,14 @@ export class RouterManager {
    */
   private managementPageCapable = false;
   /**
+   * Basic-Auth 会话（task-024）：管理页用 HTTP Basic 质询的路由器（华硕/部分华为等
+   * 无 ubus 通道的固件），凭据经 Authorization 头验证成功后的登录态。
+   * 登录时验证一次即进程内粘性（不存明文密码、不逐轮重验），logout 时清除。
+   * 与 ubus / web 会话正交；不提供任何 ubus 数据（数据诚实：不解析页面内容）。
+   */
+  private basicAuthOk = false;
+  private basicUser: string | null = null;
+  /**
    * 会话失效自动重登（task-022 B-2）：凭据提供者由主进程注入（每次现读盘上密文，
    * 引擎层不常驻明文密码）。会话被服务端作废（-32002）时按退避调度重登：
    * 60s × 2ⁿ，上限 10min；连续 3 次失败停用，等用户手动登录。
@@ -89,9 +105,10 @@ export class RouterManager {
       phase: 'probing',
       identity: null,
       capabilities: { ...EMPTY_CAPS },
-      wan: { ip: null, totalBytesRx: null, totalBytesTx: null, rxBps: null, txBps: null },
+      wan: { ip: null, totalBytesRx: null, totalBytesTx: null, rxBps: null, txBps: null, connectionStatus: null, uptimeSec: null },
       dhcpLeases: [],
       wirelessClients: [],
+      wirelessStatus: null,
       systemBoard: null,
       session: { loggedIn: false, user: null, error: null, kind: null, invalidatedAt: null },
       lastError: null,
@@ -103,31 +120,50 @@ export class RouterManager {
     return this.status;
   }
 
-  /** 登录 OpenWrt ubus；成功后立即刷新一轮状态。 */
+  /** 登录 OpenWrt ubus；失败且管理页给出 Basic 质询时降级 Basic-Auth 验证（task-024）。成功后立即刷新一轮状态。 */
   async login(user: string, password: string): Promise<{ ok: boolean; error: string | null }> {
     const gw = this.opts.getGateway();
     if (!gw) return { ok: false, error: '网关地址未知，无法登录' };
     const client = new UbusClient(gw);
     const res = await client.login(user, password);
     if (!res.ok) {
+      // Basic-Auth 降级（task-024）：无 ubus 通道的固件（管理页 401 + WWW-Authenticate: Basic，
+      // 华硕/部分华为等）凭据经 Authorization 头验证，HTTP 200 即登录成功。
+      // 只看状态码不解析页面内容——basic 会话仅提供登录态展示，不提供 ubus 数据。
+      const basic = await this.tryBasicAuth(gw, user, password);
+      if (basic.ok) {
+        this.basicAuthOk = true;
+        this.basicUser = user;
+        this.reloginFailures = 0;
+        this.status = {
+          ...this.status,
+          session: { loggedIn: true, user, error: null, kind: 'basic', invalidatedAt: null },
+        };
+        await this.refresh();
+        return { ok: true, error: null };
+      }
       // 失败不清 this.ubus：若存在旧会话，它真实有效，下一轮 doRefresh 照常取数
       // （审查 L5：行为可辩护，但必须文档化。如须强制换登，在此先 logout 旧客户端）。
-      // 同理不得清掉内置浏览器建立的管理页会话：两种会话正交，ubus 登录失败
-      // 不构成"管理页未登录"的证据。
-    const webAlive = this.webSessionActive;
-    this.status = {
-      ...this.status,
-      session: {
-        loggedIn: webAlive,
-        user: null,
-        error: res.error,
-        kind: webAlive ? 'web' : null,
-        // 登录失败（凭据错等）不改变"会话是否曾被服务端作废"的事实，粘性保留
-        invalidatedAt: this.status.session.invalidatedAt,
-      },
-    };
-    return res;
-  }
+      // 同理不得清掉内置浏览器建立的管理页会话与既有 basic 会话：各种会话正交，
+      // ubus 登录失败不构成"其他通道未登录"的证据。
+      const webAlive = this.webSessionActive || this.basicAuthOk;
+      // Basic 质询存在却验证失败 → 以 Basic 结果为准（它才是这台路由器的实际通道）。
+      // 返回值与 status.session.error 必须说同一句话：return res 只带 ubus 文案，
+      // UI 读返回值会把"Basic 认证失败：…"显示成"用户名或密码错误"（t8 测试抓到的分歧）。
+      const failError = basic.attempted ? `Basic 认证失败：${basic.error ?? '凭据被拒绝'}` : res.error;
+      this.status = {
+        ...this.status,
+        session: {
+          loggedIn: webAlive,
+          user: this.basicAuthOk ? this.basicUser : null,
+          error: failError,
+          kind: webAlive ? (this.webSessionActive ? 'web' : 'basic') : null,
+          // 登录失败（凭据错等）不改变"会话是否曾被服务端作废"的事实，粘性保留
+          invalidatedAt: this.status.session.invalidatedAt,
+        },
+      };
+      return { ok: false, error: failError };
+    }
     this.ubus = client;
     this.user = user;
     // 登录成功即认定支持 OpenWrt（能力位粘性，见 openwrtCapable 字段注释）
@@ -143,11 +179,49 @@ export class RouterManager {
     return { ok: true, error: null };
   }
 
+  /**
+   * Basic-Auth 通用登录验证（task-024）：探测管理页是否给出 Basic 质询，
+   * 是则带 Authorization 头 GET 验证凭据——HTTP 200 即通过，不解析页面内容。
+   * attempted=false 表示该路由器没有 Basic 质询（上层沿用 ubus 登录的错误文案）。
+   */
+  private async tryBasicAuth(
+    gw: string,
+    user: string,
+    password: string,
+  ): Promise<{ attempted: boolean; ok: boolean; error: string | null }> {
+    let page: Awaited<ReturnType<typeof detectManagementPage>>;
+    try {
+      page = await detectManagementPage(gw);
+    } catch {
+      return { attempted: false, ok: false, error: null };
+    }
+    if (!page.auth) return { attempted: false, ok: false, error: null };
+    const url = page.url ?? `http://${gw}/`;
+    let u: URL;
+    try {
+      u = new URL(url);
+    } catch {
+      return { attempted: true, ok: false, error: '管理页 URL 非法' };
+    }
+    const res = await httpRequest(url, {
+      port: Number(u.port) || (u.protocol === 'https:' ? 443 : 80),
+      path: u.pathname + u.search,
+      timeoutMs: ROUTER.pageProbeTimeoutMs,
+      headers: { Authorization: `Basic ${Buffer.from(`${user}:${password}`).toString('base64')}` },
+    });
+    if (res.error) return { attempted: true, ok: false, error: `管理页请求失败（${res.error}）` };
+    if (res.status === 200) return { attempted: true, ok: true, error: null };
+    return { attempted: true, ok: false, error: `凭据被拒绝（HTTP ${res.status ?? 'no-response'}）` };
+  }
+
   logout(): void {
     this.ubus?.logout();
     this.ubus = null;
     this.user = null;
     this.webSessionActive = false;
+    // task-024：同步清除 Basic-Auth 会话（用户主动登出即全通道登出）
+    this.basicAuthOk = false;
+    this.basicUser = null;
     // 世代号自增：在飞的 doRefresh 收尾时发现自己属于旧世代，整体丢弃本轮结果
     this.generation += 1;
     // 用户主动登出：取消挂起的自动重登（主动退出 ≠ 会话失效，重登违背用户意图）
@@ -247,9 +321,16 @@ export class RouterManager {
         capabilities: { ...base.capabilities, openwrt: this.openwrtCapable },
         session: {
           ...base.session,
-          loggedIn: (this.ubus !== null && this.ubus.loggedIn) || this.webSessionActive,
-          user: this.ubus !== null ? this.user : null,
-          kind: this.ubus !== null && this.ubus.loggedIn ? 'ubus' : this.webSessionActive ? 'web' : null,
+          loggedIn: (this.ubus !== null && this.ubus.loggedIn) || this.webSessionActive || this.basicAuthOk,
+          user: this.ubus !== null ? this.user : this.basicAuthOk ? this.basicUser : null,
+          kind:
+            this.ubus !== null && this.ubus.loggedIn
+              ? 'ubus'
+              : this.webSessionActive
+                ? 'web'
+                : this.basicAuthOk
+                  ? 'basic'
+                  : null,
           // invalidatedAt 粘性：本轮拿不到网关不构成"会话恢复"的证据，也不新增失效证据
           invalidatedAt: this.status.session.invalidatedAt,
         },
@@ -284,7 +365,10 @@ export class RouterManager {
         caps.managementPage = true;
         // 管理页最终 URL 粘性保留（302 → /login 的落点），内置浏览器直接打开它
         if (page.url) this.adminUrl = page.url;
-        identity = { ...identity, brand: page.brand as RouterBrand, modelHint: identity.modelHint ?? page.hint };
+        // 401 Basic 质询时看不到页面正文 → brand=null，不覆盖既有品牌（数据诚实）
+        if (page.brand !== null) {
+          identity = { ...identity, brand: page.brand as RouterBrand, modelHint: identity.modelHint ?? page.hint };
+        }
       } else {
         notes.push(`管理页不可达（${page.error ?? '无响应'}）`);
       }
@@ -304,6 +388,7 @@ export class RouterManager {
     // 自清会话，提前求值会把死会话投影成"已登录"（UI 假已登录）。
     let dhcpLeases: DhcpLease[] = [];
     let wirelessClients: WirelessClient[] = [];
+    let wirelessStatus: WirelessBandStatus[] | null = null;
     let systemBoard: RouterStatus['systemBoard'] = null;
     // 本round是否观测到"会话已失效"：只有调用路径的 -32002 算（瞬时故障不算）
     let sessionInvalid = false;
@@ -314,22 +399,34 @@ export class RouterManager {
     if (this.ubus && this.ubus.loggedIn) {
       // 直接走 call() + 纯函数解析，不用 board()/dhcpLeases()/wirelessClients() 包装：
       // 包装会吞掉 sessionInvalid，"会话已过期"就必须在界面上可见，不能静默变成空数据。
-      const [leaseRes, wirelessRes, boardRes] = await Promise.all([
-        this.ubus.call('luci-rpc', 'getDHCPLeases'),
-        this.ubus.call('luci-rpc', 'getWirelessDevices'),
-        this.ubus.call('system', 'board'),
+      const ubus = this.ubus;
+      const [leaseRes, wirelessRes, boardRes, iwinfoDevRes] = await Promise.all([
+        ubus.call('luci-rpc', 'getDHCPLeases'),
+        ubus.call('luci-rpc', 'getWirelessDevices'),
+        ubus.call('system', 'board'),
+        // task-024：iwinfo 设备列表（rpcd-mod-iwinfo；未安装该包的固件 -32000 → wirelessStatus 保持 null）
+        ubus.call('iwinfo', 'devices'),
       ]);
-      sessionInvalid = [leaseRes, wirelessRes, boardRes].some((r) => r.sessionInvalid === true);
+      sessionInvalid = [leaseRes, wirelessRes, boardRes, iwinfoDevRes].some((r) => r.sessionInvalid === true);
       dhcpLeases = leaseRes.ok ? parseDhcpLeases(leaseRes.payload) : [];
       wirelessClients = wirelessRes.ok ? parseWirelessDevices(wirelessRes.payload) : [];
       systemBoard = boardRes.ok ? parseBoard(boardRes.payload) : null;
       if (systemBoard && !identity.modelHint) identity = { ...identity, modelHint: systemBoard.model };
+      // 无线频段状态（task-024）：iwinfo devices → 逐设备 iwinfo info，最多 4 个防超时膨胀；
+      // 拿到设备列表（哪怕为空）→ 数组（[] = 已登录但无射频）；列表拿不到 → null（不支持/失败）。
+      if (iwinfoDevRes.ok) {
+        const devices = parseIwinfoDevices(iwinfoDevRes.payload).slice(0, 4);
+        const infoRes = await Promise.all(devices.map((d) => ubus.call('iwinfo', 'info', { device: d })));
+        sessionInvalid = sessionInvalid || infoRes.some((r) => r.sessionInvalid === true);
+        wirelessStatus = infoRes.map((r, i) => parseIwinfoInfo(r.payload, devices[i]));
+      }
       // 非 -32002 的调用失败（超时/HTTP/权限等）也要让界面知道原因，不得静默变空数据
       // （审查 M2，R-03"静默失败必须可感知"同源）。capabilityNotes 每轮重建，恢复后自然消失。
       const callLabels: Array<[string, typeof leaseRes]> = [
         ['DHCP 租约', leaseRes],
         ['无线客户端', wirelessRes],
         ['系统信息', boardRes],
+        ['无线频段状态', iwinfoDevRes],
       ];
       for (const [label, r] of callLabels) {
         if (!r.ok && r.sessionInvalid !== true && r.error !== null && r.error !== 'auth-required') {
@@ -363,20 +460,24 @@ export class RouterManager {
         totalBytesTx: upnpSnap?.totalBytesTx ?? null,
         rxBps: rate.rxBps,
         txBps: rate.txBps,
+        connectionStatus: upnpSnap?.connectionStatus ?? null,
+        uptimeSec: upnpSnap?.uptimeSec ?? null,
       },
       dhcpLeases,
       wirelessClients,
+      wirelessStatus,
       systemBoard,
       session: {
         // 客户端自己也可能已作废会话（-32002）：不能只查 this.ubus !== null，那会让 UI 显示假的"已登录"
-        loggedIn: ubusLoggedIn || this.webSessionActive,
+        loggedIn: ubusLoggedIn || this.webSessionActive || this.basicAuthOk,
         // 会话死后保留"最后登录的用户名"（既有契约，失效提示带着用户名更可读）；
-        // 从未 ubus 登录 / 已登出 → null（管理页会话不知道用户名，也不编造）
-        user: this.ubus !== null ? this.user : null,
+        // basic 会话同样带用户名；从未登录 / 已登出 → null（管理页会话不知道用户名，也不编造）
+        user: this.ubus !== null ? this.user : this.basicAuthOk ? this.basicUser : null,
         // 观测到会话失效时给出原因；未观测到时沿用上一条（消息要持续到用户重新登录）。
         // 重新登录成功与 logout 已有清零路径，这里不新增清零逻辑。
         error: sessionInvalid ? '路由器会话已过期，请重新登录' : this.status.session.error,
-        kind: ubusLoggedIn ? 'ubus' : this.webSessionActive ? 'web' : null,
+        // kind 按"ubus > web > basic"优先级合成（数据通道可用性递减）
+        kind: ubusLoggedIn ? 'ubus' : this.webSessionActive ? 'web' : this.basicAuthOk ? 'basic' : null,
         // task-022 B-2：失效时刻粘性记录（主进程轮询回调据此触发自动重登）。
         // 瞬时故障不写（只有 -32002 算失效）；重新登录成功 / logout 已清零。
         invalidatedAt: sessionInvalid ? Date.now() : this.status.session.invalidatedAt,

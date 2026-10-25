@@ -17,7 +17,8 @@ export interface TopBarProps {
   /** 引擎侧"某些数据源没采到"的提示（不是故障，不进告警中心计数） */
   warnings: WarningEntry[]
   onRefresh: () => void
-  onExport: () => Promise<{ ok: boolean; path: string | null; error?: string }>
+  /** format：json = 结构化快照；html = 自包含巡检报告（task-025） */
+  onExport: (format: 'json' | 'html') => Promise<{ ok: boolean; path: string | null; error?: string }>
   onToggleAutoScan: () => void
 }
 
@@ -59,8 +60,8 @@ export function TopBar({
     }
   }, [])
 
-  const handleExport = () => {
-    void onExport().then((res) => {
+  const handleExport = (format: 'json' | 'html') => {
+    void onExport(format).then((res) => {
       if (!res.ok || !res.path) return
       setExportMsg(`已导出：${res.path}`)
       if (exportTimerRef.current !== null) window.clearTimeout(exportTimerRef.current)
@@ -174,10 +175,39 @@ export function TopBar({
           <Icon name="refresh" size={13} className={scanning ? 'is-spinning' : undefined} />
           {scanning ? '扫描中' : '立即刷新'}
         </button>
-        <button type="button" className="btn" onClick={handleExport} title="导出当前快照为 JSON 报告">
-          <Icon name="export" size={13} />
-          导出
-        </button>
+        {/* task-025：导出改为下拉（JSON 结构化快照 / HTML 自包含巡检报告） */}
+        <details className="topbar__export dropdown" title="导出报告">
+          <summary className="btn" role="button" tabIndex={0}>
+            <Icon name="export" size={13} />
+            导出
+          </summary>
+          <div className="dropdown__menu" role="menu">
+            <button
+              type="button"
+              role="menuitem"
+              className="dropdown__item"
+              onClick={() => {
+                handleExport('json')
+                ;(document.activeElement as HTMLElement | null)?.blur()
+              }}
+            >
+              JSON 快照
+              <span className="dropdown__hint">结构化数据 · 供对账</span>
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              className="dropdown__item"
+              onClick={() => {
+                handleExport('html')
+                ;(document.activeElement as HTMLElement | null)?.blur()
+              }}
+            >
+              HTML 巡检报告
+              <span className="dropdown__hint">自包含单文件 · 可直接打开</span>
+            </button>
+          </div>
+        </details>
         {exportMsg && (
           <span className="topbar__export-ok" role="status" title={exportMsg}>
             {exportMsg}

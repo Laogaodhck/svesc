@@ -7,6 +7,8 @@ import {
   buildRpcRequest,
   parseBoard,
   parseDhcpLeases,
+  parseIwinfoDevices,
+  parseIwinfoInfo,
   parseWirelessDevices,
   ubusErrorMessage,
   UbusClient,
@@ -297,6 +299,50 @@ describe('UbusClient 会话作废只认调用路径的 -32002', () => {
       ok: false,
       error: '用户名或密码错误',
       loggedIn: false,
+    });
+  });
+});
+
+describe('iwinfo 解析（task-024）', () => {
+  it('parseIwinfoDevices 提取射频设备名', () => {
+    expect(parseIwinfoDevices({ devices: [{ name: 'wlan0' }, { name: 'wlan1' }] })).toEqual(['wlan0', 'wlan1']);
+  });
+
+  it('parseIwinfoDevices 形状防御到底', () => {
+    expect(parseIwinfoDevices({ devices: 'nope' })).toEqual([]);
+    expect(parseIwinfoDevices({ devices: [null, 42, {}, { name: '' }, { other: 1 }] })).toEqual([]);
+    expect(parseIwinfoDevices({ nope: 1 })).toEqual([]);
+    expect(parseIwinfoDevices('garbage')).toEqual([]);
+    expect(parseIwinfoDevices(null)).toEqual([]);
+  });
+
+  it('parseIwinfoInfo 提取 SSID/信道/关联数', () => {
+    const info = parseIwinfoInfo(
+      { ssid: 'HomeNet', channel: 6, assoclist: [{ mac: 'aa' }, { mac: 'bb' }] },
+      'wlan0',
+    );
+    expect(info).toEqual({ device: 'wlan0', ssid: 'HomeNet', channel: 6, clientCount: 2 });
+  });
+
+  it('parseIwinfoInfo 字段缺失/形状不符 → 对应位 null，不猜', () => {
+    expect(parseIwinfoInfo({}, 'wlan0')).toEqual({ device: 'wlan0', ssid: null, channel: null, clientCount: null });
+    expect(parseIwinfoInfo({ ssid: '', channel: 0, assoclist: 'not-array' }, 'wlan1')).toEqual({
+      device: 'wlan1',
+      ssid: null,
+      channel: null,
+      clientCount: null,
+    });
+    expect(parseIwinfoInfo('garbage', 'wlan0')).toEqual({
+      device: 'wlan0',
+      ssid: null,
+      channel: null,
+      clientCount: null,
+    });
+    expect(parseIwinfoInfo(null, 'wlan0')).toEqual({
+      device: 'wlan0',
+      ssid: null,
+      channel: null,
+      clientCount: null,
     });
   });
 });

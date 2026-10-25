@@ -11,6 +11,7 @@ import { DiagnosticsView } from './views/DiagnosticsView'
 import { TerminalView } from './views/TerminalView'
 import { SettingsView } from './views/SettingsView'
 import { DeviceDetailDrawer } from './views/DeviceDetailDrawer'
+import { WatchesView } from './views/WatchesView'
 import { EmptyState } from './components/atoms/EmptyState'
 import { TableSkeleton } from './components/atoms/Skeleton'
 import { Icon } from './components/Icon'
@@ -257,6 +258,7 @@ export function App() {
             onOpenDetail={openDetail}
             scanning={scanning}
             totalDevices={snapshot.system.totalDevices}
+            watches={snapshot.watches ?? []}
           />
         )
       case 'printers':
@@ -299,7 +301,16 @@ export function App() {
           />
         )
       case 'router':
-        return <RouterView />
+        return <RouterView devices={devices} onOpenDetail={openDetail} />
+      case 'watches':
+        return (
+          <WatchesView
+            watches={snapshot.watches ?? []}
+            devices={devices}
+            onOpenDetail={openDetail}
+            onNavigate={navigate}
+          />
+        )
       case 'diagnostics':
         return (
           <DiagnosticsView
@@ -373,6 +384,7 @@ export function App() {
             deviceId={detailId}
             device={detailDevice}
             now={snapshot?.ts ?? 0}
+            watches={snapshot?.watches ?? []}
             onClose={closeDetail}
             onRunDiagnostics={(ip) => {
               // 跳转诊断中心并预填目标自动 ping（navigate 顺带关抽屉 + 滚回顶部 + 清 focus/diag）

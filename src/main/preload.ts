@@ -14,12 +14,15 @@ import type {
   LanApi,
   LogBundle,
   NetAdapter,
+  PortScanResult,
+  PrintJobAction,
   RemoteOpKind,
   TerminalResult,
   RouterActionStatus,
   RouterStatus,
   ScanProgress,
   Snapshot,
+  WatchStatus,
 } from '../shared/types';
 
 function subscribe<T>(channel: string, cb: (payload: T) => void): () => void {
@@ -39,10 +42,30 @@ const api: LanApi = {
     ipcRenderer.invoke(CH.getDeviceDetail, deviceId),
   ackAlarm: (alarmId: string): Promise<{ ok: boolean }> => ipcRenderer.invoke(CH.ackAlarm, alarmId),
   alarmsClear: (ids: string[]): Promise<void> => ipcRenderer.invoke(CH.alarmsClear, ids),
-  exportReport: (): Promise<{ ok: boolean; path: string | null; error?: string }> =>
-    ipcRenderer.invoke(CH.exportReport),
+  exportReport: (format?: 'json' | 'html'): Promise<{ ok: boolean; path: string | null; error?: string }> =>
+    ipcRenderer.invoke(CH.exportReport, format),
   setDeviceAlias: (deviceId: string, alias: string | null): Promise<{ ok: boolean }> =>
     ipcRenderer.invoke(CH.setDeviceAlias, deviceId, alias),
+
+  // task-025：设备运维（WOL / 备注 / 标签）+ 持续监控 + 端口扫描 + webhook + 配置导入导出
+  deviceWake: (deviceId: string): Promise<{ ok: boolean; error: string | null }> =>
+    ipcRenderer.invoke(CH.deviceWake, deviceId),
+  deviceSetNote: (deviceId: string, note: string | null): Promise<{ ok: boolean }> =>
+    ipcRenderer.invoke(CH.deviceSetNote, deviceId, note),
+  deviceSetTags: (deviceId: string, tags: string[] | null): Promise<{ ok: boolean }> =>
+    ipcRenderer.invoke(CH.deviceSetTags, deviceId, tags),
+  watchList: (): Promise<WatchStatus[]> => ipcRenderer.invoke(CH.watchList),
+  watchAdd: (ip: string, note?: string | null): Promise<{ ok: boolean; error: string | null }> =>
+    ipcRenderer.invoke(CH.watchAdd, ip, note ?? null),
+  watchRemove: (ip: string): Promise<{ ok: boolean }> => ipcRenderer.invoke(CH.watchRemove, ip),
+  diagPortScan: (ip: string, from: number, to: number): Promise<PortScanResult> =>
+    ipcRenderer.invoke(CH.diagPortScan, ip, from, to),
+  webhookTest: (url: string): Promise<{ ok: boolean; status: number | null; error: string | null }> =>
+    ipcRenderer.invoke(CH.webhookTest, url),
+  configExport: (): Promise<{ ok: boolean; path: string | null; error?: string }> =>
+    ipcRenderer.invoke(CH.configExport),
+  configImport: (json: string): Promise<{ ok: boolean; imported: string[]; skipped: string[]; error: string | null }> =>
+    ipcRenderer.invoke(CH.configImport, json),
 
   routerGetStatus: (): Promise<RouterStatus> => ipcRenderer.invoke(CH.routerGetStatus),
   routerRefresh: (): Promise<RouterStatus> => ipcRenderer.invoke(CH.routerRefresh),
@@ -64,6 +87,13 @@ const api: LanApi = {
     ipcRenderer.invoke(CH.printerSetIgnored, printerId, ignored),
   printerSetAlias: (printerId: string, alias: string | null) =>
     ipcRenderer.invoke(CH.printerSetAlias, printerId, alias),
+
+  // task-024：打印任务/打印机操作 + 内置浏览器打开打印机管理页
+  printerJobAction: (action: PrintJobAction, printerName: string, jobId: string) =>
+    ipcRenderer.invoke(CH.printerJobAction, action, printerName, jobId),
+  printerPrintTestPage: (printerName: string) => ipcRenderer.invoke(CH.printerPrintTestPage, printerName),
+  printerSetDefault: (printerName: string) => ipcRenderer.invoke(CH.printerSetDefault, printerName),
+  printerOpenAdmin: (ip: string) => ipcRenderer.invoke(CH.printerOpenAdmin, ip),
 
   settingsGet: () => ipcRenderer.invoke(CH.settingsGet),
   settingsUpdate: (patch: Record<string, unknown>) => ipcRenderer.invoke(CH.settingsUpdate, patch),

@@ -3,7 +3,7 @@ import type { Printer, PrinterManageConfig } from '../../shared/types'
 import { StatusPill } from '../components/atoms/StatusPill'
 import { EmptyState } from '../components/atoms/EmptyState'
 import { Icon } from '../components/Icon'
-import { PRINTER_STATE_LABEL } from '../lib/format'
+import { CONSUMABLE_LABEL, PRINTER_STATE_LABEL } from '../lib/format'
 import { printerStateTone, type Tone } from '../lib/semantics'
 
 /**
@@ -31,6 +31,14 @@ function ignoredLabel(id: string): string {
 function isValidIpv4(v: string): boolean {
   if (!/^(\d{1,3})(\.\d{1,3}){3}$/.test(v)) return false
   return v.split('.').every((seg) => Number(seg) <= 255)
+}
+
+/** 耗材摘要（task-024）：仅有电平读数的条目进摘要；一个读数都没有 → '—'（不编造）。 */
+function consumableSummary(p: Printer): string {
+  const parts = p.consumables
+    .filter((c) => c.levelPct !== null)
+    .map((c) => `${c.label || CONSUMABLE_LABEL[c.kind] || c.kind} ${c.levelPct}%`)
+  return parts.length > 0 ? parts.join(' · ') : '—'
 }
 
 export function PrinterManageView({ printers }: { printers: Printer[] }) {
@@ -177,6 +185,72 @@ export function PrinterManageView({ printers }: { printers: Printer[] }) {
     [hasApi, busy, aliasDraft, reload, fail],
   )
 
+  /** 设为默认打印机（task-024） */
+  const onSetDefault = useCallback(
+    async (p: Printer) => {
+      if (!hasApi || busy) return
+      setBusy(true)
+      setMsg(null)
+      try {
+        const res = await window.lanApi.printerSetDefault(p.name)
+        setMsg(
+          res.ok
+            ? { tone: 'ok', text: `已将 ${p.alias ?? p.name} 设为默认打印机` }
+            : { tone: 'crit', text: res.error ?? '设置默认打印机失败' },
+        )
+      } catch (err) {
+        fail(err)
+      } finally {
+        setBusy(false)
+      }
+    },
+    [hasApi, busy, fail],
+  )
+
+  /** 打印测试页（task-024） */
+  const onTestPage = useCallback(
+    async (p: Printer) => {
+      if (!hasApi || busy) return
+      setBusy(true)
+      setMsg(null)
+      try {
+        const res = await window.lanApi.printerPrintTestPage(p.name)
+        setMsg(
+          res.ok
+            ? { tone: 'ok', text: `已向 ${p.alias ?? p.name} 发送测试页，任务将进入队列` }
+            : { tone: 'crit', text: res.error ?? '测试页发送失败' },
+        )
+      } catch (err) {
+        fail(err)
+      } finally {
+        setBusy(false)
+      }
+    },
+    [hasApi, busy, fail],
+  )
+
+  /** 内置浏览器打开打印机 Web 管理页（task-024）；未知 IP 不发 IPC */
+  const onOpenAdmin = useCallback(
+    async (p: Printer) => {
+      if (!hasApi || busy || p.ip === null) return
+      setBusy(true)
+      setMsg(null)
+      try {
+        const res = await window.lanApi.printerOpenAdmin(p.ip)
+        setMsg(
+          res.ok
+            ? { tone: 'ok', text: `已在内置浏览器打开 ${p.ip} 的管理页` }
+            : { tone: 'crit', text: res.error ?? '管理页打开失败' },
+        )
+      } catch (err) {
+        fail(err)
+      } finally {
+        setBusy(false)
+      }
+    },
+    [hasApi, busy, fail],
+  )
+
   if (!hasApi) {
     return (
       <div className="card">
@@ -315,6 +389,9 @@ export function PrinterManageView({ printers }: { printers: Printer[] }) {
                 <th>名称 / 别名</th>
                 <th>IP</th>
                 <th>状态</th>
+                <th>耗材</th>
+                <th>队列</th>
+                <th>默认</th>
                 <th>别名</th>
                 <th></th>
               </tr>
@@ -333,6 +410,11 @@ export function PrinterManageView({ printers }: { printers: Printer[] }) {
                       {PRINTER_STATE_LABEL[p.state] ?? p.state}
                     </StatusPill>
                   </td>
+                  <td className="u-105" title={consumableSummary(p)}>
+                    {consumableSummary(p)}
+                  </td>
+                  <td className="mono">{p.jobs.length}</td>
+                  <td>{p.isDefault ? <span className="chip chip--plain">默认</span> : '—'}</td>
                   <td>
                     <input
                       className="input manage-alias-input"
@@ -351,6 +433,35 @@ export function PrinterManageView({ printers }: { printers: Printer[] }) {
                   </td>
                   <td>
                     <div className="manage-actions">
+                      <button
+                        type="button"
+                        className="btn btn--ghost btn--sm"
+                        disabled={busy}
+                        title={`向 ${p.name} 发送 Windows 测试页`}
+                        onClick={() => void onTestPage(p)}
+                      >
+                        测试页
+                      </button>
+                      {!p.isDefault && (
+                        <button
+                          type="button"
+                          className="btn btn--ghost btn--sm"
+                          disabled={busy}
+                          title={`将 ${p.name} 设为系统默认打印机`}
+                          onClick={() => void onSetDefault(p)}
+                        >
+                          设默认
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        className="btn btn--ghost btn--sm"
+                        disabled={busy || p.ip === null}
+                        title={p.ip === null ? '未知 IP，无法打开管理页' : `在内置浏览器打开 ${p.ip}`}
+                        onClick={() => void onOpenAdmin(p)}
+                      >
+                        管理页
+                      </button>
                       <button
                         type="button"
                         className="btn btn--ghost btn--sm"

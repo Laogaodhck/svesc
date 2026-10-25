@@ -6,7 +6,7 @@
  */
 import { ROUTER } from '../../../shared/constants';
 import { httpRequest } from './httpx';
-import type { DhcpLease, WirelessClient } from '../../../shared/types';
+import type { DhcpLease, WirelessBandStatus, WirelessClient } from '../../../shared/types';
 
 export interface RpcResult<T> {
   ok: boolean;
@@ -157,6 +157,38 @@ export function parseWirelessDevices(payload: unknown): WirelessClient[] {
     }
   }
   return out;
+}
+
+/**
+ * 解析 `iwinfo devices` 响应（task-024，纯函数；形状不符 → 空数组）。
+ * 响应形如 { devices: [{ name: "wlan0" }, { name: "wlan1" }] }。
+ */
+export function parseIwinfoDevices(payload: unknown): string[] {
+  if (typeof payload !== 'object' || payload === null) return [];
+  const list = (payload as Record<string, unknown>).devices;
+  if (!Array.isArray(list)) return [];
+  const out: string[] = [];
+  for (const item of list) {
+    if (typeof item !== 'object' || item === null) continue;
+    const name = (item as Record<string, unknown>).name;
+    if (typeof name === 'string' && name.length > 0) out.push(name);
+  }
+  return out;
+}
+
+/**
+ * 解析 `iwinfo info` 响应（task-024，纯函数；字段缺失/形状不符 → 对应位 null，不猜）。
+ * 响应含 ssid / channel / assoclist（已关联客户端数组）等字段。
+ */
+export function parseIwinfoInfo(payload: unknown, device: string): WirelessBandStatus {
+  const empty: WirelessBandStatus = { device, ssid: null, channel: null, clientCount: null };
+  if (typeof payload !== 'object' || payload === null) return empty;
+  const p = payload as Record<string, unknown>;
+  const ssid = typeof p.ssid === 'string' && p.ssid.length > 0 ? p.ssid : null;
+  const channel =
+    typeof p.channel === 'number' && Number.isFinite(p.channel) && p.channel > 0 ? p.channel : null;
+  const clientCount = Array.isArray(p.assoclist) ? p.assoclist.length : null;
+  return { device, ssid, channel, clientCount };
 }
 
 export interface UbusCallResult {

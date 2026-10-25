@@ -69,6 +69,8 @@ export const ALARM_CODES = {
   PRINTER_ERROR: 'PRINTER_ERROR',
   PRINTER_OFFLINE: 'PRINTER_OFFLINE',
   IP_CONFLICT: 'IP_CONFLICT',
+  /** 持续 Ping 监控目标宕机（task-025，由 WatchManager 变迁经 ingestExternal 注入） */
+  WATCH_DOWN: 'WATCH_DOWN',
 } as const;
 
 export function dedupeKey(code: string, targetId: string): string {
@@ -509,6 +511,77 @@ export class AlarmEngine {
       kept.push(alarm);
     }
     this.alarms = kept;
+  }
+
+  /**
+   * 外部注入的告警（task-025，WatchManager 宕机变迁 → WATCH_DOWN）：
+   * 复用 raise 的完整语义（active 去重 / 手动清除冷静期 / 抑制窗口合并重开），
+   * 但不走 evaluate 入口。返回本轮新建或重开的告警（无变迁为 null，调用方据此决定是否推送）。
+   */
+  ingestExternal(
+    code: string,
+    severity: AlarmSeverity,
+    targetType: Alarm['targetType'],
+    targetId: string,
+    targetName: string,
+    message: string,
+    detail: string | null,
+    now = Date.now(),
+  ): Alarm | null {
+    const key = dedupeKey(code, targetId);
+    if (this.active.has(key)) return null;
+    // 手动清除冷静期（task-021 语义，与 evaluate.raise 同一处理）
+    const manualClearedAt = this.manualClears.get(key);
+    if (manualClearedAt !== undefined) {
+      if (now - manualClearedAt < ALARM_THRESHOLDS.suppressWindowMs) return null;
+      this.manualClears.delete(key);
+    }
+    // 抑制窗口合并重开（事件型 DEVICE_NEW 除外——ingestExternal 不接 DEVICE_NEW）
+    const last = this.recentByKey.get(key);
+    if (last && last.resolvedAt !== null && now - last.resolvedAt < ALARM_THRESHOLDS.suppressWindowMs) {
+      last.resolvedAt = null;
+      last.occurrences += 1;
+      last.lastRaisedAt = now;
+      this.pushTrace(last, { at: now, type: 're-raised', by: null });
+      this.active.set(key, last);
+      return last;
+    }
+    this.seq += 1;
+    const alarm: Alarm = {
+      id: `alm-${now.toString(36)}-${this.seq.toString(36)}`,
+      severity,
+      code,
+      targetType,
+      targetId,
+      targetName,
+      message,
+      detail,
+      raisedAt: now,
+      ackAt: null,
+      ackBy: null,
+      resolvedAt: null,
+      lastRaisedAt: now,
+      occurrences: 1,
+      trace: [{ at: now, type: 'raised', by: null }],
+    };
+    this.alarms.push(alarm);
+    this.active.set(key, alarm);
+    this.recentByKey.set(key, alarm);
+    return alarm;
+  }
+
+  /**
+   * 外部注入的条件恢复（task-025，WatchManager 恢复变迁 → WATCH_DOWN 收尾）。
+   * 返回被恢复的告警（无活跃同因告警为 null），调用方据此触发 webhook resolved。
+   */
+  ingestResolve(code: string, targetId: string, now = Date.now()): Alarm | null {
+    const key = dedupeKey(code, targetId);
+    const alarm = this.active.get(key);
+    if (!alarm) return null;
+    alarm.resolvedAt = now;
+    this.pushTrace(alarm, { at: now, type: 'resolved', by: null });
+    this.active.delete(key);
+    return alarm;
   }
 }
 

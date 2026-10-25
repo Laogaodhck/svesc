@@ -94,4 +94,25 @@ export const MIGRATIONS: Migration[] = [
       )`,
     ],
   },
+  {
+    version: 2,
+    name: 'task-025：设备备注/标签 + 持续 Ping 监控目标',
+    statements: [
+      `CREATE TABLE IF NOT EXISTS device_notes (
+        key TEXT PRIMARY KEY,
+        note TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
+      )`,
+      `CREATE TABLE IF NOT EXISTS device_tags (
+        key TEXT PRIMARY KEY,
+        tags TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
+      )`,
+      `CREATE TABLE IF NOT EXISTS watch_targets (
+        ip TEXT PRIMARY KEY,
+        note TEXT,
+        added_at INTEGER NOT NULL
+      )`,
+    ],
+  },
 ];

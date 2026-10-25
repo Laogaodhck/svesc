@@ -6,13 +6,28 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
-import type { Alarm, AppSettings, DeviceDetail, PrinterManageConfig, RouterHints, ScanProgress, SettingsPayload, Snapshot } from '../../shared/types';
+import type {
+  Alarm,
+  AppSettings,
+  DeviceDetail,
+  PrinterManageConfig,
+  PrintJobAction,
+  RouterHints,
+  ScanProgress,
+  SettingsPayload,
+  Snapshot,
+  WatchStatus,
+} from '../../shared/types';
 import { SCHEDULE } from '../../shared/constants';
 import { detectSubnet } from './discovery/subnet';
 import { NetLog } from './diag/netlog';
 import { Scheduler } from './scheduler';
-import { type PersistStore } from './store';
+import { isValidIpv4, type PersistStore, type PersistedSettings } from './store';
 import { SqliteStore } from './db/sqlite';
+import { printJobAction, printTestPage, setDefaultPrinter } from './printers/print-ops';
+import { sendMagicPacket } from './wol';
+import { postWebhook } from './notify/webhook';
+import { buildHtmlReport } from './report-html';
 
 export interface EngineOptions {
   /** 持久化目录（主进程传 app.getPath('userData')；engine-check 传临时目录） */
@@ -41,18 +56,37 @@ export interface Engine {
   clearAlarm(alarmId: string, by: string): boolean;
   /** 批量手动清除，返回成功条数 */
   clearAlarms(alarmIds: string[], by: string): number;
-  exportReport(extras?: Record<string, unknown>): { ok: boolean; path: string | null; error?: string };
+  /** 导出报告（task-025：format 缺省 json，新增 html 自包含报告） */
+  exportReport(format?: 'json' | 'html', extras?: Record<string, unknown>): { ok: boolean; path: string | null; error?: string };
   getGatewayIp(): string | null;
   /** 灌入路由器通道提示（task-022 C-1：DHCP 租约 hostname 回填设备识别），内存态不持久化 */
   applyRouterHints(hints: RouterHints): void;
   // —— 别名（设备与打印机共用一张表，key = id）——
   setDeviceAlias(deviceId: string, alias: string | null): { ok: boolean };
   setPrinterAlias(printerId: string, alias: string | null): { ok: boolean };
+  // —— 设备注注 / 标签（task-025）——
+  deviceSetNote(deviceId: string, note: string | null): { ok: boolean };
+  deviceSetTags(deviceId: string, tags: string[] | null): { ok: boolean };
+  // —— WOL 网络唤醒（task-025：发送成功 ≠ 设备一定唤醒，UDP 无确认）——
+  deviceWake(deviceId: string): Promise<{ ok: boolean; error: string | null }>;
+  // —— 持续 Ping 监控（task-025）——
+  watchList(): WatchStatus[];
+  watchAdd(ip: string, note: string | null): { ok: boolean; error: string | null };
+  watchRemove(ip: string): { ok: boolean };
+  // —— 通知（task-025：webhook 测试）——
+  webhookTest(url: string): Promise<{ ok: boolean; status: number | null; error: string | null }>;
+  // —— 配置导入导出（task-025）——
+  configExport(): { ok: boolean; path: string | null; error?: string };
+  configImport(json: string): { ok: boolean; imported: string[]; skipped: string[]; error: string | null };
   // —— 打印管理页 ——
   getPrinterManage(): PrinterManageConfig;
   addManualPrinter(ip: string, note: string | null): { ok: boolean; error: string | null };
   removeManualPrinter(ip: string): { ok: boolean };
   setPrinterIgnored(printerId: string, ignored: boolean): { ok: boolean };
+  // —— 打印操作（task-024：任务取消/暂停/恢复、测试页、设默认）——
+  printerJobAction(action: PrintJobAction, printerName: string, jobId: string): Promise<{ ok: boolean; error: string | null }>;
+  printerPrintTestPage(printerName: string): Promise<{ ok: boolean; error: string | null }>;
+  printerSetDefault(printerName: string): Promise<{ ok: boolean; error: string | null }>;
   // —— 设置页 ——
   getSettings(): AppSettings;
   updateSettings(patch: Partial<AppSettings>): AppSettings;
@@ -86,6 +120,17 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
   // 设备实时状态同步的节流账本（task-018）：状态变化立即写库；无变化 15s 全量对账
   let lastDeviceSyncAt = 0;
   const lastKnownStates = new Map<string, string>();
+
+  // task-025：告警 webhook 推送（fire-and-forget，不重试、绝不抛；URL 未配置 = 停用）
+  const fireWebhook = (event: 'alarm.created' | 'alarm.resolved', alarm: Alarm): void => {
+    const url = store.settings.notifyWebhookUrl?.trim();
+    if (!url) return;
+    void postWebhook(url, { event, alarm, ts: Date.now() }).then((res) => {
+      if (!res.ok) {
+        netlog.push('warn', 'webhook', `${event} 推送失败：${res.error ?? `HTTP ${res.status}`}`);
+      }
+    });
+  };
 
   const scheduler = new Scheduler(
     {
@@ -123,8 +168,8 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
             }
           }
         }
-        const withAliases = applyAliases(snapshot, store);
-        options.onSnapshot?.(withAliases);
+        const withMeta = applyDeviceMeta(snapshot, store);
+        options.onSnapshot?.(withMeta);
       },
       onScanProgress: options.onScanProgress,
       onAlarm: (alarm) => {
@@ -137,7 +182,13 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
         // 告警实时落库（task-018）：崩溃不丢新告警；新设备接入同步固化 firstSeen
         store.upsertAlarm?.(alarm);
         if (alarm.code === 'DEVICE_NEW') store.setFirstSeen(scheduler.exportFirstSeen());
+        // task-025：webhook 推送（fire-and-forget，失败只入日志环）
+        fireWebhook('alarm.created', alarm);
         options.onAlarm?.(alarm);
+      },
+      // task-025：自动恢复的告警也推 webhook（resolved 事件）
+      onAlarmResolved: (alarms) => {
+        for (const alarm of alarms) fireWebhook('alarm.resolved', alarm);
       },
     },
   );
@@ -150,6 +201,8 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
   });
   // 恢复设备首次接入表（task-017：重启不得把 firstSeen 重置成本次扫描时间）
   scheduler.hydrateFirstSeen(persisted.firstSeen);
+  // 恢复持续 Ping 监控目标（task-025）
+  scheduler.hydrateWatches(store.watchTargets());
 
   // store 落盘失败 → 快照 warnings（审计 H-3：别名/告警历史/打印管理配置静默丢盘不可接受）
   reportStoreError = (err) => {
@@ -166,6 +219,179 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
 
   let stopped = false;
   const gatewayIp: string | null = subnet?.gateway ?? null;
+
+  // —— 配置导入导出（task-025）：settings + 用户元数据 + 监控目标 + 打印管理 + firstSeen ——
+  const exportConfigFile = (): { ok: boolean; path: string | null; error?: string } => {
+    const dir = options.exportDir ?? options.userDataDir;
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+      const target = path.join(dir, `svesc-config-${new Date().toISOString().replace(/[:.]/g, '-')}.json`);
+      const state = store.get();
+      fs.writeFileSync(
+        target,
+        JSON.stringify(
+          {
+            app: 'svesc',
+            schemaVersion: 1,
+            exportedAt: new Date().toISOString(),
+            settings: store.settings,
+            aliases: state.aliases,
+            deviceNotes: state.deviceNotes ?? {},
+            deviceTags: state.deviceTags ?? {},
+            watchList: store.watchTargets(),
+            printerManage: store.printerManage(),
+            firstSeen: state.firstSeen,
+          },
+          null,
+          2,
+        ),
+        'utf8',
+      );
+      netlog.push('info', 'config', `配置已导出：${target}`);
+      return { ok: true, path: target };
+    } catch (err) {
+      return { ok: false, path: null, error: err instanceof Error ? err.message : String(err) };
+    }
+  };
+
+  /** settings 白名单（key → 期望类型；autoScanIntervalSec 另有 30-3600 范围校验）。 */
+  const CONFIG_SETTINGS_TYPES: Record<string, 'boolean' | 'number' | 'string'> = {
+    autoScan: 'boolean',
+    autoScanIntervalSec: 'number',
+    showVirtualPrinters: 'boolean',
+    snmpEnabled: 'boolean',
+    useMdns: 'boolean',
+    notifyDesktop: 'boolean',
+    closeToTray: 'boolean',
+    rememberRouterPassword: 'boolean',
+    notifyWebhookUrl: 'string',
+  };
+
+  const importConfigJson = (text: string): { ok: boolean; imported: string[]; skipped: string[]; error: string | null } => {
+    const imported: string[] = [];
+    const skipped: string[] = [];
+    let obj: Record<string, unknown>;
+    try {
+      const parsed: unknown = JSON.parse(text);
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        return { ok: false, imported, skipped, error: '配置文件不是有效的 JSON 对象' };
+      }
+      obj = parsed as Record<string, unknown>;
+    } catch (err) {
+      return { ok: false, imported, skipped, error: `JSON 解析失败：${err instanceof Error ? err.message : String(err)}` };
+    }
+    if (obj.schemaVersion !== 1) {
+      return { ok: false, imported, skipped, error: `不支持的配置版本：${String(obj.schemaVersion)}（当前支持 1）` };
+    }
+    /** 逐键合并一个 map 形状的区段；非法值跳过计入 skipped，绝不整包失败。 */
+    const applyMap = (section: unknown, name: string, apply: (key: string, value: unknown) => boolean): void => {
+      if (section === undefined) return;
+      if (section && typeof section === 'object' && !Array.isArray(section)) {
+        let applied = false;
+        for (const [key, value] of Object.entries(section as Record<string, unknown>)) {
+          if (apply(key, value)) applied = true;
+          else skipped.push(`${name}.${key}`);
+        }
+        if (applied) imported.push(name);
+      } else {
+        skipped.push(name);
+      }
+    };
+    // settings：白名单 + 类型校验
+    if (obj.settings !== undefined) {
+      if (obj.settings && typeof obj.settings === 'object' && !Array.isArray(obj.settings)) {
+        const patch: Record<string, unknown> = {};
+        for (const [key, value] of Object.entries(obj.settings as Record<string, unknown>)) {
+          const expected = CONFIG_SETTINGS_TYPES[key];
+          if (!expected || typeof value !== expected) {
+            skipped.push(`settings.${key}`);
+            continue;
+          }
+          if (key === 'autoScanIntervalSec' && ((value as number) < 30 || (value as number) > 3600)) {
+            skipped.push('settings.autoScanIntervalSec');
+            continue;
+          }
+          patch[key] = value;
+        }
+        if (Object.keys(patch).length > 0) {
+          store.setSettings(patch as Partial<PersistedSettings>);
+          imported.push('settings');
+        }
+      } else {
+        skipped.push('settings');
+      }
+    }
+    applyMap(obj.aliases, 'aliases', (k, v) => {
+      if (typeof v !== 'string' || !v.trim()) return false;
+      store.setAlias(k, v.trim());
+      return true;
+    });
+    applyMap(obj.deviceNotes, 'deviceNotes', (k, v) => {
+      if (typeof v !== 'string' || !v.trim()) return false;
+      store.setNote(k, v);
+      return true;
+    });
+    applyMap(obj.deviceTags, 'deviceTags', (k, v) => {
+      if (!Array.isArray(v)) return false;
+      store.setTags(k, v as string[]);
+      return true;
+    });
+    // watchList：逐条校验 IP
+    if (obj.watchList !== undefined) {
+      if (Array.isArray(obj.watchList)) {
+        let applied = false;
+        for (const entry of obj.watchList) {
+          const w = entry as { ip?: unknown; note?: unknown };
+          if (typeof w.ip === 'string' && isValidIpv4(w.ip)) {
+            store.addWatchTarget(w.ip, typeof w.note === 'string' ? w.note : null);
+            applied = true;
+          } else {
+            skipped.push(`watchList.${String(typeof w.ip === 'string' ? w.ip : '<invalid>')}`);
+          }
+        }
+        if (applied) imported.push('watchList');
+      } else {
+        skipped.push('watchList');
+      }
+    }
+    // printerManage：manual 逐条 + ignored 逐条
+    if (obj.printerManage !== undefined) {
+      const pm = obj.printerManage as { manual?: unknown; ignored?: unknown } | null;
+      if (pm && typeof pm === 'object' && !Array.isArray(pm)) {
+        if (Array.isArray(pm.manual)) {
+          for (const m of pm.manual) {
+            const e = m as { ip?: unknown; note?: unknown };
+            if (typeof e.ip === 'string') store.addManualPrinter(e.ip, typeof e.note === 'string' ? e.note : null);
+            else skipped.push('printerManage.manual');
+          }
+        }
+        if (Array.isArray(pm.ignored)) {
+          for (const id of pm.ignored) {
+            if (typeof id === 'string') store.setPrinterIgnored(id, true);
+            else skipped.push('printerManage.ignored');
+          }
+        }
+        imported.push('printerManage');
+      } else {
+        skipped.push('printerManage');
+      }
+    }
+    // firstSeen：逐条合并（文件值覆盖本地同 key 记录）
+    applyMap(obj.firstSeen, 'firstSeen', (k, v) => {
+      if (!isValidIpv4(k) || typeof v !== 'number' || !Number.isFinite(v) || v <= 0) return false;
+      const merged = { ...store.get().firstSeen, [k]: v };
+      store.setFirstSeen(merged);
+      return true;
+    });
+    // 运行时生效：autoScan 定时器 / 打印机源开关 / 监控目标 / 快照立即重推
+    scheduler.setAutoScan(store.settings.autoScan, store.settings.autoScanIntervalSec);
+    scheduler.setPrinterSources({ snmpEnabled: store.settings.snmpEnabled, useMdns: store.settings.useMdns });
+    scheduler.hydrateWatches(store.watchTargets());
+    void scheduler.refreshPrinters();
+    scheduler.emitSnapshotNow();
+    netlog.push('info', 'config', `配置导入完成：生效 ${imported.length} 项，跳过 ${skipped.length} 项`);
+    return { ok: true, imported, skipped, error: null };
+  };
 
   const engine: Engine = {
     subnetLabel: subnet ? subnet.cidr : null,
@@ -202,14 +428,100 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
     },
     setPrinterAlias(printerId: string, alias: string | null) {
       store.setAlias(printerId, alias);
-      // 别名在 applyAliases 里对每帧快照生效，推一帧立即生效（不重扫）
+      // 别名/备注/标签在 applyDeviceMeta 里对每帧快照生效，推一帧立即生效（不重扫）
       scheduler.emitSnapshotNow();
       return { ok: true };
+    },
+    // —— 打印操作（task-024）：留痕入日志环；成功后刷新打印机快照让队列/默认态立即可见 ——
+    async printerJobAction(action, printerName, jobId) {
+      const res = await printJobAction(action, printerName, jobId);
+      netlog.push(res.ok ? 'info' : 'error', 'printer', `任务${action} ${printerName}#${jobId}：${res.ok ? '成功' : res.error}`);
+      if (res.ok) void scheduler.refreshPrinters();
+      return res;
+    },
+    async printerPrintTestPage(printerName) {
+      const res = await printTestPage(printerName);
+      netlog.push(res.ok ? 'info' : 'error', 'printer', `打印测试页 ${printerName}：${res.ok ? '已发送' : res.error}`);
+      return res;
+    },
+    async printerSetDefault(printerName) {
+      const res = await setDefaultPrinter(printerName);
+      netlog.push(res.ok ? 'info' : 'error', 'printer', `设默认打印机 ${printerName}：${res.ok ? '成功' : res.error}`);
+      if (res.ok) void scheduler.refreshPrinters();
+      return res;
     },
     setDeviceAlias(deviceId: string, alias: string | null) {
       store.setAlias(deviceId, alias);
       scheduler.emitSnapshotNow();
       return { ok: true };
+    },
+    // —— 设备注注 / 标签（task-025）：落盘后立即推帧（applyDeviceMeta 对每帧快照生效） ——
+    deviceSetNote(deviceId: string, note: string | null) {
+      store.setNote(deviceId, note);
+      scheduler.emitSnapshotNow();
+      return { ok: true };
+    },
+    deviceSetTags(deviceId: string, tags: string[] | null) {
+      store.setTags(deviceId, tags);
+      scheduler.emitSnapshotNow();
+      return { ok: true };
+    },
+    // —— WOL（task-025）：诚实错误优先（未知 MAC / 本机 / 网关 / 跨网段都直接拒绝） ——
+    async deviceWake(deviceId: string) {
+      const device = scheduler.buildDevices().find((d) => d.id === deviceId);
+      if (!device) return { ok: false, error: `设备不存在：${deviceId}` };
+      if (device.id.startsWith('sim-')) {
+        return { ok: false, error: '演示设备不参与 WOL（发送了也没有真实主机接收）' };
+      }
+      if (device.mac === null) return { ok: false, error: '未知 MAC，无法构造唤醒包' };
+      if (device.isSelf) return { ok: false, error: '目标设备是本机，无需唤醒' };
+      if (device.isGateway) return { ok: false, error: '目标设备是网关（保持在线），拒绝唤醒' };
+      if (subnet?.prefix && !device.ip.startsWith(subnet.prefix)) {
+        return { ok: false, error: `目标 ${device.ip} 不在当前网段（${subnet.cidr}），广播唤醒包无法可靠到达` };
+      }
+      const res = await sendMagicPacket(device.mac);
+      netlog.push(
+        res.ok ? 'info' : 'error',
+        'wol',
+        res.ok
+          ? `唤醒包已发送至 ${device.mac}（${device.ip}）· 发送成功 ≠ 设备一定唤醒，请观察其状态回转`
+          : `唤醒失败：${res.error}`,
+      );
+      return res;
+    },
+    // —— 持续 Ping 监控（task-025）：store 为配置事实源，scheduler 为运行态 ——
+    watchList(): WatchStatus[] {
+      return scheduler.watchStatus();
+    },
+    watchAdd(ip: string, note: string | null) {
+      const persisted = store.addWatchTarget(ip, note);
+      if (!persisted.ok) return persisted;
+      scheduler.hydrateWatches(store.watchTargets());
+      const runtime = scheduler.watchAdd(ip, note);
+      return runtime.ok ? persisted : runtime;
+    },
+    watchRemove(ip: string) {
+      const persisted = store.removeWatchTarget(ip);
+      scheduler.hydrateWatches(store.watchTargets());
+      scheduler.watchRemove(ip);
+      return persisted;
+    },
+    // —— 通知（task-025）：webhook 测试，结果如实返回 ——
+    async webhookTest(url: string) {
+      const res = await postWebhook(url, { event: 'test', ts: Date.now() });
+      netlog.push(
+        res.ok ? 'info' : 'warn',
+        'webhook',
+        res.ok ? `测试消息已送达（HTTP ${res.status}）` : `测试发送失败：${res.error ?? `HTTP ${res.status}`}`,
+      );
+      return res;
+    },
+    // —— 配置导入导出（task-025）——
+    configExport() {
+      return exportConfigFile();
+    },
+    configImport(json: string) {
+      return importConfigJson(json);
     },
     // —— 设置页：落盘 + 运行时立即生效（autoScan 重挂定时器，打印机源下一轮刷新生效） ——
     getSettings(): AppSettings {
@@ -223,6 +535,7 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
         notifyDesktop: s.notifyDesktop,
         closeToTray: s.closeToTray,
         rememberRouterPassword: s.rememberRouterPassword,
+        notifyWebhookUrl: s.notifyWebhookUrl,
       };
     },
     updateSettings(patch: Partial<AppSettings>): AppSettings {
@@ -255,7 +568,7 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
     },
     getSnapshot(): Snapshot {
       const cached = scheduler.snapshotCached;
-      return cached ? applyAliases(cached, store) : applyAliases(scheduler.buildSnapshot(), store);
+      return cached ? applyDeviceMeta(cached, store) : applyDeviceMeta(scheduler.buildSnapshot(), store);
     },
     refresh(): Promise<{ started: boolean }> {
       return scheduler.refresh();
@@ -280,15 +593,21 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
     /**
      * 导出报告。extras（可选）由主进程合入路由器状态与打印管理配置——
      * 审计 L6：旧实现只导 Snapshot，路由器会话与管理配置拿不到。
+     * task-025：format='html' 产出自包含巡检报告（所有动态文本已转义）。
      */
-    exportReport(extras?: Record<string, unknown>) {
+    exportReport(format: 'json' | 'html' = 'json', extras?: Record<string, unknown>) {
       const dir = options.exportDir ?? options.userDataDir;
       try {
         fs.mkdirSync(dir, { recursive: true });
-        const filename = `svesc-report-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+        const ext = format === 'html' ? 'html' : 'json';
+        const filename = `svesc-report-${new Date().toISOString().replace(/[:.]/g, '-')}.${ext}`;
         const target = path.join(dir, filename);
-        const payload = { ...engine.getSnapshot(), ...(extras ?? {}) };
-        fs.writeFileSync(target, JSON.stringify(payload, null, 2), 'utf8');
+        if (format === 'html') {
+          fs.writeFileSync(target, buildHtmlReport(engine.getSnapshot(), extras), 'utf8');
+        } else {
+          const payload = { ...engine.getSnapshot(), ...(extras ?? {}) };
+          fs.writeFileSync(target, JSON.stringify(payload, null, 2), 'utf8');
+        }
         return { ok: true, path: target };
       } catch (err) {
         return { ok: false, path: null, error: err instanceof Error ? err.message : String(err) };
@@ -299,13 +618,30 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
   return engine;
 }
 
-function applyAliases(snapshot: Snapshot, store: PersistStore): Snapshot {
-  if (Object.keys(store.get().aliases).length === 0) return snapshot;
+/**
+ * 快照出引擎前的最后一步：注入用户元数据（task-025 起 = 别名 + 备注 + 标签）。
+ * 别名只改显示不改 name（告警 targetName 保持原点名，便于对账）；
+ * 备注/标签未设置时不加字段（undefined），避免快照体积无谓膨胀。
+ */
+function applyDeviceMeta(snapshot: Snapshot, store: PersistStore): Snapshot {
+  const state = store.get();
+  const hasAliases = Object.keys(state.aliases).length > 0;
+  const hasNotes = Object.keys(state.deviceNotes ?? {}).length > 0;
+  const hasTags = Object.keys(state.deviceTags ?? {}).length > 0;
+  if (!hasAliases && !hasNotes && !hasTags) return snapshot;
   return {
     ...snapshot,
     devices: snapshot.devices.map((device) => {
       const alias = store.aliasOf(device.id);
-      return alias ? { ...device, displayName: alias } : device;
+      const note = store.noteOf(device.id);
+      const tags = store.tagsOf(device.id);
+      if (!alias && !note && (!tags || tags.length === 0)) return device;
+      return {
+        ...device,
+        displayName: alias ?? device.displayName,
+        note: note ?? null,
+        tags: tags ?? [],
+      };
     }),
     // 打印机别名走同一张表（key = printer id，如 prn-192.168.2.213），
     // 别名只改显示，不改 name（告警 targetName 保持原点名，便于对账）

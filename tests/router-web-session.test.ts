@@ -92,6 +92,7 @@ function scriptAllOk(): void {
     if (p[1] === 'system' && p[2] === 'board') return rpcOk(parsed.id, [0, { hostname: 'OpenWrt', model: 'x86-64', release: { description: 'OpenWrt 23.05' }, uptime: 1 }]);
     if (p[1] === 'luci-rpc' && p[2] === 'getDHCPLeases') return rpcOk(parsed.id, [0, { dhcp_leases: [] }]);
     if (p[1] === 'luci-rpc' && p[2] === 'getWirelessDevices') return rpcOk(parsed.id, [0, { radios: {} }]);
+    if (p[1] === 'iwinfo' && p[2] === 'devices') return rpcOk(parsed.id, [0, { devices: [] }]);
     throw new Error('脚本未识别调用: ' + JSON.stringify(p));
   };
 }

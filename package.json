@@ -1,6 +1,6 @@
 {
   "name": "svesc",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "private": true,
   "description": "Windows LAN monitoring desktop app (devices, printers, network quality, alarms)",
   "author": "浩玥工作室 (老高 QQ:846193)",

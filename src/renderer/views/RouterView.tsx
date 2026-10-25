@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
-import type { RouterStatus } from '../../shared/types'
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
+import type { Device, RouterStatus } from '../../shared/types'
 import { StatusPill } from '../components/atoms/StatusPill'
 import { EmptyState } from '../components/atoms/EmptyState'
 import { Icon } from '../components/Icon'
+import { Sparkline } from '../components/atoms/Sparkline'
 import { fmtBitRate, fmtDateTime } from '../lib/format'
 import type { Tone } from '../lib/semantics'
 
@@ -64,7 +65,13 @@ function CapRow({ supported, label, note }: { supported: boolean; label: string;
   )
 }
 
-export function RouterView() {
+export function RouterView({
+  devices,
+  onOpenDetail,
+}: {
+  devices: Device[]
+  onOpenDetail: (id: string) => void
+}) {
   const [status, setStatus] = useState<RouterStatus | null>(null)
   const [user, setUser] = useState('')
   const [password, setPassword] = useState('')
@@ -80,6 +87,36 @@ export function RouterView() {
   const [logoutBusy, setLogoutBusy] = useState(false)
   // task-022 B-1：记住密码开关（默认 true；登录前先同步到设置，主进程按当前设置决定是否落盘）
   const [remember, setRemember] = useState(true)
+
+  // —— task-024：WAN 速率序列（渲染侧累积，最多 60 点）——
+  // null = 本轮无速率读数（样本不足/UPnP 缺席），Sparkline 断线呈现，不补 0。
+  // 按 status.ts 去重：手动 refresh 与同轮轮询推送共享同一 ts，只采一次。
+  const lastTsRef = useRef<number>(0)
+  const wanSeriesRef = useRef<{ rx: Array<number | null>; tx: Array<number | null> }>({ rx: [], tx: [] })
+  const [wanSeries, setWanSeries] = useState<{ rx: Array<number | null>; tx: Array<number | null> }>({
+    rx: [],
+    tx: [],
+  })
+
+  /** 统一状态入口：setStatus + WAN 速率采样（初始拉取 / 轮询推送 / 手动刷新共用）。 */
+  const applyStatus = useCallback((s: RouterStatus) => {
+    setStatus(s)
+    if (s.ts === lastTsRef.current) return
+    lastTsRef.current = s.ts
+    const cur = wanSeriesRef.current
+    const rx = [...cur.rx, s.wan.rxBps].slice(-60)
+    const tx = [...cur.tx, s.wan.txBps].slice(-60)
+    wanSeriesRef.current = { rx, tx }
+    setWanSeries({ rx, tx })
+  }, [])
+
+  // —— task-024：租约/无线客户端 → 设备抽屉联动（IP/MAC 匹配；匹配不到的行不可点击，不硬凑） ——
+  const deviceByIp = useMemo(() => new Map(devices.map((d) => [d.ip, d])), [devices])
+  const deviceByMac = useMemo(() => {
+    const m = new Map<string, Device>()
+    for (const d of devices) if (d.mac) m.set(d.mac.toUpperCase(), d)
+    return m
+  }, [devices])
 
   // —— 重启确认框焦点管理（alertdialog 约定：默认焦点落安全动作"取消"，Esc 关闭，关闭后焦点还给触发按钮） ——
   const confirmRef = useRef<HTMLDivElement>(null)
@@ -120,7 +157,7 @@ export function RouterView() {
     let alive = true
     void window.lanApi.routerGetStatus().then((s) => {
       if (alive) {
-        setStatus(s)
+        applyStatus(s)
         setProbeErr(null)
       }
     }).catch((err: unknown) => {
@@ -129,7 +166,7 @@ export function RouterView() {
     })
     const off = window.lanApi.onRouterStatus((s) => {
       if (alive) {
-        setStatus(s)
+        applyStatus(s)
         setProbeErr(null)
       }
     })
@@ -137,14 +174,14 @@ export function RouterView() {
       alive = false
       off()
     }
-  }, [hasApi])
+  }, [hasApi, applyStatus])
 
   const onRefresh = useCallback(async () => {
     if (!hasApi) return
     setRefreshing(true)
     try {
       const s = await window.lanApi.routerRefresh()
-      setStatus(s)
+      applyStatus(s)
       setProbeErr(null)
     } catch (err) {
       // 审计 M-3：刷新失败必须可见，不能静默
@@ -152,7 +189,7 @@ export function RouterView() {
     } finally {
       setRefreshing(false)
     }
-  }, [hasApi])
+  }, [hasApi, applyStatus])
 
   const onLogin = useCallback(
     async (e: FormEvent) => {
@@ -350,6 +387,38 @@ export function RouterView() {
                   : '—'}
               </div>
             </div>
+            <div className="router-kv">
+              <div className="router-kv__label">WAN 连接状态（UPnP）</div>
+              <div className="router-kv__value">{status.wan.connectionStatus ?? '—'}</div>
+            </div>
+            <div className="router-kv">
+              <div className="router-kv__label">WAN 连接时长（UPnP）</div>
+              <div className="router-kv__value">{secToDuration(status.wan.uptimeSec)}</div>
+            </div>
+          </div>
+
+          {/* —— WAN 流量趋势（task-024）：渲染侧 60 点采样；null 点断线呈现，不补 0 —— */}
+          <div className="card">
+            <div className="card__head">
+              <span className="card__title">WAN 流量趋势</span>
+              <span className="card__hint">
+                {wanSeries.rx.length > 0
+                  ? `最近 ${wanSeries.rx.length} 次采样 · 10s/点`
+                  : '等待速率样本（UPnP 计数器需 ≥2 次采样）'}
+              </span>
+            </div>
+            <div className="router-wan-chart">
+              <div className="router-wan-chart__row">
+                <span className="router-wan-chart__label">下行</span>
+                <Sparkline values={wanSeries.rx} width={440} height={40} area unit="bps" />
+                <span className="router-wan-chart__now mono">{fmtBitRate(status.wan.rxBps)}</span>
+              </div>
+              <div className="router-wan-chart__row">
+                <span className="router-wan-chart__label">上行</span>
+                <Sparkline values={wanSeries.tx} width={440} height={40} area stroke="var(--warn)" unit="bps" />
+                <span className="router-wan-chart__now mono">{fmtBitRate(status.wan.txBps)}</span>
+              </div>
+            </div>
           </div>
 
           {/* —— 能力矩阵 —— */}
@@ -377,7 +446,9 @@ export function RouterView() {
                     ? `已登录（${status.session.user}）`
                     : status.session.kind === 'web'
                       ? '管理页会话已建立（不含 ubus 数据）'
-                      : '登录后可查看 DHCP 租约与无线客户端'
+                      : status.session.kind === 'basic'
+                        ? 'Basic 认证会话已建立（不含 ubus 数据）'
+                        : '登录后可查看 DHCP 租约与无线客户端'
                 }
               />
             </div>
@@ -401,6 +472,8 @@ export function RouterView() {
                 <StatusPill tone="ok">已登录（{status.session.user}）</StatusPill>
               ) : status.session.kind === 'web' ? (
                 <StatusPill tone="ok">管理页会话（Cookie 检测）</StatusPill>
+              ) : status.session.kind === 'basic' ? (
+                <StatusPill tone="ok">Basic 认证（{status.session.user}）</StatusPill>
               ) : (
                 <StatusPill tone="muted">未登录</StatusPill>
               )}
@@ -432,7 +505,9 @@ export function RouterView() {
             </div>
 
             <div className="router-login-divider">
-              <span>OpenWrt ubus 账密登录（用于获取 DHCP 租约与无线客户端；非 OpenWrt 固件无此接口）</span>
+              <span>
+                账密登录（OpenWrt ubus 获取 DHCP/无线数据；华硕等 Basic 认证路由器会自动按 Basic 方式验证）
+              </span>
             </div>
 
             {status.session.kind !== 'ubus' && (
@@ -456,7 +531,7 @@ export function RouterView() {
                   autoComplete="new-password"
                 />
                 <button type="submit" className="btn btn--ghost" disabled={loginBusy}>
-                  {loginBusy ? '登录中…' : 'ubus 登录'}
+                  {loginBusy ? '登录中…' : '账密登录'}
                 </button>
                 {/* task-022 B-1：记住密码开关（原生 checkbox；views.css 不可改，无自定义样式） */}
                 <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, cursor: 'pointer' }}>
@@ -556,12 +631,69 @@ export function RouterView() {
                     </tr>
                   </thead>
                   <tbody>
-                    {status.dhcpLeases.map((l) => (
-                      <tr key={`${l.mac}-${l.ip}`}>
-                        <td>{l.hostname ?? '—'}</td>
-                        <td className="mono">{l.ip}</td>
-                        <td className="mono">{l.mac}</td>
-                        <td>{l.expiresAt === null ? '无限期' : fmtDateTime(l.expiresAt)}</td>
+                    {status.dhcpLeases.map((l) => {
+                      // task-024：租约 ↔ 设备联动（IP 匹配扫描设备；匹配不到的行不可点击，不硬凑）
+                      const dev = deviceByIp.get(l.ip) ?? null
+                      return (
+                        <tr
+                          key={`${l.mac}-${l.ip}`}
+                          className={dev ? 'router-row-link' : undefined}
+                          onClick={dev ? () => onOpenDetail(dev.id) : undefined}
+                          title={dev ? `查看设备详情（${dev.hostname ?? dev.ip}）` : undefined}
+                        >
+                          <td>{l.hostname ?? '—'}</td>
+                          <td className="mono">{l.ip}</td>
+                          <td className="mono">{l.mac}</td>
+                          <td>{l.expiresAt === null ? '无限期' : fmtDateTime(l.expiresAt)}</td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              )
+            ) : status.session.kind === 'web' ? (
+              <div className="router-empty-line">管理页会话不提供 ubus 数据；OpenWrt 固件可用账密登录获取。</div>
+            ) : status.session.kind === 'basic' ? (
+              <div className="router-empty-line">Basic 认证会话不提供 ubus 数据；该路由器可能不是 OpenWrt 固件。</div>
+            ) : (
+              <div className="router-empty-line">该路由器不支持（或未登录）。</div>
+            )}
+          </div>
+
+          {/* —— 无线频段状态（OpenWrt iwinfo，task-024）—— */}
+          <div className="card">
+            <div className="card__head">
+              <span className="card__title">无线频段状态</span>
+              <span className="card__hint">
+                {ubusData && status.wirelessStatus !== null
+                  ? `${status.wirelessStatus.length} 个射频`
+                  : 'ubus 登录后可见'}
+              </span>
+            </div>
+            {ubusData ? (
+              status.wirelessStatus === null ? (
+                <div className="router-empty-line">
+                  该固件未提供 iwinfo 无线状态接口（失败原因见上方能力说明）。
+                </div>
+              ) : status.wirelessStatus.length === 0 ? (
+                <div className="router-empty-line">无射频设备（或无线电未启用）。</div>
+              ) : (
+                <table className="conn-table">
+                  <thead>
+                    <tr>
+                      <th>射频设备</th>
+                      <th>SSID</th>
+                      <th>信道</th>
+                      <th>关联客户端</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {status.wirelessStatus.map((b) => (
+                      <tr key={b.device}>
+                        <td className="mono">{b.device}</td>
+                        <td>{b.ssid ?? '—'}</td>
+                        <td className="mono">{b.channel ?? '—'}</td>
+                        <td className="mono">{b.clientCount ?? '—'}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -569,6 +701,8 @@ export function RouterView() {
               )
             ) : status.session.kind === 'web' ? (
               <div className="router-empty-line">管理页会话不提供 ubus 数据；OpenWrt 固件可用账密登录获取。</div>
+            ) : status.session.kind === 'basic' ? (
+              <div className="router-empty-line">Basic 认证会话不提供 ubus 数据；该路由器可能不是 OpenWrt 固件。</div>
             ) : (
               <div className="router-empty-line">该路由器不支持（或未登录）。</div>
             )}
@@ -597,23 +731,34 @@ export function RouterView() {
                     </tr>
                   </thead>
                   <tbody>
-                    {status.wirelessClients.map((c) => (
-                      <tr key={c.mac}>
-                        <td className="mono">{c.mac}</td>
-                        <td>{c.ssid ?? '—'}</td>
-                        <td className="mono">{c.signalDbm !== null ? `${c.signalDbm} dBm` : '—'}</td>
-                        <td className="mono">
-                          {c.rxRateKbps !== null ? `${(c.rxRateKbps / 1000).toFixed(0)}M` : '—'} /{' '}
-                          {c.txRateKbps !== null ? `${(c.txRateKbps / 1000).toFixed(0)}M` : '—'}
-                        </td>
-                        <td>{secToDuration(c.connectedForSec)}</td>
-                      </tr>
-                    ))}
+                    {status.wirelessClients.map((c) => {
+                      // task-024：无线客户端 ↔ 设备联动（MAC 匹配扫描设备；匹配不到的行不可点击）
+                      const dev = deviceByMac.get(c.mac) ?? null
+                      return (
+                        <tr
+                          key={c.mac}
+                          className={dev ? 'router-row-link' : undefined}
+                          onClick={dev ? () => onOpenDetail(dev.id) : undefined}
+                          title={dev ? `查看设备详情（${dev.hostname ?? dev.ip}）` : undefined}
+                        >
+                          <td className="mono">{c.mac}</td>
+                          <td>{c.ssid ?? '—'}</td>
+                          <td className="mono">{c.signalDbm !== null ? `${c.signalDbm} dBm` : '—'}</td>
+                          <td className="mono">
+                            {c.rxRateKbps !== null ? `${(c.rxRateKbps / 1000).toFixed(0)}M` : '—'} /{' '}
+                            {c.txRateKbps !== null ? `${(c.txRateKbps / 1000).toFixed(0)}M` : '—'}
+                          </td>
+                          <td>{secToDuration(c.connectedForSec)}</td>
+                        </tr>
+                      )
+                    })}
                   </tbody>
                 </table>
               )
             ) : status.session.kind === 'web' ? (
               <div className="router-empty-line">管理页会话不提供 ubus 数据；OpenWrt 固件可用账密登录获取。</div>
+            ) : status.session.kind === 'basic' ? (
+              <div className="router-empty-line">Basic 认证会话不提供 ubus 数据；该路由器可能不是 OpenWrt 固件。</div>
             ) : (
               <div className="router-empty-line">该路由器不支持（或未登录）。</div>
             )}

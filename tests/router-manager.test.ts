@@ -21,24 +21,37 @@ import { describe, expect, it, vi, beforeEach } from 'vitest';
 
 // —— 共享脚本状态（vi.hoisted：mock 工厂先于 import 求值也能引用）——
 const h = vi.hoisted(() => ({
-  /** 所有到达 httpx 的请求（含 UPnP 描述页直查） */
-  requests: [] as Array<{ url: string; body: string }>,
+  /** 所有到达 httpx 的请求（含 UPnP 描述页直查与 Basic 凭据验证 GET） */
+  requests: [] as Array<{ url: string; body: string; headers?: Record<string, string> }>,
   /** 每个 JSON-RPC 请求的应答脚本；返回 null 表示"脚本没覆盖到"，测试会立刻炸 */
   script: null as null | ((parsed: Record<string, unknown>, seq: number) => { status: number | null; body: string; error: string | null }),
+  /** task-024：管理页探测结果；null = 默认"探测关闭"（既有用例语义不变） */
+  detectResult: null as null | {
+    reachable: boolean;
+    brand: string | null;
+    hint: string | null;
+    error: string | null;
+    url: string | null;
+    auth: 'basic' | null;
+  },
+  /** task-024：Basic 凭据验证 GET（带 Authorization 头的非 JSON-RPC 请求）的应答；null = 模拟不可达 */
+  basicVerifyResponse: null as null | { status: number | null; body: string; error: string | null },
 }));
 
 vi.mock('../src/main/engine/router/httpx', () => ({
-  httpRequest: async (url: string, opts: { body?: string }) => {
+  httpRequest: async (url: string, opts: { body?: string; headers?: Record<string, string> }) => {
     const body = opts?.body ?? '';
-    h.requests.push({ url, body });
+    h.requests.push({ url, body, headers: opts?.headers });
     let parsed: Record<string, unknown> | null = null;
     try {
       parsed = body ? (JSON.parse(body) as Record<string, unknown>) : null;
     } catch {
       parsed = null;
     }
-    // 非 JSON-RPC（UPnP description.xml 直查兜底）→ 模拟不可达
+    // 非 JSON-RPC：带 Authorization 头的是 Basic 凭据验证 GET（task-024），按配置应答；
+    // 其余（UPnP description.xml 直查兜底）→ 模拟不可达
     if (!parsed || parsed.method !== 'call') {
+      if (h.basicVerifyResponse && opts?.headers?.Authorization) return h.basicVerifyResponse;
       return { status: null, body: '', error: 'mock: 非 ubus 请求' };
     }
     const seq = h.requests.filter((r) => r.body.includes('"method":"call"')).length;
@@ -52,8 +65,10 @@ vi.mock('../src/main/engine/router/detect', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/main/engine/router/detect')>();
   return {
     ...actual,
-    // 管理页探测恒不可达：identity.brand 保持 null，避免走 openwrt 提示分支干扰
-    detectManagementPage: async () => ({ reachable: false, error: 'mock: 探测关闭' }),
+    // 管理页探测默认不可达：identity.brand 保持 null，避免走 openwrt 提示分支干扰；
+    // task-024：h.detectResult 非空时按配置返回（Basic-Auth 登录测试）
+    detectManagementPage: async () =>
+      h.detectResult ?? { reachable: false, error: 'mock: 探测关闭' },
   };
 });
 
@@ -105,6 +120,13 @@ function scriptAllOk(): void {
         radios: { radio0: { interfaces: { iface0: { config: { ssid: 'HomeNet' }, clients: { 'aa:bb:cc:dd:ee:02': { signal: -50, rx: { rate: 130000 } } } } } } },
       }]);
     }
+    // task-024：iwinfo 通道（设备列表 + 单设备信息）
+    if (p[1] === 'iwinfo' && p[2] === 'devices') {
+      return rpcOk(parsed.id, [0, { devices: [{ name: 'wlan0' }] }]);
+    }
+    if (p[1] === 'iwinfo' && p[2] === 'info') {
+      return rpcOk(parsed.id, [0, { ssid: 'HomeNet', channel: 6, assoclist: [{ mac: 'aa:bb:cc:dd:ee:02' }] }]);
+    }
     throw new Error('脚本未识别调用: ' + JSON.stringify(p));
   };
 }
@@ -114,9 +136,19 @@ function scriptSessionDead(): void {
   h.script = (parsed) => (isLogin(parsed) ? rpcOk(parsed.id, [0, { ubus_rpc_session: 'S1' }]) : rpcErr(parsed.id, -32002));
 }
 
+/** 登录本身就 -32002（无 ubus 通道的固件，task-024 Basic-Auth 降级测试用） */
+function scriptUbusLoginDead(): void {
+  h.script = (parsed) => rpcErr(parsed.id, -32002);
+}
+
 /** 到达 httpx 的 JSON-RPC 请求数（排除 UPnP 描述页直查） */
 function ubusCallCount(): number {
   return h.requests.filter((r) => r.body.includes('"method":"call"')).length;
+}
+
+/** 带 Authorization 头的请求数（Basic 凭据验证 GET，task-024） */
+function authGetCount(): number {
+  return h.requests.filter((r) => typeof r.headers?.Authorization === 'string').length;
 }
 
 const GW = '192.168.2.1';
@@ -127,6 +159,8 @@ function newManager(): RouterManager {
 beforeEach(() => {
   h.requests.length = 0;
   h.script = null;
+  h.detectResult = null;
+  h.basicVerifyResponse = null;
 });
 
 describe('RouterManager 会话失效投影（-32002 在编排层）', () => {
@@ -231,6 +265,12 @@ describe('RouterManager 会话失效投影（-32002 在编排层）', () => {
         return rpcOk(parsed.id, [0, {
           radios: { radio0: { interfaces: { iface0: { config: { ssid: 'HomeNet' }, clients: { 'aa:bb:cc:dd:ee:02': { signal: -50, rx: { rate: 130000 } } } } } } },
         }]);
+      }
+      if (p[1] === 'iwinfo' && p[2] === 'devices') {
+        return rpcOk(parsed.id, [0, { devices: [{ name: 'wlan0' }] }]);
+      }
+      if (p[1] === 'iwinfo' && p[2] === 'info') {
+        return rpcOk(parsed.id, [0, { ssid: 'HomeNet', channel: 6, assoclist: [] }]);
       }
       throw new Error('脚本未识别调用: ' + JSON.stringify(p));
     };
@@ -344,5 +384,99 @@ describe('审计 L4：logout 世代号（在飞 doRefresh 的竞态）', () => {
     expect(s.session.kind).toBe('ubus');
     expect(s.dhcpLeases.length).toBeGreaterThan(0);
     expect(s.systemBoard).not.toBeNull();
+  });
+});
+
+/**
+ * Basic-Auth 通用登录（task-024）：无 ubus 通道的固件（管理页 401 + Basic 质询，
+ * 华硕等）的降级路径。锁四条编排层投影：
+ *  1) 质询 + 凭据 GET 200 → kind=basic 登录成功，但**不提供任何 ubus 数据**（会话正交）；
+ *  2) 质询存在但验证 401 → 错误文案以 Basic 结果为准（不再沿用 ubus 的"用户名或密码"）；
+ *  3) 无质询 → 不降级、不发凭据 GET（不把密码泼给表单页），沿用 ubus 文案；
+ *  4) logout 全通道登出，basic 会话不残留。
+ */
+describe('Basic-Auth 通用登录（task-024）', () => {
+  /** 401 + WWW-Authenticate: Basic 的管理页探测结果（detect mock 的配置） */
+  const BASIC_CHALLENGE = {
+    reachable: true,
+    brand: null,
+    hint: null,
+    error: null,
+    url: `http://${GW}/`,
+    auth: 'basic' as const,
+  };
+
+  it('ubus 登录失败 + Basic 质询 + 凭据 GET 200 → kind=basic 登录成功，数据不编造', async () => {
+    scriptUbusLoginDead(); // ubus 通道不存在（登录即 -32002）
+    h.detectResult = BASIC_CHALLENGE;
+    h.basicVerifyResponse = { status: 200, body: '<html>ASUS Router</html>', error: null };
+
+    const mgr = newManager();
+    const res = await mgr.login('root', 'secret');
+    expect(res.ok, 'Basic 凭据验证通过即登录成功').toBe(true);
+
+    const s = mgr.getStatus();
+    expect({
+      loggedIn: s.session.loggedIn,
+      user: s.session.user,
+      kind: s.session.kind,
+      error: s.session.error,
+    }).toEqual({ loggedIn: true, user: 'root', kind: 'basic', error: null });
+
+    // 数据诚实：basic 会话只提供登录态展示，不提供 ubus 数据 → 全空 + wirelessStatus null
+    expect({ leases: s.dhcpLeases, wireless: s.wirelessClients, board: s.systemBoard, wifi: s.wirelessStatus })
+      .toEqual({ leases: [], wireless: [], board: null, wifi: null });
+    // caps：openwrt 不因 basic 会话置位（能力与会话正交）；管理页可达 → managementPage 置位
+    expect({ openwrt: s.capabilities.openwrt, managementPage: s.capabilities.managementPage })
+      .toEqual({ openwrt: false, managementPage: true });
+
+    // 凭据验证 GET 确实带上了 Authorization 头，且落在管理页 URL 上
+    expect(authGetCount()).toBe(1);
+    const authReq = h.requests.find((r) => typeof r.headers?.Authorization === 'string');
+    expect(authReq?.headers?.Authorization).toBe(`Basic ${Buffer.from('root:secret').toString('base64')}`);
+    expect(authReq?.url).toBe(`http://${GW}/`);
+  });
+
+  it('质询存在但凭据 GET 401 → 登录失败，错误以"Basic 认证失败："开头', async () => {
+    scriptUbusLoginDead();
+    h.detectResult = BASIC_CHALLENGE;
+    h.basicVerifyResponse = { status: 401, body: '', error: null };
+
+    const mgr = newManager();
+    const res = await mgr.login('root', 'wrong');
+    expect(res.ok).toBe(false);
+    expect(res.error, 'Basic 质询是这台路由器的实际通道，错误文案以 Basic 结果为准').toMatch(/^Basic 认证失败：/);
+    expect(res.error).toContain('401');
+
+    const s = mgr.getStatus();
+    expect({ loggedIn: s.session.loggedIn, kind: s.session.kind, user: s.session.user })
+      .toEqual({ loggedIn: false, kind: null, user: null });
+  });
+
+  it('管理页可达但无 Basic 质询（如表单登录）→ 不降级，沿用 ubus 错误文案', async () => {
+    scriptUbusLoginDead();
+    h.detectResult = { reachable: true, brand: null, hint: null, error: null, url: `http://${GW}/`, auth: null };
+
+    const mgr = newManager();
+    const res = await mgr.login('root', 'secret');
+    expect(res.ok).toBe(false);
+    expect(res.error, '没有质询就没有 Basic 通道，错误保持 ubus 的 -32002 文案').toContain('用户名或密码');
+    expect(authGetCount(), '无 Basic 质询不得发送凭据验证 GET（不把密码泼给表单页）').toBe(0);
+    expect(mgr.getStatus().session.loggedIn).toBe(false);
+  });
+
+  it('logout() 清除 basic 会话：loggedIn false、kind null，后续 refresh 不复活', async () => {
+    scriptUbusLoginDead();
+    h.detectResult = BASIC_CHALLENGE;
+    h.basicVerifyResponse = { status: 200, body: '<html>ok</html>', error: null };
+
+    const mgr = newManager();
+    expect((await mgr.login('root', 'secret')).ok).toBe(true);
+    expect(mgr.getStatus().session.kind).toBe('basic');
+
+    mgr.logout();
+    const s1 = await mgr.refresh();
+    expect({ loggedIn: s1.session.loggedIn, kind: s1.session.kind, user: s1.session.user })
+      .toEqual({ loggedIn: false, kind: null, user: null });
   });
 });

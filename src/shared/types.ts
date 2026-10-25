@@ -62,6 +62,10 @@ export interface Device {
    * 侦测结果联动：true 时设备列表挂红色徽标，并产生 IP_CONFLICT critical 告警。
    */
   ipConflict: boolean;
+  /** 用户备注（task-025）；未设置为 undefined/null，由 applyDeviceMeta 注入 */
+  note?: string | null;
+  /** 用户标签（task-025，≤8 个、每个 ≤24 字符）；未设置时为 undefined 或空数组 */
+  tags?: string[];
 }
 
 export type ConsumableKind =
@@ -100,6 +104,9 @@ export interface PrintJob {
   pagesPrinted: number;
   submittedAt: number;
 }
+
+/** 打印任务操作类型（task-024）。 */
+export type PrintJobAction = 'cancel' | 'pause' | 'resume';
 
 export interface Printer {
   id: string;
@@ -162,6 +169,8 @@ export interface AppSettings {
    * 关闭即清除盘上已存凭据，且后续登录不再落盘；自动重登也随之停用。
    */
   rememberRouterPassword: boolean;
+  /** 告警 Webhook 推送地址（task-025，默认空 = 停用）；HTTP(S) POST，5s 超时不重试 */
+  notifyWebhookUrl: string;
 }
 
 /** 设置页载荷 = AppSettings + 主进程注入的只读信息。 */
@@ -190,6 +199,29 @@ export interface DiagResult {
   /** 明细行（原样输出/解析结果，供运维排查） */
   lines: string[];
   /** 权限不足 / 执行失败原因；成功为 null */
+  error: string | null;
+  /** tracert 专用：结构化跳数表（task-025）；解析失败/非 tracert 为 undefined 或空数组（诚实降级） */
+  hops?: TracertHop[];
+}
+
+/** tracert 结构化跳（task-025）。`* * *` 行 rtts 全 null、ip/hostname null。 */
+export interface TracertHop {
+  idx: number;
+  ip: string | null;
+  hostname: string | null;
+  /** 三次探测延迟（ms）；超时为 null */
+  rtts: (number | null)[];
+}
+
+/** 自定义端口扫描结果（task-025）。 */
+export interface PortScanResult {
+  ok: boolean;
+  /** 全部被扫描端口（升序）与开放状态 */
+  ports: { port: number; open: boolean }[];
+  /** 仅开放端口（升序） */
+  openPorts: number[];
+  durationMs: number;
+  /** 参数非法 / 校验失败 / 执行异常原因；成功为 null */
   error: string | null;
 }
 
@@ -307,12 +339,53 @@ export interface SystemStat {
   /** null = 采样失败/尚未建立基线（"不知道"），0 = 确认为零流量。两者不得混淆。 */
   rxBps: number | null;
   txBps: number | null;
+  /** 总带宽历史环（task-025，60 点）：rxBps/txBps 为 null 的点 = 该轮采样失败（曲线断开，诚实呈现） */
+  bandwidthHistory: BandwidthPoint[];
   alarmCounts: { critical: number; warning: number; info: number };
   scan: ScanProgress;
   lastScanAt: number | null;
   nextScanInMs: number | null;
   autoScan: boolean;
   autoScanIntervalSec: number;
+}
+
+/** 总带宽历史单点（task-025）。 */
+export interface BandwidthPoint {
+  ts: number;
+  rxBps: number | null;
+  txBps: number | null;
+}
+
+// —— 持续 Ping 监控（task-025） ——
+
+/** 监控目标（持久化进 store 的配置部分）。 */
+export interface WatchTarget {
+  ip: string;
+  addedAt: number;
+  /** 备注/名字；null = 未设置（UI 显示 IP） */
+  note: string | null;
+}
+
+/** 监控窗口单点采样。 */
+export interface WatchSample {
+  ts: number;
+  alive: boolean;
+  rttMs: number | null;
+}
+
+/** 监控目标运行状态（快照推送）。 */
+export interface WatchStatus {
+  ip: string;
+  addedAt: number;
+  note: string | null;
+  /** 最近最多 60 点采样（旧→新） */
+  window: WatchSample[];
+  /** 窗口内存活率（%）；无样本为 null */
+  upPct: number | null;
+  /** 连续宕机起始时刻；在线/无样本为 null */
+  downSince: number | null;
+  /** unknown = 尚无样本；不猜 */
+  state: 'up' | 'down' | 'unknown';
 }
 
 export interface Snapshot {
@@ -323,6 +396,8 @@ export interface Snapshot {
   printers: Printer[];
   alarms: Alarm[];
   system: SystemStat;
+  /** 持续 Ping 监控目标状态（task-025） */
+  watches: WatchStatus[];
   /** 引擎侧的降级/失败信息（去重、上限 20 条、条件恢复后消失） */
   warnings: WarningEntry[];
 }
@@ -343,9 +418,32 @@ export interface LanApi {
   ackAlarm(alarmId: string): Promise<{ ok: boolean }>;
   /** 用户手动清除告警（task-021 语义 A，操作人主进程注入）；单条传 [id] */
   alarmsClear(ids: Alarm['id'][]): Promise<void>;
-  exportReport(): Promise<{ ok: boolean; path: string | null; error?: string }>;
+  /** 导出运行报告（task-025：format 缺省 json，新增 html 自包含报告） */
+  exportReport(format?: 'json' | 'html'): Promise<{ ok: boolean; path: string | null; error?: string }>;
   /** 设置设备显示别名（null/空串清除）；与打印机别名共用一张持久化表 */
   setDeviceAlias(deviceId: string, alias: string | null): Promise<{ ok: boolean }>;
+  // —— 设备运维（task-025） ——
+  /** WOL 网络唤醒：发送 UDP 广播 magic packet；发送成功 ≠ 设备一定唤醒（UDP 无确认） */
+  deviceWake(deviceId: string): Promise<{ ok: boolean; error: string | null }>;
+  /** 设置设备备注（null/空串清除） */
+  deviceSetNote(deviceId: string, note: string | null): Promise<{ ok: boolean }>;
+  /** 设置设备标签（数组会被归一化：trim/去空/去重/≤8 个/每个 ≤24 字符；null 清除） */
+  deviceSetTags(deviceId: string, tags: string[] | null): Promise<{ ok: boolean }>;
+  // —— 持续 Ping 监控（task-025） ——
+  /** 当前监控目标与运行状态 */
+  watchList(): Promise<WatchStatus[]>;
+  watchAdd(ip: string, note?: string | null): Promise<{ ok: boolean; error: string | null }>;
+  watchRemove(ip: string): Promise<{ ok: boolean }>;
+  // —— 诊断扩展（task-025） ——
+  /** 自定义端口范围扫描（单次 ≤1024 端口） */
+  diagPortScan(ip: string, from: number, to: number): Promise<PortScanResult>;
+  // —— 通知 / 配置（task-025） ——
+  /** 向指定 URL 发送一条 webhook 测试消息，结果如实返回 */
+  webhookTest(url: string): Promise<{ ok: boolean; status: number | null; error: string | null }>;
+  /** 导出配置到下载目录（settings+别名+备注+标签+监控+打印管理+firstSeen） */
+  configExport(): Promise<{ ok: boolean; path: string | null; error?: string }>;
+  /** 导入配置（渲染层传 JSON 文本；逐键合并，非法键跳过并计入 skipped） */
+  configImport(json: string): Promise<{ ok: boolean; imported: string[]; skipped: string[]; error: string | null }>;
   routerGetStatus(): Promise<RouterStatus>;
   routerRefresh(): Promise<RouterStatus>;
   routerLogin(
@@ -362,6 +460,18 @@ export interface LanApi {
   printerRemoveManual(ip: string): Promise<{ ok: boolean }>;
   printerSetIgnored(printerId: string, ignored: boolean): Promise<{ ok: boolean }>;
   printerSetAlias(printerId: string, alias: string | null): Promise<{ ok: boolean }>;
+  /** 打印任务操作（task-024）：取消/暂停/恢复；错误如实透出不吞 */
+  printerJobAction(
+    action: PrintJobAction,
+    printerName: string,
+    jobId: string,
+  ): Promise<{ ok: boolean; error: string | null }>;
+  /** 让打印机打印一张测试页（rundll32 printui） */
+  printerPrintTestPage(printerName: string): Promise<{ ok: boolean; error: string | null }>;
+  /** 设为系统默认打印机（CIM Win32_Printer.SetDefaultPrinter） */
+  printerSetDefault(printerName: string): Promise<{ ok: boolean; error: string | null }>;
+  /** 用内置浏览器窗口打开打印机 Web 管理页（http://<ip>） */
+  printerOpenAdmin(ip: string): Promise<{ ok: boolean; error: string | null; url: string | null }>;
   // —— 设置页 ——
   settingsGet(): Promise<SettingsPayload>;
   /** 局部更新：只传需要变更的字段，返回更新后的完整设置 */
@@ -448,6 +558,19 @@ export interface WirelessClient {
 
 export type RouterActionStatus = 'ok' | 'unsupported' | 'auth-required' | 'failed';
 
+/**
+ * OpenWrt 无线射频状态（task-024，iwinfo）。
+ * 任一字段设备不报告即 null，不猜。
+ */
+export interface WirelessBandStatus {
+  /** 无线射频设备名，如 radio0 / radio1 */
+  device: string;
+  ssid: string | null;
+  channel: number | null;
+  /** 已关联客户端数（assoclist 长度） */
+  clientCount: number | null;
+}
+
 /** 路由器通道快照（独立 IPC 推送，不进 Snapshot 冻结契约）。 */
 export interface RouterStatus {
   ts: number;
@@ -464,10 +587,19 @@ export interface RouterStatus {
     /** 相对上一次采样的速率；样本不足 2 次为 null */
     rxBps: number | null;
     txBps: number | null;
+    /** GetStatusInfo 的连接状态（如 Connected）；设备不提供该 action 时为 null（task-024） */
+    connectionStatus: string | null;
+    /** GetStatusInfo 的连接时长（秒）；设备不提供该 action 时为 null（task-024） */
+    uptimeSec: number | null;
   };
   /** OpenWrt 通道数据（未登录 / 不支持时为空数组，绝不编造） */
   dhcpLeases: DhcpLease[];
   wirelessClients: WirelessClient[];
+  /**
+   * OpenWrt 无线射频状态（task-024）。
+   * null = 未登录或不支持（区别于 []：已登录但拿不到任何射频也如实给空数组）。
+   */
+  wirelessStatus: WirelessBandStatus[] | null;
   systemBoard: {
     hostname: string | null;
     model: string | null;
@@ -478,13 +610,14 @@ export interface RouterStatus {
    * 会话状态。kind 区分会话来源：
    *  - 'ubus'：OpenWrt 账密登录（可取 DHCP 租约 / 无线客户端 / 系统信息）
    *  - 'web' ：内置浏览器登录管理页后由 Cookie 检测建立（不代表 ubus 数据可用）
+   *  - 'basic'：管理页 HTTP Basic-Auth 通用登录（task-024，仅登录态展示，不解析页面内容）
    *  - null  ：未登录
    */
   session: {
     loggedIn: boolean;
     user: string | null;
     error: string | null;
-    kind: 'ubus' | 'web' | null;
+    kind: 'ubus' | 'web' | 'basic' | null;
     /**
      * 观测到会话被服务端作废（-32002）的时刻（unix ms，task-022 B-2）；
      * null = 会话有效或从未建立。粘性：观测到一次即保留，直到重新登录成功或 logout。

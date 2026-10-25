@@ -20,8 +20,15 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync, type DatabaseSync as Db } from 'node:sqlite';
-import type { Alarm, Device, ManualPrinterEntry, PrinterManageConfig } from '../../../shared/types';
-import { isValidIpv4, defaultState, type PersistedSettings, type PersistedState, type PersistStore } from '../store';
+import type { Alarm, Device, ManualPrinterEntry, PrinterManageConfig, WatchTarget } from '../../../shared/types';
+import {
+  isValidIpv4,
+  defaultState,
+  normalizeTags,
+  type PersistedSettings,
+  type PersistedState,
+  type PersistStore,
+} from '../store';
 import { DEVICE_STATUS_LOG_MAX, MIGRATIONS } from './migrations';
 
 export type DbLogger = (level: 'info' | 'warn' | 'error', message: string) => void;
@@ -34,6 +41,17 @@ function parseTrace(raw: string | null): Alarm['trace'] {
   try {
     const parsed: unknown = JSON.parse(raw);
     return Array.isArray(parsed) ? (parsed as Alarm['trace']) : [];
+  } catch {
+    return [];
+  }
+}
+
+/** device_tags.tags 列的兜底解析（JSON 字符串数组）：损坏一律视为空。 */
+function parseTagsJson(raw: string | null): unknown[] {
+  if (!raw) return [];
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
   } catch {
     return [];
   }
@@ -263,6 +281,7 @@ export class SqliteStore implements PersistStore {
       notifyDesktop: pick('notifyDesktop', d.notifyDesktop),
       closeToTray: pick('closeToTray', d.closeToTray),
       rememberRouterPassword: pick('rememberRouterPassword', d.rememberRouterPassword),
+      notifyWebhookUrl: pick('notifyWebhookUrl', d.notifyWebhookUrl),
     };
   }
 
@@ -297,6 +316,25 @@ export class SqliteStore implements PersistStore {
         }[]
       ).map((m) => ({ ip: m.ip, note: m.note ?? null, addedAt: Number(m.added_at) }));
       const ignored = (db.prepare('SELECT printer_id FROM printers_ignored').all() as { printer_id: string }[]).map((r) => r.printer_id);
+      // task-025：备注 / 标签 / 监控目标
+      const deviceNotes: Record<string, string> = {};
+      for (const r of db.prepare('SELECT key, note FROM device_notes').all() as { key: string; note: string }[]) {
+        deviceNotes[r.key] = r.note;
+      }
+      const deviceTags: Record<string, string[]> = {};
+      for (const r of db.prepare('SELECT key, tags FROM device_tags').all() as { key: string; tags: string }[]) {
+        const tags = normalizeTags(parseTagsJson(r.tags));
+        if (tags.length > 0) deviceTags[r.key] = tags;
+      }
+      const watchList: WatchTarget[] = (
+        db.prepare('SELECT ip, note, added_at FROM watch_targets ORDER BY added_at ASC').all() as unknown as {
+          ip: string;
+          note: string | null;
+          added_at: number;
+        }[]
+      )
+        .filter((w) => isValidIpv4(w.ip))
+        .map((w) => ({ ip: w.ip, note: w.note ?? null, addedAt: Number(w.added_at) }));
       return {
         version: 1,
         aliases,
@@ -305,6 +343,9 @@ export class SqliteStore implements PersistStore {
         firstSeen,
         settings: { ...this.settingsCache },
         printers: { manual, ignored },
+        deviceNotes,
+        deviceTags,
+        watchList,
       } satisfies PersistedState;
     });
   }
@@ -332,6 +373,111 @@ export class SqliteStore implements PersistStore {
     this.safe('setAlias', undefined, () => {
       this.db?.prepare('INSERT OR REPLACE INTO aliases (key, alias, updated_at) VALUES (?, ?, ?)').run(deviceId, clean, Date.now());
     });
+  }
+
+  // —— 设备备注 / 标签 / 监控目标（task-025，与 JsonStore 同构） ——
+
+  noteOf(deviceId: string): string | null {
+    if (!this.db) return this.mem.deviceNotes[deviceId] ?? null;
+    const row = this.safe(
+      'noteOf',
+      undefined,
+      () => this.db?.prepare('SELECT note FROM device_notes WHERE key = ?').get(deviceId) as { note: string } | undefined,
+    );
+    return row ? row.note : (this.mem.deviceNotes[deviceId] ?? null);
+  }
+
+  setNote(deviceId: string, note: string | null): void {
+    if (!note || !note.trim()) {
+      delete this.mem.deviceNotes[deviceId];
+      this.safe('setNote(delete)', undefined, () => {
+        this.db?.prepare('DELETE FROM device_notes WHERE key = ?').run(deviceId);
+      });
+      return;
+    }
+    const clean = note.trim().slice(0, 200);
+    this.mem.deviceNotes[deviceId] = clean;
+    this.safe('setNote', undefined, () => {
+      this.db?.prepare('INSERT OR REPLACE INTO device_notes (key, note, updated_at) VALUES (?, ?, ?)').run(deviceId, clean, Date.now());
+    });
+  }
+
+  tagsOf(deviceId: string): string[] | null {
+    if (!this.db) return this.mem.deviceTags[deviceId] ?? null;
+    const row = this.safe(
+      'tagsOf',
+      undefined,
+      () => this.db?.prepare('SELECT tags FROM device_tags WHERE key = ?').get(deviceId) as { tags: string } | undefined,
+    );
+    if (!row) return this.mem.deviceTags[deviceId] ?? null;
+    const tags = normalizeTags(parseTagsJson(row.tags));
+    return tags.length > 0 ? tags : null;
+  }
+
+  setTags(deviceId: string, tags: string[] | null): void {
+    const normalized = normalizeTags(tags);
+    if (normalized.length === 0) {
+      delete this.mem.deviceTags[deviceId];
+      this.safe('setTags(delete)', undefined, () => {
+        this.db?.prepare('DELETE FROM device_tags WHERE key = ?').run(deviceId);
+      });
+      return;
+    }
+    this.mem.deviceTags[deviceId] = normalized;
+    this.safe('setTags', undefined, () => {
+      this.db
+        ?.prepare('INSERT OR REPLACE INTO device_tags (key, tags, updated_at) VALUES (?, ?, ?)')
+        .run(deviceId, JSON.stringify(normalized), Date.now());
+    });
+  }
+
+  watchTargets(): WatchTarget[] {
+    if (!this.db) return this.mem.watchList.map((w) => ({ ...w }));
+    const rows = this.safe(
+      'watchTargets',
+      [] as WatchTarget[],
+      () =>
+        (
+          this.db?.prepare('SELECT ip, note, added_at FROM watch_targets ORDER BY added_at ASC').all() as unknown as {
+            ip: string;
+            note: string | null;
+            added_at: number;
+          }[]
+        )
+          .filter((w) => isValidIpv4(w.ip))
+          .map((w) => ({ ip: w.ip, note: w.note ?? null, addedAt: Number(w.added_at) })),
+    );
+    return rows.map((w) => ({ ...w }));
+  }
+
+  addWatchTarget(ip: string, note: string | null): { ok: boolean; error: string | null } {
+    const trimmed = String(ip ?? '').trim();
+    if (!isValidIpv4(trimmed)) return { ok: false, error: `IP 地址无效：${ip}` };
+    const cleanNote = note && note.trim() ? note.trim().slice(0, 40) : null;
+    // mem 层幂等（db 不可用时兜底），db 层 upsert
+    const memList = this.mem.watchList;
+    const existing = memList.find((w) => w.ip === trimmed);
+    if (existing) existing.note = cleanNote;
+    else memList.push({ ip: trimmed, addedAt: Date.now(), note: cleanNote });
+    this.safe('addWatchTarget', undefined, () => {
+      this.db
+        ?.prepare(
+          `INSERT INTO watch_targets (ip, note, added_at) VALUES (?, ?, ?)
+           ON CONFLICT(ip) DO UPDATE SET note = excluded.note`,
+        )
+        .run(trimmed, cleanNote, existing ? existing.addedAt : Date.now());
+    });
+    return { ok: true, error: null };
+  }
+
+  removeWatchTarget(ip: string): { ok: boolean } {
+    const trimmed = String(ip ?? '').trim();
+    const before = this.mem.watchList.length;
+    this.mem.watchList = this.mem.watchList.filter((w) => w.ip !== trimmed);
+    this.safe('removeWatchTarget', undefined, () => {
+      this.db?.prepare('DELETE FROM watch_targets WHERE ip = ?').run(trimmed);
+    });
+    return { ok: true };
   }
 
   setSettings(patch: Partial<PersistedSettings>): void {

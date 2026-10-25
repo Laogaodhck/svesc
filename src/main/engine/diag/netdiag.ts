@@ -14,7 +14,7 @@
  */
 import dnsPromises from 'node:dns/promises';
 import { DIAG } from '../../../shared/constants';
-import type { DiagKind, DiagResult, NetAdapter } from '../../../shared/types';
+import type { DiagKind, DiagResult, NetAdapter, TracertHop } from '../../../shared/types';
 import { runGbkNative } from '../exec';
 import { parsePingStats } from '../discovery/ping';
 import { probeHosts } from '../discovery/ports';
@@ -136,6 +136,51 @@ export function parseTracertHops(text: string, target: string, timedOut: boolean
   return { hops, reached };
 }
 
+/**
+ * 纯函数（task-025）：把 tracert 输出解析为结构化跳数表。
+ *  - 回包跳：`  1    <1 ms    1 ms     1 ms  192.168.2.1`（rtts 逐个提取，`<1 ms` 记 0）；
+ *  - 超时跳：`  2     *        *        *     请求超时。`（rtts 全 null、ip null）；
+ *  - hostname：仅未加 -d 的输出才有 `[主机名]` 后缀，取得到就带上，取不到 null（不猜）；
+ *  - 无法识别的行直接跳过；整体解析不出任何跳 → 空数组（诚实降级，文本仍在 lines）。
+ */
+export function parseTracertHopsDetailed(text: string): TracertHop[] {
+  const out: TracertHop[] = [];
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim();
+    const m = /^(\d{1,3})\s+(.+)$/.exec(line);
+    if (!m) continue;
+    const idx = Number(m[1]);
+    if (!Number.isInteger(idx) || idx < 1 || idx > 255) continue;
+    const rest = m[2];
+    const rtts: (number | null)[] = [];
+    const tokenRe = /(<\s*\d+(?:\.\d+)?\s*ms|\d+(?:\.\d+)?\s*ms|\*)/gi;
+    let tok: RegExpExecArray | null = null;
+    while ((tok = tokenRe.exec(rest)) !== null && rtts.length < 3) {
+      const token = tok[1];
+      if (token === '*') {
+        rtts.push(null);
+        continue;
+      }
+      const num = /(\d+(?:\.\d+)?)/.exec(token);
+      if (!num) {
+        rtts.push(null);
+        continue;
+      }
+      // `<1 ms` 按 0 记（与 parsePingOutput 的 sub-ms 语义一致）
+      rtts.push(/</.test(token) ? 0 : Math.round(Number(num[1]) * 10) / 10);
+    }
+    // 无任何 rtt/超时令牌的行（如序号行混入的其他文本）直接跳过
+    if (rtts.length === 0) continue;
+    // 目标 IP / 主机名：取行内最后一个 IPv4；`[...]` 括号内为主机名（无 -d 时出现）
+    const ipMatches = rest.match(/\d{1,3}(?:\.\d{1,3}){3}/g);
+    const ip = ipMatches && ipMatches.length > 0 ? (ipMatches[ipMatches.length - 1] as string) : null;
+    const hostM = /\[([^\]\s]+)\]/.exec(rest);
+    const hostname = hostM ? (hostM[1] as string) : null;
+    out.push({ idx, ip, hostname, rtts });
+  }
+  return out;
+}
+
 async function diagTracert(target: string, startedAt: number): Promise<DiagResult> {
   const res = await runGbkNative(
     'tracert',
@@ -151,6 +196,8 @@ async function diagTracert(target: string, startedAt: number): Promise<DiagResul
     result.summary = '执行失败';
     return result;
   }
+  // task-025：结构化跳数表（解析失败为空数组，诚实降级——文本 lines 仍在）
+  result.hops = parseTracertHopsDetailed(res.stdout);
   const { hops, reached } = parseTracertHops(res.stdout, target, res.timedOut);
   // 超时硬杀不是失败：如实报告已到达的跳数（诚实截断）
   if (res.timedOut) {

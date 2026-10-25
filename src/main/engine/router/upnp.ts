@@ -162,6 +162,10 @@ export interface UpnpSnapshot {
   /** GetTotalBytes* 计数器；设备不支持该 action 时为 null */
   totalBytesRx: number | null;
   totalBytesTx: number | null;
+  /** GetStatusInfo 的连接状态（如 Connected）；设备不支持该 action 时为 null（task-024） */
+  connectionStatus: string | null;
+  /** GetStatusInfo 的连接时长（秒）；设备不支持该 action 时为 null（task-024） */
+  uptimeSec: number | null;
   error: string | null;
 }
 
@@ -176,6 +180,8 @@ export async function upnpQuery(location: string, timeoutMs = ROUTER.upnpHttpTim
     wanIp: null,
     totalBytesRx: null,
     totalBytesTx: null,
+    connectionStatus: null,
+    uptimeSec: null,
     error: null,
   };
   const base = new URL(location);
@@ -233,6 +239,23 @@ export async function upnpQuery(location: string, timeoutMs = ROUTER.upnpHttpTim
     const v = fields[`New${action.slice(3)}`] ?? fields.NewTotalBytes ?? null;
     const n = v === null ? NaN : Number(v);
     if (Number.isFinite(n) && n >= 0) out[key] = n;
+  }
+
+  // GetStatusInfo：连接状态 + 连接时长（部分固件不实现该 action → 保持 null）
+  const statusRes = await httpRequest(control, {
+    port: soapPort,
+    path: controlU.pathname,
+    method: 'POST',
+    headers: soapActionHeader('GetStatusInfo'),
+    body: buildSoap('GetStatusInfo'),
+    timeoutMs,
+  });
+  if (!statusRes.error && statusRes.status === 200) {
+    const fields = parseSoapFields(statusRes.body, 'GetStatusInfoResponse');
+    const conn = fields.NewConnectionStatus?.trim();
+    if (conn) out.connectionStatus = conn;
+    const uptime = Number(fields.NewUptime);
+    if (Number.isFinite(uptime) && uptime >= 0) out.uptimeSec = uptime;
   }
   return out;
 }
