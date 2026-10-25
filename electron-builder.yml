@@ -16,8 +16,8 @@ directories:
   # 0.2.0 告警管理版（图标 + 托盘 + 全部功能 + 告警三态管理）：环境安全层对 .asar 有
   # 全层删除保护（Node/PowerShell/Python 全被拦），打过的 win-unpacked 永远清不空 →
   # 每次重打包必须换全新输出目录（全新目录首打必成，emptyDir 无可删项）。
-  # 历史目录：release-0.2.0 / -icons / -full / -tray / -alarm / -alarm2 / -alarm3。
-  output: release-0.2.0-alarm3
+  # 历史目录：release-0.2.0 / -icons / -full / -tray / -alarm / -alarm2 / -alarm3 / -alarm4。
+  output: release-0.2.1
   buildResources: build
 
 # 环境安全层拦截"一次调用递归删大目录"（electron-builder 解压 Electron 前必先
