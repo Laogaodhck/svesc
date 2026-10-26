@@ -34,12 +34,6 @@ const STATE_LABEL: Record<string, string> = {
   unknown: '未知',
 };
 
-const SEVERITY_LABEL: Record<string, string> = {
-  critical: '严重',
-  warning: '警告',
-  info: '信息',
-};
-
 /**
  * 生成自包含 HTML 报告。extras 合入头部附录（路由器状态等，由调用方提供）。
  * 空表显示"暂无数据"占位，绝不虚构行。
@@ -49,7 +43,6 @@ export function buildHtmlReport(snapshot: Snapshot, extras?: Record<string, unkn
   const now = new Date(snapshot.ts);
   const devices = snapshot.devices ?? [];
   const printers = snapshot.printers ?? [];
-  const activeAlarms = (snapshot.alarms ?? []).filter((a) => a.resolvedAt === null);
   const warnings = snapshot.warnings ?? [];
 
   const deviceRows = devices
@@ -82,18 +75,6 @@ export function buildHtmlReport(snapshot: Snapshot, extras?: Record<string, unkn
     )
     .join('\n');
 
-  const alarmRows = activeAlarms
-    .map(
-      (a) => `<tr class="sev-${s(a.severity)}">
-  <td>${s(SEVERITY_LABEL[a.severity] ?? a.severity)}</td>
-  <td>${s(a.code)}</td>
-  <td>${s(a.targetName)}</td>
-  <td>${s(a.message)}</td>
-  <td>${s(new Date(a.raisedAt).toLocaleString('zh-CN'))}</td>
-</tr>`,
-    )
-    .join('\n');
-
   const warningItems =
     warnings.length > 0
       ? warnings.map((w) => `<li>[${s(w.source)}] ${s(w.message)}</li>`).join('\n')
@@ -118,8 +99,6 @@ export function buildHtmlReport(snapshot: Snapshot, extras?: Record<string, unkn
   .meta { color: #6b7280; font-size: 12px; }
   .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 4px; background: #9ca3af; }
   .dot.online { background: #16a34a; } .dot.offline { background: #dc2626; } .dot.degraded { background: #d97706; }
-  .sev-critical td:first-child { color: #dc2626; font-weight: 600; }
-  .sev-warning td:first-child { color: #d97706; font-weight: 600; }
   .tag { display: inline-block; background: #e5e7eb; border-radius: 3px; padding: 0 4px; margin: 1px; }
   pre { background: #f9fafb; border: 1px solid #e5e7eb; padding: 8px; font-size: 11px; overflow-x: auto; }
   .empty { color: #6b7280; font-style: italic; padding: 8px; }
@@ -130,7 +109,7 @@ export function buildHtmlReport(snapshot: Snapshot, extras?: Record<string, unkn
 <p class="meta" id="meta">
   网段：${s(snapshot.subnet ?? '未知')} · 生成时间：${s(now.toLocaleString('zh-CN'))} ·
   数据源：${s(snapshot.dataSource)} · 设备 ${devices.length} 台（在线 ${s(String(devices.filter((d) => d.state === 'online').length))}）·
-  打印机 ${printers.length} 台 · 活跃告警 ${activeAlarms.length} 条
+  打印机 ${printers.length} 台
 </p>
 <h2 id="devices">设备</h2>
 ${
@@ -150,16 +129,6 @@ ${
 <thead><tr><th>名称</th><th>连接</th><th>状态</th><th>IP</th><th>页数</th></tr></thead>
 <tbody>
 ${printerRows}
-</tbody></table>`
-}
-<h2 id="alarms">活跃告警</h2>
-${
-  activeAlarms.length === 0
-    ? '<p class="empty">无活跃告警</p>'
-    : `<table>
-<thead><tr><th>级别</th><th>代码</th><th>对象</th><th>内容</th><th>触发时间</th></tr></thead>
-<tbody>
-${alarmRows}
 </tbody></table>`
 }
 <h2 id="warnings">降级信息（数据可信度）</h2>

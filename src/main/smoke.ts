@@ -19,10 +19,9 @@ export interface SmokeResult {
   errors: string[];
   devices: number;
   printers: number;
-  alarms: number;
 }
 
-type SmokeView = 'overview' | 'devices' | 'printers' | 'printermanage' | 'settings' | 'alarms' | 'router' | 'diagnostics';
+type SmokeView = 'overview' | 'devices' | 'printers' | 'printermanage' | 'settings' | 'router' | 'diagnostics';
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -120,8 +119,6 @@ export async function runSmoke(win: BrowserWindow, engine: Engine, router?: Rout
   await capture('printermanage');
   await setView('settings');
   await capture('settings');
-  await setView('alarms');
-  await capture('alarms');
   // 诊断中心：验证新页面渲染 + 本机网卡 IPC 通道真实可达（读失败会如实显示空态，不阻断）
   await setView('diagnostics');
   await capture('diagnostics');
@@ -174,7 +171,6 @@ export async function runSmoke(win: BrowserWindow, engine: Engine, router?: Rout
     errors,
     devices: finalSnapshot.devices.length,
     printers: finalSnapshot.printers.length,
-    alarms: finalSnapshot.alarms.length,
   };
 
   process.stdout.write(`${JSON.stringify({ smoke: result })}\n`);

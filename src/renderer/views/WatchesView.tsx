@@ -9,8 +9,7 @@ import { fmtDateTime, relTime } from '../lib/format'
 
 /**
  * 持续 Ping 监控（task-025）：
- * - 目标每 WATCH.intervalMs(5s) 被 ICMP 探测一次，宕机/恢复经 AlarmEngine 联动成
- *   WATCH_DOWN 告警（critical），并继续走既有告警链路（推送/Webhook）。
+ * - 目标每 WATCH.intervalMs(5s) 被 ICMP 探测一次，宕机/恢复立即推新快照（本页状态实时刷新）。
  * - 数据诚实：unknown = 尚无样本，不猜在线；rtt 超时画断点。
  */
 
@@ -123,8 +122,7 @@ export function WatchesView({ watches, devices, onOpenDetail, onNavigate }: Watc
         <div>
           <div className="view-title">监控</div>
           <div className="view-desc">
-            对重点目标持续 ICMP 探测（每 5 秒一轮，保留最近 60 点）。目标宕机会自动产生
-            WATCH_DOWN 告警并联动通知；恢复后告警自动解除。
+            对重点目标持续 ICMP 探测（每 5 秒一轮，保留最近 60 点）；目标宕机在下方以状态标示。
           </div>
         </div>
         {watches.length > 0 && (

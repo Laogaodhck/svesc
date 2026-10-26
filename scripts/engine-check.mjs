@@ -77,7 +77,6 @@ console.log(`  ${'≡ 进程总计'.padEnd(24, '.')} ${String(Math.round(totalMs
 console.log('---- 结果 ----');
 console.log(`devices       : ${snapshot.devices.length}`);
 console.log(`printers      : ${snapshot.printers.length}`);
-console.log(`alarms        : ${snapshot.alarms.length}`);
 console.log(`system        : online=${snapshot.system.online} offline=${snapshot.system.offline} degraded=${snapshot.system.degraded}`);
 
 const realDevices = snapshot.devices.filter((d) => !d.id.startsWith('sim-'));
@@ -101,13 +100,6 @@ for (const p of snapshot.printers) {
   );
 }
 
-console.log('---- 告警 ----');
-if (snapshot.alarms.length === 0) console.log('  (无)');
-for (const a of snapshot.alarms) {
-  console.log(`  [${a.severity}] ${a.code} → ${a.targetName} :: ${a.message}`);
-}
-
-const printerOffline = snapshot.alarms.filter((a) => a.code === 'PRINTER_OFFLINE');
 // 预算口径全部从引擎常量推导：改 SCAN_BUDGET_MS 时断言线自动联动，不写死数字
 const budget = mod.SCAN_BUDGET_MS ?? 10_000;
 const phaseMs = (name) => phases.find((p) => p.label === name)?.ms ?? Number.POSITIVE_INFINITY;
@@ -126,7 +118,8 @@ const tripwire = (name, value, limit) => {
 console.log('---- 断言 ----');
 console.log(`  devices > 0            : ${snapshot.devices.length > 0 ? 'PASS' : 'FAIL'}`);
 console.log(`  printers > 0           : ${snapshot.printers.length > 0 ? 'PASS' : 'FAIL'}`);
-console.log(`  PRINTER_OFFLINE 产生   : ${printerOffline.length > 0 ? `PASS (${printerOffline.map((a) => a.targetName).join(', ')})` : 'FAIL(无离线打印机)'}`);
+const offlinePrinters = snapshot.printers.filter((p) => p.state === 'offline');
+console.log(`  打印机离线如实展示      : ${offlinePrinters.map((p) => p.name).join(', ') || '(本轮无离线打印机)'}`);
 assert('扫描 ≤ 预算+2.5s', timings?.total ?? Number.POSITIVE_INFINITY, budget + 2500);
 tripwire('ping ≤ 预算+1.5s', phaseMs('ping(254@64)'), budget + 1500);
 // task-023：指纹阶段现在并行跑 4 路增强（mDNS 1s / WS-Discovery 1.2s / SSDP 1.5s+0.6s 描述页 / nbtstat ≤2s），

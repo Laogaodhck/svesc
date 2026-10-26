@@ -4,13 +4,14 @@
  * 这里是**唯一**允许 import electron 的地方之一（另有 ipc.ts / preload.ts / smoke.ts）。
  * 探测引擎（src/main/engine/**）完全不依赖 Electron，可被 vitest 在纯 Node 下导入测试。
  */
-import { app, BrowserWindow, Menu, Notification } from 'electron';
+import { app, BrowserWindow, Menu } from 'electron';
 import path from 'node:path';
 import { createEngine, type Engine } from './engine';
 import { RouterManager } from './engine/router';
-import { pushAlarm, pushRouterStatus, pushScanProgress, pushSnapshot, registerIpc } from './ipc';
+import { pushRouterStatus, pushScanProgress, pushSnapshot, registerIpc } from './ipc';
 import { loadCredentials, saveCredentials, clearCredentials } from './router-store';
-import { createTray, destroyTray, isQuitRequested, refreshTray, updateBadge } from './tray';
+import { getRouterAdminCookieHeader } from './router-browser';
+import { createTray, destroyTray, isQuitRequested, refreshTray } from './tray';
 
 const isSmoke = process.env.SMOKE === '1';
 
@@ -94,26 +95,10 @@ async function bootstrap(): Promise<void> {
     exportDir: app.getPath('downloads'),
     onSnapshot: (snapshot) => {
       pushSnapshot(snapshot);
-      // 托盘菜单随心跳重建（勾选态/告警计数保鲜）；任务栏角标按活跃告警数叠加
-      if (!isSmoke) {
-        refreshTray();
-        const active = snapshot.alarms.filter((a) => a.resolvedAt === null).length;
-        updateBadge(mainWindow, active);
-      }
+      // 托盘菜单随心跳重建（勾选态保鲜）
+      if (!isSmoke) refreshTray();
     },
     onScanProgress: (progress) => pushScanProgress(progress),
-    onAlarm: (alarm) => {
-      pushAlarm(alarm);
-      // 桌面通知（设置页可关；环境不支持时诚实跳过，不报错）
-      if (!engine?.getSettings().notifyDesktop) return;
-      if (!Notification.isSupported()) return;
-      const title = alarm.severity === 'critical' ? `【严重】${alarm.code}` : `【告警】${alarm.code}`;
-      try {
-        new Notification({ title, body: `${alarm.targetName}：${alarm.message}` }).show();
-      } catch {
-        /* 通知失败不影响告警主链路（渲染层横幅仍在） */
-      }
-    },
   });
 
   mainWindow = await createWindow();
@@ -126,6 +111,9 @@ async function bootstrap(): Promise<void> {
     if (!engine?.getSettings().rememberRouterPassword) return null;
     return loadCredentials();
   });
+  // task-030：管理页租约实验通道的 Cookie 提供者——内置浏览器登录后分区里的
+  // 会话 Cookie 每轮现读，登出清空后自动变 null（通道静默跳过）
+  routerManager.setWebLeaseProvider(getRouterAdminCookieHeader);
   registerIpc(mainWindow, engine, routerManager);
   routerManager.startPolling((status) => {
     pushRouterStatus(status);
@@ -145,7 +133,6 @@ async function bootstrap(): Promise<void> {
   if (!isSmoke) {
     createTray({
       trayIconPath: buildAsset('tray-icon.png'),
-      badgeIconPath: buildAsset('badge.png'),
       getWindow: () => mainWindow,
       engine,
     });

@@ -119,9 +119,17 @@ export function hintsFromMatches(matches: WsdProbeMatch[]): WsdCameraHint[] {
 /**
  * 全网 WS-Discovery 摄像头侦测入口：发"ONVIF 专用 + 通配"两个 Probe，
  * 窗口内收集全部响应后统一解析归类。任何异常静默返回 []。
+ *
+ * task-028：不少 IPC/NVR 不加入组播组、或交换机过滤了 239.255.255.250，
+ * 但对**单播** Probe 仍会应答。`unicastTargets` 由调度器传入本轮存活 IP，
+ * 每个目标只多发 1 包通配 Probe（由调用方限量），不额外扩大扫描面。
  */
-export async function discoverCamerasWsdiscovery(timeoutMs = WSD_TIMEOUT_MS): Promise<WsdCameraHint[]> {
+export async function discoverCamerasWsdiscovery(
+  timeoutMs = WSD_TIMEOUT_MS,
+  unicastTargets: readonly string[] = [],
+): Promise<WsdCameraHint[]> {
   const messages: string[] = [];
+  const targets = [...new Set(unicastTargets)].slice(0, 64);
   try {
     await new Promise<void>((resolve) => {
       let socket: dgram.Socket;
@@ -161,6 +169,13 @@ export async function discoverCamerasWsdiscovery(timeoutMs = WSD_TIMEOUT_MS): Pr
         for (const probe of probes) {
           socket.send(probe, WSD_PORT, WSD_ADDR, (err) => {
             if (err) close();
+          });
+        }
+        // 单播补探：只发通配 Probe（摄像头/录像机都会答），逐包发避免一次 burst 丢包
+        const unicastProbe = probes[1];
+        for (const ip of targets) {
+          socket.send(unicastProbe, WSD_PORT, ip, () => {
+            /* 单播失败（目标不监听 3702）属预期，静默 */
           });
         }
       } catch {

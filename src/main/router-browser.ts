@@ -47,6 +47,21 @@ async function hasSessionCookie(gatewayIp: string): Promise<boolean> {
 }
 
 /**
+ * 管理页分区的全部 Cookie 组装成 Cookie 头（task-030 管理页租约实验通道）。
+ * 分区专用（只装路由器管理页），全部转发是安全的；空分区返回 null。
+ * TP-LINK 等固件登录后 Cookie 落在本地域名（tplogin.cn）而非 IP，这里不按域过滤。
+ */
+export async function getRouterAdminCookieHeader(): Promise<string | null> {
+  try {
+    const cookies = await electronSession.fromPartition(PARTITION).cookies.get({});
+    if (cookies.length === 0) return null;
+    return cookies.map((c) => `${c.name}=${c.value}`).join('; ');
+  } catch {
+    return null;
+  }
+}
+
+/**
  * 打开（或聚焦已存在的）路由器管理页窗口。
  * adminUrl 来自管理页指纹探测的重定向落点；探测不出时兜底 `http://网关/`。
  */

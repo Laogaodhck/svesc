@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import type { Alarm, PrintJob, PrintJobAction, Printer } from '../../shared/types'
+import type { PrintJob, PrintJobAction, Printer } from '../../shared/types'
 import { StatusPill } from '../components/atoms/StatusPill'
 import { LevelBar } from '../components/atoms/LevelBar'
 import { Bar } from '../components/atoms/Bar'
@@ -18,7 +18,6 @@ import {
 
 export interface PrintersViewProps {
   printers: Printer[]
-  alarms: Alarm[]
   scanning: boolean
   now: number
   /** 是否显示本机虚拟打印机（状态提升到 App，切视图/刷新都不丢） */
@@ -342,7 +341,6 @@ function PrinterCard({ printer, now, focus }: { printer: Printer; now: number; f
 
 export function PrintersView({
   printers,
-  alarms,
   scanning,
   now,
   showVirtual,
@@ -370,12 +368,6 @@ export function PrintersView({
   const offlineCount = networkPrinters.filter((p) => p.state === 'offline').length
   const faultCount = networkPrinters.filter((p) => p.state === 'error').length
 
-  // 告警从 alarms 实时统计（未恢复），与侧边栏/总览同口径（审计 L-1）
-  const activeAlarms = useMemo(
-    () => alarms.filter((a) => a.targetType === 'printer' && a.resolvedAt === null).length,
-    [alarms]
-  )
-
   // 审计 L-2：告警跳转定位——滚动到目标卡并高亮，消费后回调清除
   useEffect(() => {
     if (!focusId) return
@@ -398,8 +390,7 @@ export function PrintersView({
           网络打印机 <span className="mono">{networkPrinters.length}</span> 台 · 在线{' '}
           <span className="mono">{onlineCount}</span> · 离线{' '}
           <span className="mono">{offlineCount}</span> · 故障{' '}
-          <span className="mono">{faultCount}</span> · 活动告警{' '}
-          <span className="mono">{activeAlarms}</span>
+          <span className="mono">{faultCount}</span>
           {showVirtual && virtualCount > 0 && (
             <>
               {' · '}虚拟 <span className="mono">{virtualCount}</span>

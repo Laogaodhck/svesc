@@ -7,7 +7,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type {
-  Alarm,
   AppSettings,
   DeviceDetail,
   PrinterManageConfig,
@@ -26,7 +25,6 @@ import { isValidIpv4, type PersistStore, type PersistedSettings } from './store'
 import { SqliteStore } from './db/sqlite';
 import { printJobAction, printTestPage, setDefaultPrinter } from './printers/print-ops';
 import { sendMagicPacket } from './wol';
-import { postWebhook } from './notify/webhook';
 import { buildHtmlReport } from './report-html';
 
 export interface EngineOptions {
@@ -41,7 +39,6 @@ export interface EngineOptions {
   autoScanIntervalSec?: number;
   onSnapshot?: (snapshot: Snapshot) => void;
   onScanProgress?: (progress: ScanProgress) => void;
-  onAlarm?: (alarm: Alarm) => void;
 }
 
 export interface Engine {
@@ -51,11 +48,6 @@ export interface Engine {
   refresh(): Promise<{ started: boolean }>;
   setAutoScan(enabled: boolean, intervalSec?: number): { autoScan: boolean; intervalSec: number };
   getDeviceDetail(deviceId: string): Promise<DeviceDetail | null>;
-  ackAlarm(alarmId: string, ackBy?: string | null): boolean;
-  /** 用户手动清除（task-021 语义 A）；by 由主进程注入 */
-  clearAlarm(alarmId: string, by: string): boolean;
-  /** 批量手动清除，返回成功条数 */
-  clearAlarms(alarmIds: string[], by: string): number;
   /** 导出报告（task-025：format 缺省 json，新增 html 自包含报告） */
   exportReport(format?: 'json' | 'html', extras?: Record<string, unknown>): { ok: boolean; path: string | null; error?: string };
   getGatewayIp(): string | null;
@@ -73,8 +65,6 @@ export interface Engine {
   watchList(): WatchStatus[];
   watchAdd(ip: string, note: string | null): { ok: boolean; error: string | null };
   watchRemove(ip: string): { ok: boolean };
-  // —— 通知（task-025：webhook 测试）——
-  webhookTest(url: string): Promise<{ ok: boolean; status: number | null; error: string | null }>;
   // —— 配置导入导出（task-025）——
   configExport(): { ok: boolean; path: string | null; error?: string };
   configImport(json: string): { ok: boolean; imported: string[]; skipped: string[]; error: string | null };
@@ -90,7 +80,7 @@ export interface Engine {
   // —— 设置页 ——
   getSettings(): AppSettings;
   updateSettings(patch: Partial<AppSettings>): AppSettings;
-  // —— 运行日志（诊断中心日志页数据源；诊断/告警/存储异常统一入环） ——
+  // —— 运行日志（诊断中心日志页数据源；诊断/存储异常统一入环） ——
   readonly logs: NetLog;
   readonly scheduler: Scheduler;
   /** 持久化后端（task-018 起：SQLite 主存储；接口与 JsonStore 同构，可互换） */
@@ -120,17 +110,6 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
   // 设备实时状态同步的节流账本（task-018）：状态变化立即写库；无变化 15s 全量对账
   let lastDeviceSyncAt = 0;
   const lastKnownStates = new Map<string, string>();
-
-  // task-025：告警 webhook 推送（fire-and-forget，不重试、绝不抛；URL 未配置 = 停用）
-  const fireWebhook = (event: 'alarm.created' | 'alarm.resolved', alarm: Alarm): void => {
-    const url = store.settings.notifyWebhookUrl?.trim();
-    if (!url) return;
-    void postWebhook(url, { event, alarm, ts: Date.now() }).then((res) => {
-      if (!res.ok) {
-        netlog.push('warn', 'webhook', `${event} 推送失败：${res.error ?? `HTTP ${res.status}`}`);
-      }
-    });
-  };
 
   const scheduler = new Scheduler(
     {
@@ -172,39 +151,16 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
         options.onSnapshot?.(withMeta);
       },
       onScanProgress: options.onScanProgress,
-      onAlarm: (alarm) => {
-        // 告警入环（日志页可见）；severity 映射：critical→error，其余→warn
-        netlog.push(
-          alarm.severity === 'critical' ? 'error' : 'warn',
-          'alarm',
-          `${alarm.code} · ${alarm.targetName}：${alarm.message}`,
-        );
-        // 告警实时落库（task-018）：崩溃不丢新告警；新设备接入同步固化 firstSeen
-        store.upsertAlarm?.(alarm);
-        if (alarm.code === 'DEVICE_NEW') store.setFirstSeen(scheduler.exportFirstSeen());
-        // task-025：webhook 推送（fire-and-forget，失败只入日志环）
-        fireWebhook('alarm.created', alarm);
-        options.onAlarm?.(alarm);
-      },
-      // task-025：自动恢复的告警也推 webhook（resolved 事件）
-      onAlarmResolved: (alarms) => {
-        for (const alarm of alarms) fireWebhook('alarm.resolved', alarm);
-      },
     },
   );
 
-  // 恢复告警历史与已知设备种（避免重启后 DEVICE_NEW 全量刷屏）
-  const persisted = store.get();
-  scheduler.hydrateAlarmState({
-    alarms: persisted.alarms,
-    knownDeviceKeys: persisted.knownDeviceKeys,
-  });
   // 恢复设备首次接入表（task-017：重启不得把 firstSeen 重置成本次扫描时间）
+  const persisted = store.get();
   scheduler.hydrateFirstSeen(persisted.firstSeen);
   // 恢复持续 Ping 监控目标（task-025）
   scheduler.hydrateWatches(store.watchTargets());
 
-  // store 落盘失败 → 快照 warnings（审计 H-3：别名/告警历史/打印管理配置静默丢盘不可接受）
+  // store 落盘失败 → 快照 warnings（审计 H-3：别名/打印管理配置静默丢盘不可接受）
   reportStoreError = (err) => {
     netlog.push(
       err ? 'error' : 'info',
@@ -261,10 +217,8 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
     showVirtualPrinters: 'boolean',
     snmpEnabled: 'boolean',
     useMdns: 'boolean',
-    notifyDesktop: 'boolean',
     closeToTray: 'boolean',
     rememberRouterPassword: 'boolean',
-    notifyWebhookUrl: 'string',
   };
 
   const importConfigJson = (text: string): { ok: boolean; imported: string[]; skipped: string[]; error: string | null } => {
@@ -506,16 +460,6 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
       scheduler.watchRemove(ip);
       return persisted;
     },
-    // —— 通知（task-025）：webhook 测试，结果如实返回 ——
-    async webhookTest(url: string) {
-      const res = await postWebhook(url, { event: 'test', ts: Date.now() });
-      netlog.push(
-        res.ok ? 'info' : 'warn',
-        'webhook',
-        res.ok ? `测试消息已送达（HTTP ${res.status}）` : `测试发送失败：${res.error ?? `HTTP ${res.status}`}`,
-      );
-      return res;
-    },
     // —— 配置导入导出（task-025）——
     configExport() {
       return exportConfigFile();
@@ -532,10 +476,8 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
         showVirtualPrinters: s.showVirtualPrinters,
         snmpEnabled: s.snmpEnabled,
         useMdns: s.useMdns,
-        notifyDesktop: s.notifyDesktop,
         closeToTray: s.closeToTray,
         rememberRouterPassword: s.rememberRouterPassword,
-        notifyWebhookUrl: s.notifyWebhookUrl,
       };
     },
     updateSettings(patch: Partial<AppSettings>): AppSettings {
@@ -558,8 +500,6 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
     stop(): void {
       stopped = true;
       scheduler.stop();
-      const alarmState = scheduler.exportAlarmState();
-      store.setAlarmHistory(alarmState.alarms, alarmState.knownDeviceKeys);
       // 首次接入表随退出落盘（task-017）
       store.setFirstSeen(scheduler.exportFirstSeen());
       // SQLite：写路径本身即时落库，flush 做 WAL checkpoint 归位；随后安全关闭连接
@@ -580,15 +520,6 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
     },
     getDeviceDetail(deviceId: string): Promise<DeviceDetail | null> {
       return scheduler.getDeviceDetail(deviceId);
-    },
-    ackAlarm(alarmId: string, ackBy?: string | null): boolean {
-      return scheduler.ackAlarm(alarmId, ackBy);
-    },
-    clearAlarm(alarmId: string, by: string): boolean {
-      return scheduler.clearAlarm(alarmId, by);
-    },
-    clearAlarms(alarmIds: string[], by: string): number {
-      return scheduler.clearAlarms(alarmIds, by);
     },
     /**
      * 导出报告。extras（可选）由主进程合入路由器状态与打印管理配置——
@@ -655,5 +586,4 @@ function applyDeviceMeta(snapshot: Snapshot, store: PersistStore): Snapshot {
 export { JsonStore } from './store';
 export { SqliteStore } from './db/sqlite';
 export { Scheduler, resolveLinkState } from './scheduler';
-export { AlarmEngine, ALARM_CODES, dedupeKey } from './alarms';
 export { Simulator, mulberry32 } from './simulator';

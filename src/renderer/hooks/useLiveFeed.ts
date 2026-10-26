@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { Alarm, LanApi, ScanProgress, Snapshot } from '../../shared/types'
+import type { LanApi, ScanProgress, Snapshot } from '../../shared/types'
 import { markSnapshotReceived } from '../lib/perf'
 
 /**
@@ -28,7 +28,6 @@ export interface LiveFeed {
   setAutoScan: (enabled: boolean) => void
   /** 导出报告（task-025：format 缺省 json，可传 html） */
   exportReport: (format?: 'json' | 'html') => Promise<{ ok: boolean; path: string | null; error?: string }>
-  ackAlarm: (alarmId: string) => Promise<boolean>
 }
 
 export function useLiveFeed(): LiveFeed {
@@ -60,22 +59,6 @@ export function useLiveFeed(): LiveFeed {
     offs.push(
       api.onScanProgress((p) => {
         if (alive) setProgress(p)
-      })
-    )
-    // 审计 M-1：告警推送此前无人订阅，徽标/列表最长滞后一个 5s 心跳。
-    // 这里做增量合并：新告警按 id upsert 进当前快照（下一帧全量快照会覆盖对齐）。
-    offs.push(
-      api.onAlarm((alarm: Alarm) => {
-        if (!alive) return
-        setSnapshot((prev) => {
-          if (!prev) return prev
-          const idx = prev.alarms.findIndex((a) => a.id === alarm.id)
-          const alarms =
-            idx >= 0
-              ? prev.alarms.map((a) => (a.id === alarm.id ? alarm : a))
-              : [alarm, ...prev.alarms]
-          return { ...prev, alarms }
-        })
       })
     )
 
@@ -144,25 +127,6 @@ export function useLiveFeed(): LiveFeed {
     }
   }, [])
 
-  const ackAlarm = useCallback(async (alarmId: string) => {
-    const api = apiRef.current
-    if (!api) return false
-    try {
-      const res = await api.ackAlarm(alarmId)
-      // 审计 M-4：失败也要让用户看见——旧实现 catch 后静默返 false，"确认"按钮
-      // 只是回到可点状态，用户不知道失败原因。
-      if (!res.ok) {
-        setError('告警确认失败（可能已被处理或恢复），请刷新后重试')
-        return false
-      }
-      setError(null)
-      return true
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
-      return false
-    }
-  }, [])
-
   const dismissError = useCallback(() => setError(null), [])
 
   return {
@@ -174,6 +138,5 @@ export function useLiveFeed(): LiveFeed {
     refresh,
     setAutoScan,
     exportReport,
-    ackAlarm,
   }
 }

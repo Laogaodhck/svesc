@@ -1,12 +1,12 @@
 import { useMemo } from 'react'
-import type { Alarm, Device, Printer, Snapshot } from '../../shared/types'
+import type { Device, Printer, Snapshot } from '../../shared/types'
 import { StatusDot } from '../components/atoms/StatusDot'
 import { StatusPill } from '../components/atoms/StatusPill'
 import { QualityBar } from '../components/atoms/QualityBar'
 import { Sparkline } from '../components/atoms/Sparkline'
 import { Icon } from '../components/Icon'
 import { EmptyState } from '../components/atoms/EmptyState'
-import { printerStateTone, severityTone, stateTone, qualityPhase } from '../lib/semantics'
+import { printerStateTone, stateTone, qualityPhase } from '../lib/semantics'
 import { QUALITY_MIN_SAMPLES } from '../../shared/constants'
 import {
   PRINTER_STATE_LABEL,
@@ -14,18 +14,15 @@ import {
   fmtBitRateCompact,
   fmtBitRateParts,
   fmtMs,
-  relTime,
 } from '../lib/format'
 
 export interface OverviewViewProps {
   snapshot: Snapshot
   now: number
   onOpenDetail: (id: string) => void
-  onNavigate: (view: 'devices' | 'printers' | 'alarms') => void
+  onNavigate: (view: 'devices' | 'printers') => void
   /** 引擎扫描轮进行中（与 DevicesView 的「· 扫描中」同口径） */
   scanning?: boolean
-  /** 点击最新告警 timeline 项时回调（App 负责跳转告警视图） */
-  onOpenAlarm?: (alarm: Alarm) => void
   /** 键盘激活健康表行时回调（App 负责打开对应设备抽屉） */
   onOpenDevice?: (deviceId: string) => void
 }
@@ -44,25 +41,15 @@ function ipValue(ip: string): number {
   return v
 }
 
-const SEV_LABEL: Record<string, string> = { critical: '紧急', warning: '重要', info: '一般' }
-
 export function OverviewView({
   snapshot,
   now,
   onOpenDetail,
   onNavigate,
   scanning,
-  onOpenAlarm,
   onOpenDevice,
 }: OverviewViewProps) {
-  const { system, devices, printers, alarms } = snapshot
-
-  const activeAlarms = useMemo(() => alarms.filter((a) => a.resolvedAt === null), [alarms])
-  const sevCounts = useMemo(() => {
-    const c = { critical: 0, warning: 0, info: 0 }
-    for (const a of activeAlarms) c[a.severity] += 1
-    return c
-  }, [activeAlarms])
+  const { system, devices, printers } = snapshot
 
   /**
    * 「降级 / 质量差」口径（team-lead 裁定）：
@@ -106,11 +93,6 @@ export function OverviewView({
     })
     return sorted.slice(0, 8)
   }, [devices])
-
-  const recentAlarms = useMemo(
-    () => alarms.slice().sort((a, b) => b.raisedAt - a.raisedAt).slice(0, 6),
-    [alarms]
-  )
 
   // 速率单位是 bit/s（引擎 Δbytes×8/Δt）；null = 本轮未采到，显示「—」而不是 0
   const rx = fmtBitRateParts(system.rxBps)
@@ -203,28 +185,6 @@ export function OverviewView({
             )}
             <span className="dim">
               {virtualPrinterCount > 0 ? `· 另有 ${virtualPrinterCount} 台虚拟` : '· 含 spooler 队列'}
-            </span>
-          </span>
-        </div>
-
-        <div className="card kpi">
-          <span className="kpi__label">
-            <StatusDot tone={activeAlarms.length > 0 ? 'warn' : 'ok'} size="sm" pulse={sevCounts.critical > 0} />
-            活跃告警
-          </span>
-          <span className="kpi__value">
-            {activeAlarms.length}
-            <span className="kpi__unit">条</span>
-          </span>
-          <span className="kpi__foot">
-            <span className={sevCounts.critical > 0 ? 'u-crit' : 'dim'}>
-              紧急 {sevCounts.critical}
-            </span>
-            <span className={sevCounts.warning > 0 ? 'u-warn' : 'dim'}>
-              重要 {sevCounts.warning}
-            </span>
-            <span className={sevCounts.info > 0 ? 'u-accent' : 'dim'}>
-              一般 {sevCounts.info}
             </span>
           </span>
         </div>
@@ -439,60 +399,6 @@ export function OverviewView({
           )}
         </section>
       </div>
-
-      {/* 底部：最新告警 */}
-      <section className="card">
-        <div className="card__head">
-          <span className="card__title">最新告警</span>
-          <span className="card__hint">最近 6 条</span>
-          <span className="card__spacer" />
-          <button type="button" className="btn btn--sm btn--ghost" onClick={() => onNavigate('alarms')}>
-            全部告警
-            <Icon name="chevron-right" size={12} />
-          </button>
-        </div>
-        {recentAlarms.length === 0 ? (
-          <EmptyState
-            icon="shield"
-            title="没有告警"
-            desc="设备掉线、打印机故障或网络质量下降时会在这里出现。"
-          />
-        ) : (
-          <div className="timeline">
-            {recentAlarms.map((a: Alarm) => (
-              <div
-                className="timeline__item"
-                key={a.id}
-                role={onOpenAlarm ? 'button' : undefined}
-                tabIndex={onOpenAlarm ? 0 : undefined}
-                onClick={onOpenAlarm ? () => onOpenAlarm(a) : undefined}
-                onKeyDown={
-                  onOpenAlarm
-                    ? (e) => {
-                        if (e.key === 'Enter' || e.key === ' ') {
-                          e.preventDefault()
-                          onOpenAlarm(a)
-                        }
-                      }
-                    : undefined
-                }
-                style={onOpenAlarm ? { cursor: 'pointer' } : undefined}
-                aria-label={`查看告警：${a.targetName} ${a.message}`}
-              >
-                <span className="timeline__dot" data-tone={severityTone(a.severity)} />
-                <div className="timeline__body">
-                  <span className="timeline__title">
-                    {a.targetName} · {SEV_LABEL[a.severity] ?? a.severity}
-                    {a.resolvedAt !== null && <span className="dim">（已恢复）</span>}
-                  </span>
-                  <span className="timeline__msg">{a.message}</span>
-                </div>
-                <span className="timeline__time">{relTime(a.raisedAt, now)}</span>
-              </div>
-            ))}
-          </div>
-        )}
-      </section>
     </>
   )
 }

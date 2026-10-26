@@ -26,6 +26,7 @@ import {
   parseWirelessDevices,
 } from './openwrt';
 import { ssdpDiscover, upnpQuery, upnpReboot, resolveControlUrl, parseDeviceDescription } from './upnp';
+import { fetchWebLeases } from './web-leases';
 import { httpRequest } from './httpx';
 
 export interface RouterManagerOptions {
@@ -94,6 +95,18 @@ export class RouterManager {
   private reloginTimer: NodeJS.Timeout | null = null;
   private reloginFailures = 0;
   private reloginInFlight = false;
+  /**
+   * 管理页租约实验通道（task-030）：Cookie 头提供者由主进程注入（内置浏览器分区的
+   * 会话 Cookie，每次现读）。引擎层不 import electron，Cookie 拿不到返回 null 即跳过。
+   */
+  private webLeaseProvider: (() => Promise<string | null>) | null = null;
+  /** 管理页租约通道失败的退避：连续失败后降频到每 5 轮试一次，避免每 10s 空打 4 个请求。 */
+  private webLeaseFailures = 0;
+
+  /** 注入管理页 Cookie 头提供者（主进程调用一次；传 null 停用实验通道）。 */
+  setWebLeaseProvider(p: (() => Promise<string | null>) | null): void {
+    this.webLeaseProvider = p;
+  }
 
   constructor(private readonly opts: RouterManagerOptions) {
     this.status = this.emptyStatus();
@@ -435,6 +448,21 @@ export class RouterManager {
       }
     } else if (identity.brand === 'openwrt') {
       notes.push('检测到 OpenWrt，登录后可查看 DHCP 租约与无线客户端');
+    } else if (this.webSessionActive && this.webLeaseProvider !== null && this.webLeaseFailures < 10) {
+      // —— 管理页租约实验通道（task-030）：内置浏览器登录后，用分区 Cookie 抓
+      //     候选租约页并做品牌无关解析。仅 web 会话时尝试（ubus 优先级更高）；
+      //     连续失败 ≥10 次后停用（Cookie 失效或固件页型不在候选清单，空打无益）。
+      const cookie = await this.webLeaseProvider().catch(() => null);
+      if (cookie) {
+        const res = await fetchWebLeases({ gateway: gw, cookie, brand: identity.brand });
+        if (res.ok && res.leases.length > 0) {
+          dhcpLeases = res.leases;
+          this.webLeaseFailures = 0;
+        } else {
+          this.webLeaseFailures += 1;
+        }
+        if (res.note !== null) notes.push(res.note);
+      }
     }
 
     // —— WAN 速率：至少 2 个带计数器的样本才出 bps ——

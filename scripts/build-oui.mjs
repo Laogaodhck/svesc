@@ -1,156 +1,173 @@
+#!/usr/bin/env node
 /**
- * 一次性 OUI 扩充表生成器（task-023）。
+ * IEEE OUI 厂商表生成器（task-023 初版；task-028 重写为"全量、无白名单"）。
  *
- * 从 IEEE 官方库下载完整 oui.txt（~10MB），按厂商白名单过滤出手机/平板/摄像头/
- * 网络设备/NAS/打印机相关前缀，生成 src/main/engine/discovery/oui-extended.ts。
- * 生成结果提交入库；本脚本保留用于将来重新生成（node scripts/build-oui.mjs）。
+ * 生成 src/main/engine/discovery/oui-extended.ts。数据源只用 IEEE 注册库
+ * （官方 oui.csv，或 Wireshark 从同一注册库导出的 manuf 文件），绝不手抄。
  *
- * 为什么用 IEEE 原始数据：OUI 前缀靠手抄/记忆必然出错，错一条就把 A 厂商设备
- * 标成 B 厂商——违背数据诚实原则。官方库是唯一可信源。
+ * 为什么不再按厂商白名单过滤：旧脚本每个厂商最多保留 20~40 个前缀，而 IEEE 给
+ * 大厂（华为 2000+、Apple 1500+、三星 900+）分配的前缀远超上限——实测本机
+ * 192.168.0.0/24 的 60:A3:E3（TP-Link）、B0:81:01（Honor）、AC:B7:22（Haier）
+ * 全部落在被截断的尾部，导致设备显示"未知厂商"。截断等于主动丢真数据，
+ * 与数据诚实原则冲突，因此改为全量收录。
  *
- * 用法：node scripts/build-oui.mjs
+ * 只收录 24-bit（MA-L）前缀：28/36-bit 细分块无法用 MAC 前 3 字节区分同块内
+ * 的不同厂商，收录会误标（宁缺毋滥）。手写主表 OUI_TABLE 仍优先于本表。
+ *
+ * 用法：
+ *   node scripts/build-oui.mjs                      # 下载 IEEE oui.csv（默认）
+ *   node scripts/build-oui.mjs --src manuf          # 下载 Wireshark manuf
+ *   node scripts/build-oui.mjs --in <文件>          # 用本地文件（按扩展名/内容自动识别）
+ *   node scripts/build-oui.mjs --out <文件>         # 自定义输出路径（调试用）
  */
-import https from 'node:https';
 import { writeFileSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
-const OUI_URL = 'https://standards-oui.ieee.org/oui/oui.txt';
+const IEEE_URL = 'https://standards-oui.ieee.org/oui/oui.csv';
+const MANUF_URL = 'https://www.wireshark.org/download/automated/data/manuf';
+
+const here = path.dirname(fileURLToPath(import.meta.url));
+const root = path.resolve(here, '..');
+const OUT_DEFAULT = path.join(root, 'src/main/engine/discovery/oui-extended.ts');
+
+function argValue(flag, fallback) {
+  const idx = process.argv.indexOf(flag);
+  if (idx >= 0 && process.argv[idx + 1]) return process.argv[idx + 1];
+  return fallback;
+}
+
+async function loadSource() {
+  const local = argValue('--in', null);
+  const kind = argValue('--src', null);
+  const isManuf = kind === 'manuf' || (local !== null && /manuf/i.test(path.basename(local)));
+  const url = isManuf ? MANUF_URL : IEEE_URL;
+  const viaFile = local !== null;
+
+  const text = viaFile
+    ? await readFile(path.resolve(local), 'utf8')
+    : await (async () => {
+        const res = await fetch(url, { signal: AbortSignal.timeout(180_000) });
+        if (!res.ok) throw new Error(`下载失败：HTTP ${res.status} ${url}`);
+        return res.text();
+      })();
+
+  return { text, isManuf, source: viaFile ? `本地文件 ${path.basename(local)}` : url };
+}
+
+/** 极简 CSV 行解析：支持引号包裹、字段内逗号与双写转义。 */
+function parseCsvLine(line) {
+  const out = [];
+  let cur = '';
+  let quoted = false;
+  for (let i = 0; i < line.length; i += 1) {
+    const ch = line[i];
+    if (quoted) {
+      if (ch === '"') {
+        if (line[i + 1] === '"') {
+          cur += '"';
+          i += 1;
+        } else {
+          quoted = false;
+        }
+      } else {
+        cur += ch;
+      }
+    } else if (ch === '"') {
+      quoted = true;
+    } else if (ch === ',') {
+      out.push(cur);
+      cur = '';
+    } else {
+      cur += ch;
+    }
+  }
+  out.push(cur);
+  return out;
+}
 
 /**
- * 白名单：关键词（匹配 oui.txt 厂商名，大小写不敏感）→ 归一化显示名。
- * 同一显示名可挂多个关键词；每厂商前缀数上限防止单厂商撑爆表。
+ * 归一化厂商显示名：去掉 "Co., Ltd." 之类法律后缀与首尾杂讯。
+ * 只做展示层清理，不改写品牌主体（Honor/Huawei/Tp-Link 原样保留）。
+ * 拿不到主体时回退原始名称，绝不编造。
  */
-const WHITELIST = [
-  // 手机 / 平板
-  { keys: ['apple, inc', 'apple inc'], name: 'Apple', cap: 60 },
-  { keys: ['samsung electronics'], name: 'Samsung', cap: 40 },
-  { keys: ['huawei technologies', 'huawei device', 'huawei cloud'], name: 'Huawei', cap: 40 },
-  { keys: ['honor device', 'honor technologies'], name: 'Honor', cap: 20 },
-  { keys: ['xiaomi communications', 'xiaomi inc', 'beijing xiaomi'], name: 'Xiaomi', cap: 30 },
-  { keys: ['guangdong oppo', 'oppo mobile'], name: 'OPPO', cap: 20 },
-  { keys: ['vivo mobile'], name: 'vivo', cap: 20 },
-  { keys: ['oneplus electronics'], name: 'OnePlus', cap: 10 },
-  { keys: ['realme'], name: 'realme', cap: 20 },
-  { keys: ['google, inc', 'google llc', 'google inc'], name: 'Google', cap: 20 },
-  { keys: ['motorola mobility', 'motorola solutions'], name: 'Motorola', cap: 15 },
-  // 摄像头
-  { keys: ['hangzhou hikvision', 'hikvision digital'], name: 'Hikvision', cap: 40 },
-  { keys: ['dahua technology'], name: 'Dahua', cap: 40 },
-  { keys: ['zhejiang uniview'], name: 'Uniview', cap: 20 },
-  { keys: ['ezviz'], name: 'EZVIZ', cap: 10 },
-  { keys: ['imou'], name: 'Imou', cap: 10 },
-  { keys: ['axis communications'], name: 'Axis', cap: 20 },
-  { keys: ['hangzhou xiongmai', 'xiongmai technology'], name: 'XiongMai', cap: 10 },
-  // 网络设备
-  { keys: ['tp-link', 'tp-link technologies'], name: 'TP-Link', cap: 40 },
-  { keys: ['ruijie networks', 'ruijie_Republic'], name: 'Ruijie', cap: 20 },
-  { keys: ['hangzhou h3c', 'new h3c'], name: 'H3C', cap: 20 },
-  { keys: ['cisco systems'], name: 'Cisco', cap: 40 },
-  { keys: ['ubiquiti'], name: 'Ubiquiti', cap: 30 },
-  { keys: ['routerboard', 'tikls'], name: 'MikroTik', cap: 20 },
-  { keys: ['netgear'], name: 'Netgear', cap: 40 },
-  { keys: ['asustek', 'asustek computer'], name: 'ASUS', cap: 30 },
-  { keys: ['shenzhen tenda', 'tenda technology'], name: 'Tenda', cap: 15 },
-  { keys: ['zyxel'], name: 'Zyxel', cap: 20 },
-  { keys: ['d-link', 'dlink'], name: 'D-Link', cap: 30 },
-  { keys: ['fortinet', 'fortinet inc'], name: 'Fortinet', cap: 10 },
-  { keys: ['aruba'], name: 'Aruba', cap: 15 },
-  { keys: ['lantronix'], name: 'Lantronix', cap: 5 },
-  // NAS / 服务器
-  { keys: ['synology'], name: 'Synology', cap: 20 },
-  { keys: ['qnap'], name: 'QNAP', cap: 15 },
-  { keys: ['western digital', 'wd media'], name: 'Western Digital', cap: 10 },
-  // 打印机
-  { keys: ['canon inc', 'canon kabushiki', 'canon electronics'], name: 'Canon', cap: 20 },
-  { keys: ['seiko epson'], name: 'Epson', cap: 20 },
-  { keys: ['brother industries'], name: 'Brother', cap: 20 },
-  { keys: ['fuji xerox', 'xerox corporation', 'fuji zerograf'], name: 'Xerox', cap: 20 },
-  { keys: ['ricoh company', 'ricoh co'], name: 'Ricoh', cap: 20 },
-  { keys: ['kyocera'], name: 'Kyocera', cap: 15 },
-  { keys: ['lexmark'], name: 'Lexmark', cap: 15 },
-  { keys: ['konica minolta'], name: 'Konica Minolta', cap: 15 },
-  { keys: ['toshiba tec'], name: 'Toshiba TEC', cap: 10 },
-  { keys: ['hewlett packard', 'hp inc', 'hewlett-packard'], name: 'HP', cap: 40 },
-  { keys: ['sharp corporation'], name: 'Sharp', cap: 10 },
-];
+export function cleanVendor(raw) {
+  const original = raw.replace(/\s+/g, ' ').trim();
+  if (!original) return '';
+  // Wireshark 对 00:00:00 等特殊块的说明性名称："Officially Xerox, but ..."
+  const official = /^Officially\s+([^,]+?)(?:,|\s+but\b)/i.exec(original);
+  if (official) return official[1].trim();
+  let name = original;
+  const legal = /\s*,?\s*(?:co\.?\s*,?\s*ltd\.?|company\s+limited|limited|ltd\.?|inc\.?|incorporated|corp\.?|corporation|llc|plc|gmbh|s\.?\s?a\.?|b\.?\s?v\.?|a\.?\s?g\.?|oyj?|pty\.?\s*ltd\.?|pty\.?|s\.?\s?p\.?\s?a\.?|sas|sarl|k\.?\s?k\.?|sdn\.?\s*bhd\.?)$/i;
+  for (let i = 0; i < 3; i += 1) {
+    const next = name.replace(legal, '').replace(/[\s,;.-]+$/, '').trim();
+    if (next === name || !next) break;
+    name = next;
+  }
+  return name || original;
+}
 
-function fetchText(url, redirects = 2) {
-  return new Promise((resolve, reject) => {
-    const req = https.get(url, { timeout: 30000 }, (res) => {
-      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location && redirects > 0) {
-        res.resume();
-        fetchText(new URL(res.headers.location, url).toString(), redirects - 1).then(resolve, reject);
-        return;
-      }
-      if (res.statusCode !== 200) {
-        reject(new Error(`HTTP ${res.statusCode}`));
-        return;
-      }
-      const chunks = [];
-      res.on('data', (c) => chunks.push(c));
-      res.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
-      res.on('error', reject);
-    });
-    req.on('timeout', () => req.destroy(new Error('timeout')));
-    req.on('error', reject);
+/** 解析 IEEE oui.csv → Map<24-bit 前缀, 厂商名>。 */
+function parseIeeeCsv(text) {
+  const map = new Map();
+  for (const line of text.split(/\r?\n/)) {
+    if (!line || /^Registry,/i.test(line)) continue;
+    const cols = parseCsvLine(line);
+    const registry = (cols[0] ?? '').trim();
+    const assignment = (cols[1] ?? '').trim().toUpperCase();
+    const org = (cols[2] ?? '').trim();
+    if (registry !== 'MA-L' || !/^[0-9A-F]{6}$/.test(assignment) || !org) continue;
+    map.set(assignment, cleanVendor(org));
+  }
+  return map;
+}
+
+/** 解析 Wireshark manuf → Map<24-bit 前缀, 厂商名>。 */
+function parseManuf(text) {
+  const map = new Map();
+  for (const line of text.split(/\r?\n/)) {
+    if (!line || line.startsWith('#')) continue;
+    const cols = line.split('\t');
+    if (cols.length < 3) continue;
+    const block = (cols[0] ?? '').trim().toUpperCase().replace(/-/g, ':');
+    const org = (cols[2] ?? '').trim();
+    // 28/36-bit 块形如 "00:00:0C:xx/28" 或带 7/9 位十六进制，跳过
+    if (!/^[0-9A-F]{2}(?::[0-9A-F]{2}){2}$/.test(block) || !org) continue;
+    map.set(block.replace(/:/g, ''), cleanVendor(org));
+  }
+  return map;
+}
+
+function render(map, source, isManuf) {
+  const keys = [...map.keys()].sort();
+  const rows = keys.map((k) => {
+    const dashed = `${k.slice(0, 2)}-${k.slice(2, 4)}-${k.slice(4, 6)}`.toLowerCase();
+    return `  ${JSON.stringify(dashed)}: ${JSON.stringify(map.get(k))},`;
   });
+  const today = new Date().toISOString().slice(0, 10);
+  return `/**
+ * IEEE OUI 全量厂商表（自动生成，请勿手改）。
+ *
+ * 数据源：${isManuf ? 'Wireshark manuf（IEEE 注册库导出）' : 'IEEE 官方 oui.csv'} — ${source}
+ * 生成时间：${today}
+ * 条目数：${keys.length}（24-bit MA-L 前缀）
+ * 生成命令：node scripts/build-oui.mjs${isManuf ? ' --src manuf' : ''}
+ *
+ * 24-bit 之外的 MA-M/MA-S 细分块不收录：前 3 字节无法区分同块内不同厂商，
+ * 收录会误标（数据诚实原则）。查找顺序：手写主表 OUI_TABLE 优先，本表兜底；
+ * 随机化 MAC（本地管理位）查不到属预期，由 isRandomizedMac 给出诚实标签。
+ */
+export const OUI_EXTENDED: Readonly<Record<string, string>> = {
+${rows.join('\n')}
+};
+`;
 }
 
-function main() {
-  console.log('下载 IEEE oui.txt ...');
-  fetchText(OUI_URL)
-    .then((text) => {
-      console.log(`下载完成 ${(text.length / 1e6).toFixed(1)}MB，解析中 ...`);
-      const entries = [];
-      const re = /^\s*([0-9A-F]{2}-[0-9A-F]{2}-[0-9A-F]{2})\s+\(hex\)\s+(.+?)\s*$/gm;
-      let m;
-      while ((m = re.exec(text)) !== null) {
-        entries.push({ prefix: m[1].toLowerCase(), vendor: m[2] });
-      }
-      console.log(`共解析 ${entries.length} 条 OUI 记录`);
-
-      const byName = new Map();
-      let unmatchedCount = 0;
-      for (const { prefix, vendor } of entries) {
-        const v = vendor.toLowerCase();
-        const rule = WHITELIST.find((r) => r.keys.some((k) => v.includes(k)));
-        if (!rule) {
-          unmatchedCount += 1;
-          continue;
-        }
-        if (!byName.has(rule.name)) byName.set(rule.name, []);
-        const list = byName.get(rule.name);
-        if (list.length < rule.cap && !list.includes(prefix)) list.push(prefix);
-      }
-
-      const total = Array.from(byName.values()).reduce((n, l) => n + l.length, 0);
-      const lines = [];
-      lines.push('/**');
-      lines.push(' * IEEE 官方 OUI 数据过滤生成的扩充厂商表（task-023，由 scripts/build-oui.mjs 生成）。');
-      lines.push(' * 只收录白名单厂商（手机/平板/摄像头/网络设备/NAS/打印机），未命中仍回退主表与 null。');
-      lines.push(' * 键格式与小写连字符前 3 段一致：`00-e0-4c`。生成时间见文件底部。');
-      lines.push(' */');
-      lines.push('');
-      lines.push('export const OUI_EXTENDED: Readonly<Record<string, string>> = {');
-      for (const [name, list] of byName) {
-        if (list.length === 0) continue;
-        lines.push(`  // —— ${name}（${list.length} 条）——`);
-        for (const prefix of list.sort()) {
-          lines.push(`  '${prefix}': '${name}',`);
-        }
-      }
-      lines.push('};');
-      lines.push('');
-      const out = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'src', 'main', 'engine', 'discovery', 'oui-extended.ts');
-      writeFileSync(out, lines.join('\n'), 'utf8');
-      console.log(`已生成 ${out}`);
-      console.log(`厂商 ${byName.size} 个，前缀共 ${total} 条（白名单外 ${unmatchedCount} 条忽略）`);
-    })
-    .catch((err) => {
-      console.error('生成失败:', err.message);
-      process.exit(1);
-    });
-}
-
-main();
+const { text, isManuf, source } = await loadSource();
+const map = isManuf ? parseManuf(text) : parseIeeeCsv(text);
+if (map.size < 1000) throw new Error(`解析结果异常：仅 ${map.size} 条，拒绝覆盖现有表`);
+const outPath = path.resolve(argValue('--out', OUT_DEFAULT));
+const code = render(map, source, isManuf);
+writeFileSync(outPath, code, 'utf8');
+console.log(`[build-oui] ${map.size} 条 → ${path.relative(root, outPath)} (${Buffer.byteLength(code)} bytes)`);

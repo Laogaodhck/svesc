@@ -20,7 +20,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync, type DatabaseSync as Db } from 'node:sqlite';
-import type { Alarm, Device, ManualPrinterEntry, PrinterManageConfig, WatchTarget } from '../../../shared/types';
+import type { Device, ManualPrinterEntry, PrinterManageConfig, WatchTarget } from '../../../shared/types';
 import {
   isValidIpv4,
   defaultState,
@@ -35,17 +35,6 @@ export type DbLogger = (level: 'info' | 'warn' | 'error', message: string) => vo
 
 const LATEST_VERSION = MIGRATIONS[MIGRATIONS.length - 1].version;
 
-/** 告警 trace 列的兜底解析：损坏 JSON 一律重建为空数组（hydrate 迁移会再补形状）。 */
-function parseTrace(raw: string | null): Alarm['trace'] {
-  if (!raw) return [];
-  try {
-    const parsed: unknown = JSON.parse(raw);
-    return Array.isArray(parsed) ? (parsed as Alarm['trace']) : [];
-  } catch {
-    return [];
-  }
-}
-
 /** device_tags.tags 列的兜底解析（JSON 字符串数组）：损坏一律视为空。 */
 function parseTagsJson(raw: string | null): unknown[] {
   if (!raw) return [];
@@ -55,27 +44,6 @@ function parseTagsJson(raw: string | null): unknown[] {
   } catch {
     return [];
   }
-}
-
-function alarmFromRow(r: Record<string, unknown>): Alarm {
-  const raisedAt = Number(r.raised_at ?? 0);
-  return {
-    id: String(r.id ?? ''),
-    severity: (r.severity as Alarm['severity']) ?? 'info',
-    code: String(r.code ?? ''),
-    targetType: (r.target_type as Alarm['targetType']) ?? 'system',
-    targetId: String(r.target_id ?? ''),
-    targetName: String(r.target_name ?? ''),
-    message: String(r.message ?? ''),
-    detail: r.detail === null || r.detail === undefined ? null : String(r.detail),
-    raisedAt,
-    ackAt: r.ack_at === null || r.ack_at === undefined ? null : Number(r.ack_at),
-    ackBy: r.ack_by === null || r.ack_by === undefined ? null : String(r.ack_by),
-    resolvedAt: r.resolved_at === null || r.resolved_at === undefined ? null : Number(r.resolved_at),
-    lastRaisedAt: Number(r.last_raised_at ?? raisedAt),
-    occurrences: Number(r.occurrences ?? 1) >= 1 ? Number(r.occurrences) : 1,
-    trace: parseTrace(r.trace as string | null),
-  };
 }
 
 export class SqliteStore implements PersistStore {
@@ -172,9 +140,7 @@ export class SqliteStore implements PersistStore {
         legacy.settings = { ...legacy.settings, ...obj.settings } as PersistedSettings;
       }
       if (obj.aliases && typeof obj.aliases === 'object') legacy.aliases = obj.aliases;
-      if (Array.isArray(obj.knownDeviceKeys)) legacy.knownDeviceKeys = obj.knownDeviceKeys;
       if (obj.firstSeen && typeof obj.firstSeen === 'object') legacy.firstSeen = obj.firstSeen as Record<string, number>;
-      if (Array.isArray(obj.alarms)) legacy.alarms = obj.alarms;
       if (obj.printers?.manual) legacy.printers.manual = obj.printers.manual;
       if (obj.printers?.ignored) legacy.printers.ignored = obj.printers.ignored;
 
@@ -185,8 +151,6 @@ export class SqliteStore implements PersistStore {
         for (const [k, v] of Object.entries(legacy.settings)) putSetting.run(k, JSON.stringify(v), now);
         const putAlias = db.prepare('INSERT OR REPLACE INTO aliases (key, alias, updated_at) VALUES (?, ?, ?)');
         for (const [k, v] of Object.entries(legacy.aliases)) putAlias.run(k, v, now);
-        const putKey = db.prepare('INSERT OR IGNORE INTO known_device_keys (key, added_at) VALUES (?, ?)');
-        for (const key of legacy.knownDeviceKeys.slice(-2000)) putKey.run(key, now);
         const putDev = db.prepare(
           'INSERT OR IGNORE INTO devices (ip, mac, hostname, vendor, kind, state, first_seen, last_seen, ip_conflict, updated_at) VALUES (?, NULL, NULL, NULL, NULL, ?, ?, ?, 0, ?)',
         );
@@ -194,19 +158,6 @@ export class SqliteStore implements PersistStore {
           if (!isValidIpv4(ip) || typeof ts !== 'number' || !Number.isFinite(ts) || ts <= 0) continue;
           // 旧 JSON 只有 firstSeen 表：state 记 'unknown'（下一轮扫描 upsert 即被真实观测覆盖）
           putDev.run(ip, 'unknown', ts, ts, now);
-        }
-        const putAlarm = db.prepare(
-          `INSERT OR REPLACE INTO alarms (id, code, severity, target_type, target_id, target_name, message, detail,
-             raised_at, ack_at, ack_by, resolved_at, last_raised_at, occurrences, trace, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        );
-        for (const a of legacy.alarms.slice(-500)) {
-          if (!a || typeof a !== 'object' || typeof a.id !== 'string' || typeof a.raisedAt !== 'number') continue;
-          putAlarm.run(
-            a.id, a.code, a.severity, a.targetType, a.targetId, a.targetName, a.message, a.detail ?? null,
-            a.raisedAt, a.ackAt ?? null, a.ackBy ?? null, a.resolvedAt ?? null,
-            a.lastRaisedAt ?? a.raisedAt, a.occurrences ?? 1, JSON.stringify(a.trace ?? []), now,
-          );
         }
         const putManual = db.prepare('INSERT OR REPLACE INTO printers_manual (ip, note, added_at) VALUES (?, ?, ?)');
         for (const m of legacy.printers.manual) {
@@ -223,7 +174,7 @@ export class SqliteStore implements PersistStore {
         } catch {
           this.logger('warn', '旧状态文件改名失败（保留原文件；下次启动会重复导入但不丢数据）');
         }
-        this.logger('info', `旧版 JSON 状态已导入 SQLite（别名 ${Object.keys(legacy.aliases).length} 条 / 告警 ${legacy.alarms.length} 条 / 设备 ${Object.keys(legacy.firstSeen).length} 台）`);
+        this.logger('info', `旧版 JSON 状态已导入 SQLite（别名 ${Object.keys(legacy.aliases).length} 条 / 设备 ${Object.keys(legacy.firstSeen).length} 台）`);
       } catch (err) {
         db.exec('ROLLBACK;');
         throw err;
@@ -278,10 +229,8 @@ export class SqliteStore implements PersistStore {
       showVirtualPrinters: pick('showVirtualPrinters', d.showVirtualPrinters),
       snmpEnabled: pick('snmpEnabled', d.snmpEnabled),
       useMdns: pick('useMdns', d.useMdns),
-      notifyDesktop: pick('notifyDesktop', d.notifyDesktop),
       closeToTray: pick('closeToTray', d.closeToTray),
       rememberRouterPassword: pick('rememberRouterPassword', d.rememberRouterPassword),
-      notifyWebhookUrl: pick('notifyWebhookUrl', d.notifyWebhookUrl),
     };
   }
 
@@ -300,14 +249,10 @@ export class SqliteStore implements PersistStore {
       for (const r of db.prepare('SELECT key, alias FROM aliases').all() as { key: string; alias: string }[]) {
         aliases[r.key] = r.alias;
       }
-      const knownDeviceKeys = (
-        db.prepare('SELECT key FROM known_device_keys ORDER BY added_at ASC').all() as { key: string }[]
-      ).map((r) => r.key);
       const firstSeen: Record<string, number> = {};
       for (const r of db.prepare('SELECT ip, first_seen FROM devices').all() as { ip: string; first_seen: number }[]) {
         firstSeen[r.ip] = Number(r.first_seen);
       }
-      const alarms = (db.prepare('SELECT * FROM alarms ORDER BY raised_at ASC').all() as Record<string, unknown>[]).map(alarmFromRow);
       const manual = (
         db.prepare('SELECT ip, note, added_at FROM printers_manual ORDER BY added_at ASC').all() as unknown as {
           ip: string;
@@ -338,8 +283,6 @@ export class SqliteStore implements PersistStore {
       return {
         version: 1,
         aliases,
-        alarms,
-        knownDeviceKeys,
         firstSeen,
         settings: { ...this.settingsCache },
         printers: { manual, ignored },
@@ -565,55 +508,6 @@ export class SqliteStore implements PersistStore {
     this.safe('setPrinterIgnored', undefined, () => {
       if (ignored) this.db?.prepare('INSERT OR IGNORE INTO printers_ignored (printer_id, added_at) VALUES (?, ?)').run(printerId, Date.now());
       else this.db?.prepare('DELETE FROM printers_ignored WHERE printer_id = ?').run(printerId);
-    });
-  }
-
-  /** 告警历史 + 已知设备种整体落账（引擎 stop 时全量兜底；单条实时路径见 upsertAlarm）。 */
-  setAlarmHistory(alarms: Alarm[], knownDeviceKeys: string[]): void {
-    this.mem.alarms = alarms.slice(-500);
-    this.mem.knownDeviceKeys = knownDeviceKeys.slice(-2000);
-    this.safe('setAlarmHistory', undefined, () => {
-      const db = this.db as Db;
-      const now = Date.now();
-      const putAlarm = db.prepare(
-        `INSERT OR REPLACE INTO alarms (id, code, severity, target_type, target_id, target_name, message, detail,
-           raised_at, ack_at, ack_by, resolved_at, last_raised_at, occurrences, trace, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      );
-      const putKey = db.prepare('INSERT OR REPLACE INTO known_device_keys (key, added_at) VALUES (?, ?)');
-      db.exec('BEGIN;');
-      try {
-        for (const a of alarms.slice(-500)) {
-          putAlarm.run(
-            a.id, a.code, a.severity, a.targetType, a.targetId, a.targetName, a.message, a.detail ?? null,
-            a.raisedAt, a.ackAt ?? null, a.ackBy ?? null, a.resolvedAt ?? null,
-            a.lastRaisedAt ?? a.raisedAt, a.occurrences ?? 1, JSON.stringify(Array.isArray(a.trace) ? a.trace : []), now,
-          );
-        }
-        for (const key of knownDeviceKeys.slice(-2000)) putKey.run(key, now);
-        db.exec('COMMIT;');
-      } catch (err) {
-        db.exec('ROLLBACK;');
-        throw err;
-      }
-    });
-  }
-
-  /** 单条告警实时落库（onAlarm 推送路径）：崩溃不丢新告警。 */
-  upsertAlarm(alarm: Alarm): void {
-    this.safe('upsertAlarm', undefined, () => {
-      this.db
-        ?.prepare(
-          `INSERT OR REPLACE INTO alarms (id, code, severity, target_type, target_id, target_name, message, detail,
-             raised_at, ack_at, ack_by, resolved_at, last_raised_at, occurrences, trace, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        )
-        .run(
-          alarm.id, alarm.code, alarm.severity, alarm.targetType, alarm.targetId, alarm.targetName, alarm.message,
-          alarm.detail ?? null, alarm.raisedAt, alarm.ackAt ?? null, alarm.ackBy ?? null, alarm.resolvedAt ?? null,
-          alarm.lastRaisedAt ?? alarm.raisedAt, alarm.occurrences ?? 1,
-          JSON.stringify(Array.isArray(alarm.trace) ? alarm.trace : []), Date.now(),
-        );
     });
   }
 

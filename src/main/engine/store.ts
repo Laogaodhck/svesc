@@ -7,7 +7,7 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
-import type { Alarm, ManualPrinterEntry, PrinterManageConfig, WatchTarget } from '../../shared/types';
+import type { ManualPrinterEntry, PrinterManageConfig, WatchTarget } from '../../shared/types';
 
 export interface PersistedSettings {
   autoScan: boolean;
@@ -18,21 +18,15 @@ export interface PersistedSettings {
   snmpEnabled: boolean;
   /** mDNS 打印机发现开关（增强路径，默认关闭） */
   useMdns: boolean;
-  /** 告警产生时弹系统桌面通知（Windows 通知中心，默认开启） */
-  notifyDesktop: boolean;
   /** 点关闭按钮时最小化到托盘（默认开启；托盘菜单"退出"始终真退出） */
   closeToTray: boolean;
   /** 是否记住路由器登录凭据（task-022 B-1，默认 true；关闭即清盘上凭据并停用自动重登） */
   rememberRouterPassword: boolean;
-  /** 告警 Webhook 推送地址（task-025，默认空 = 停用） */
-  notifyWebhookUrl: string;
 }
 
 export interface PersistedState {
   version: number;
   aliases: Record<string, string>;
-  alarms: Alarm[];
-  knownDeviceKeys: string[];
   /** 设备首次接入时间（key = IP，unix ms）。跨重启保留"真正第一次见到它"的时刻。 */
   firstSeen: Record<string, number>;
   settings: PersistedSettings;
@@ -63,7 +57,6 @@ export interface PersistStore {
   addManualPrinter(ip: string, note: string | null): { ok: boolean; error: string | null };
   removeManualPrinter(ip: string): { ok: boolean };
   setPrinterIgnored(printerId: string, ignored: boolean): void;
-  setAlarmHistory(alarms: Alarm[], knownDeviceKeys: string[]): void;
   setFirstSeen(map: Record<string, number>): void;
   // —— 设备备注 / 标签 / 监控目标（task-025，SqliteStore 与 JsonStore 同构实现） ——
   noteOf(deviceId: string): string | null;
@@ -77,8 +70,6 @@ export interface PersistStore {
   flush(): void;
   /** 设备实时状态同步（task-018 SQLite 扩展；JSON 后端无此能力，可选实现）。 */
   upsertDeviceStates?(devices: import('../../shared/types').Device[]): void;
-  /** 单条告警实时落库（task-018 SQLite 扩展，崩溃不丢新告警）。 */
-  upsertAlarm?(alarm: Alarm): void;
   /** 设备状态历史查询（诊断/测试用，task-018）。 */
   getDeviceStatusHistory?(ip: string, limit?: number): { state: string; at: number; latencyMs: number | null }[];
 }
@@ -99,10 +90,8 @@ export function normalizeTags(tags: readonly unknown[] | null | undefined): stri
 export const defaultState = (): PersistedState => ({
   version: STORE_VERSION,
   aliases: {},
-  alarms: [],
-  knownDeviceKeys: [],
   firstSeen: {},
-  settings: { autoScan: true, autoScanIntervalSec: 60, showVirtualPrinters: false, snmpEnabled: true, useMdns: false, notifyDesktop: true, closeToTray: true, rememberRouterPassword: true, notifyWebhookUrl: '' },
+  settings: { autoScan: true, autoScanIntervalSec: 60, showVirtualPrinters: false, snmpEnabled: true, useMdns: false, closeToTray: true, rememberRouterPassword: true },
   printers: { manual: [], ignored: [] },
   deviceNotes: {},
   deviceTags: {},
@@ -154,27 +143,6 @@ export class JsonStore implements PersistStore {
       return {
         version: STORE_VERSION,
         aliases: obj.aliases && typeof obj.aliases === 'object' ? obj.aliases : {},
-        alarms: Array.isArray(obj.alarms)
-          ? obj.alarms
-              .filter(
-                (a): a is Alarm =>
-                  !!a &&
-                  typeof a === 'object' &&
-                  typeof (a as Alarm).id === 'string' &&
-                  typeof (a as Alarm).code === 'string' &&
-                  typeof (a as Alarm).raisedAt === 'number',
-              )
-              // task-015：旧落盘数据无 ackBy 字段 → 规整为 null，绝不能因校验丢弃旧告警
-              // task-017：lastRaisedAt/occurrences/trace 同理补形状；trace 内容由 hydrate 迁移重建
-              .map((a) => ({
-                ...a,
-                ackBy: typeof a.ackBy === 'string' ? a.ackBy : null,
-                lastRaisedAt: typeof a.lastRaisedAt === 'number' ? a.lastRaisedAt : a.raisedAt,
-                occurrences: typeof a.occurrences === 'number' && a.occurrences >= 1 ? a.occurrences : 1,
-                trace: Array.isArray(a.trace) ? a.trace : [],
-              }))
-          : [],
-        knownDeviceKeys: Array.isArray(obj.knownDeviceKeys) ? (obj.knownDeviceKeys as string[]) : [],
         // firstSeen 规整：只接受合法 IPv4 key + 有限正数时间戳，脏数据直接丢弃
         firstSeen: (() => {
           const raw = obj.firstSeen;
@@ -193,10 +161,8 @@ export class JsonStore implements PersistStore {
           showVirtualPrinters: obj.settings?.showVirtualPrinters ?? false,
           snmpEnabled: obj.settings?.snmpEnabled ?? true,
           useMdns: obj.settings?.useMdns ?? false,
-          notifyDesktop: obj.settings?.notifyDesktop ?? true,
           closeToTray: obj.settings?.closeToTray ?? true,
           rememberRouterPassword: obj.settings?.rememberRouterPassword ?? true,
-          notifyWebhookUrl: typeof obj.settings?.notifyWebhookUrl === 'string' ? obj.settings.notifyWebhookUrl : '',
         },
         // task-025：备注/标签/监控目标（形状脏数据直接丢弃，不猜）
         deviceNotes: (() => {
@@ -317,12 +283,6 @@ export class JsonStore implements PersistStore {
     if (ignored) set.add(printerId);
     else set.delete(printerId);
     this.state.printers.ignored = Array.from(set);
-    this.save();
-  }
-
-  setAlarmHistory(alarms: Alarm[], knownDeviceKeys: string[]): void {
-    this.state.alarms = alarms.slice(-500);
-    this.state.knownDeviceKeys = knownDeviceKeys.slice(-2000);
     this.save();
   }
 

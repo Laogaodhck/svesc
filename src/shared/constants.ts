@@ -1,8 +1,16 @@
 /** 全局常量：端口表、超时预算、分频、并发、阈值。引擎与测试共用的唯一定义处。 */
 
-/** 端口探测集合。任务 023 扩充监控/设备私有端口（8000 海康 / 37777,37778 大华 / 8899 ONVIF / 8080 管理页 / 5000 群晖）。 */
+/**
+ * 端口探测集合。任务 023 扩充监控/设备私有端口（8000 海康 / 37777,37778 大华 / 8899 ONVIF / 8080 管理页 / 5000 群晖）。
+ * task-027 再扩设备特征口：548 AFP(macOS) / 1883 MQTT(IoT 网关) / 5900 VNC /
+ * 8009 Chromecast / 8554 RTSP 备用 / 32400 Plex 媒体服务器。
+ * task-028 监控生态私有口：34567（雄迈/大华系 DVR）、9527（雄迈系 Web）；8443 HTTPS 备用；
+ * 6668（涂鸦生态私有口）、8800（V380 等消费级 IPC）。
+ * 探测按主机内并发，端口数增加不拉长单主机墙钟（≈700ms 上限不变）。
+ */
 export const PROBE_PORTS = [
   22, 80, 443, 445, 515, 631, 9100, 3389, 554, 62078, 8000, 37777, 37778, 8899, 8080, 5000,
+  548, 1883, 5900, 8009, 8554, 32400, 34567, 9527, 8443, 6668, 8800,
 ] as const;
 
 /** 判定"网络打印机"的端口：9100(JetDirect) / 631(IPP) / 515(LPD)。 */
@@ -28,6 +36,16 @@ export const PORT_SERVICE: Readonly<Record<number, string>> = {
   8899: 'ONVIF',
   8080: 'HTTP 备用',
   5000: '群晖 DSM',
+  1883: 'MQTT',
+  5900: 'VNC',
+  8009: 'Chromecast',
+  8554: 'RTSP 备用',
+  32400: 'Plex',
+  34567: 'DVR 私有',
+  9527: '摄像头 Web',
+  8443: 'HTTPS 备用',
+  6668: '涂鸦私有',
+  8800: '摄像头媒体',
 };
 
 /** 硬超时（毫秒）。实测依据见 investigation-report.md §2.11。 */
@@ -72,6 +90,12 @@ export const HEARTBEAT_PROBE = {
   absentProbeCap: 32,
   onlineCap: 112,
   unknownPerRound: 64,
+  /**
+   * 连续缺席观测轮数（task-026 加速判定）：心跳（5s）与扫描轮**统一推进**，
+   * 连续 4 轮「无 ARP 条目且 ping 失败」→ offline（≈20s，此前为 3 个扫描轮 ≈ 3min）。
+   * ARP 在位的设备不计缺席（ARP 是比 ICMP 更强的在位证据）。
+   */
+  offlineArpMisses: 4,
 } as const;
 
 /** 持续 Ping 监控（task-025）：独立 5s 轮询，60 点环形窗口（≈5 分钟）。 */
@@ -112,39 +136,9 @@ export const QUALITY = {
 export const WINDOW = {
   qualitySamples: 20,
   rttHistory: 60,
-  alarmHistory: 500,
   /** snapshot.warnings 上限（超出裁最旧） */
   warnings: 20,
 } as const;
-
-/** 告警阈值。 */
-export const ALARM_THRESHOLDS = {
-  supplyLowPct: 10,
-  supplyCriticalPct: 5,
-  poorGradeRounds: 2,
-  /**
-   * 连续缺席观测轮数（task-026 加速判定）：心跳（5s）与扫描轮**统一推进**，
-   * 连续 4 轮「无 ARP 条目且 ping 失败」→ offline（≈20s，此前为 3 个扫描轮 ≈ 3min）。
-   * ARP 在位的设备不计缺席（ARP 是比 ICMP 更强的在位证据）；10 分钟告警抑制窗口兜底网络抖动。
-   */
-  offlineArpMisses: 4,
-  /**
-   * 告警抑制窗口（毫秒，task-017）：同因告警清除后 10 分钟内再次触发 → 合并回
-   * 原记录（occurrences+1 / trace 记 re-raised），不新建、不重复推送，
-   * 抑制网络抖动（离线闪断 / 耗材临界反复穿越 / 打印机间歇失联）造成的误报刷屏。
-   * 窗口外照常新建（历史事实不吞）。
-   */
-  suppressWindowMs: 600_000,
-} as const;
-
-/** 单条告警的流转账目上限（最新 50 条，超出裁最旧；raise 恒保留首条）。 */
-export const ALARM_TRACE_MAX = 50;
-
-/**
- * DEVICE_NEW 存活时长（毫秒）：新设备告警产生后保持 active，
- * 仅当用户 ack 或满 10 分钟才自动 resolved（事件型告警必须让用户看得见）。
- */
-export const NEW_DEVICE_TTL_MS = 600_000;
 
 /**
  * 质量采样口径：只有 `ping -n 4` 的批量采样进入质量窗口，

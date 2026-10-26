@@ -6,7 +6,6 @@
  * 探活与耗材 provider 都是注入点，因此无需真机、无需网络。
  */
 import { describe, expect, it } from 'vitest';
-import { AlarmEngine } from '../src/main/engine/alarms';
 import { collectPrinters, type ConsumableProvider } from '../src/main/engine/printers/printer-service';
 import type { RawCimPrinter, RawPrinter, SpoolerSnapshot } from '../src/main/engine/printers/spooler';
 import type { ReachabilityResult } from '../src/main/engine/discovery/ports';
@@ -67,7 +66,7 @@ describe('P0. .213 假在线：探活必须覆盖 spooler 的判定', () => {
     ).toBe('spooler=Normal · win32=Idle · 网络探活失败 9100/631/515');
   });
 
-  it('reachable 表应记录该打印机 ip 不可达（供告警引擎消费）', async () => {
+  it('reachable 表应记录该打印机 ip 不可达（供状态联动消费）', async () => {
     const res = await collect(async () => UNREACHABLE);
     expect(res.reachable.get('prn-192.168.2.213')).toBe(false);
   });
@@ -110,34 +109,6 @@ describe('P0. ip 为 null 的虚拟打印机', () => {
       now: T0,
     });
     expect(res.printers[0]?.state).toBe('idle');
-  });
-});
-
-describe('P0. 与告警引擎联动', () => {
-  it('.213 场景应产出 PRINTER_OFFLINE / critical', async () => {
-    const res = await collect(async () => UNREACHABLE);
-    const engine = new AlarmEngine(500, 0);
-    const created = engine.evaluate({
-      devices: [],
-      printers: res.printers,
-      printerReachable: res.reachable,
-      now: T0,
-    }).created;
-    expect(created.map((a) => `${a.code}/${a.severity}`)).toEqual(['PRINTER_OFFLINE/critical']);
-  });
-
-  it('告警 detail 应同时含 spooler 视角与探活视角', async () => {
-    const res = await collect(async () => UNREACHABLE);
-    const engine = new AlarmEngine(500, 0);
-    const alarm = engine.evaluate({
-      devices: [],
-      printers: res.printers,
-      printerReachable: res.reachable,
-      now: T0,
-    }).created[0];
-    expect(alarm?.detail, `实际 detail：${alarm?.detail ?? '(null)'}`).toMatch(
-      /spooler=Normal[\s\S]*网络探活失败 9100\/631\/515/,
-    );
   });
 });
 

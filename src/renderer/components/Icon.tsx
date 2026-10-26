@@ -9,7 +9,6 @@ export type IconName =
   | 'overview'
   | 'devices'
   | 'printer'
-  | 'alarm'
   | 'search'
   | 'refresh'
   | 'export'
@@ -59,12 +58,6 @@ const PATHS: Record<IconName, ReactNode> = {
       <rect x="3" y="8.5" width="18" height="7.5" rx="1.8" />
       <path d="M7 13h10v7.5H7z" />
       <path d="M17.5 11.5h.01" />
-    </>
-  ),
-  alarm: (
-    <>
-      <path d="M18 8.5a6 6 0 1 0-12 0c0 5-2 6.5-2 6.5h16s-2-1.5-2-6.5Z" />
-      <path d="M10.3 19a2 2 0 0 0 3.4 0" />
     </>
   ),
   search: (

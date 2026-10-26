@@ -5,9 +5,6 @@ export const CH = {
   refresh: 'lan:refresh',
   setAutoScan: 'lan:setAutoScan',
   getDeviceDetail: 'lan:getDeviceDetail',
-  ackAlarm: 'lan:ackAlarm',
-  /** 用户手动清除告警（task-021 语义 A）；payload = id 数组，单条也是数组 */
-  alarmsClear: 'alarms:clear',
   exportReport: 'lan:exportReport',
   setDeviceAlias: 'lan:setDeviceAlias',
 
@@ -24,8 +21,7 @@ export const CH = {
   // 诊断扩展（task-025）
   diagPortScan: 'diag:portScan',
 
-  // 通知 / 配置（task-025）
-  webhookTest: 'webhook:test',
+  // 配置导入导出（task-025）
   configExport: 'config:export',
   configImport: 'config:import',
 
@@ -67,7 +63,6 @@ export const CH = {
   // main → renderer (push)
   snapshot: 'lan:snapshot',
   scanProgress: 'lan:scanProgress',
-  alarm: 'lan:alarm',
   routerStatus: 'router:status',
 } as const;
 

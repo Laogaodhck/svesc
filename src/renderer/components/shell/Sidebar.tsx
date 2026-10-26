@@ -5,7 +5,6 @@ export type ViewKey =
   | 'devices'
   | 'printers'
   | 'printermanage'
-  | 'alarms'
   | 'router'
   | 'watches'
   | 'diagnostics'
@@ -14,8 +13,7 @@ export type ViewKey =
 
 export interface SidebarProps {
   view: ViewKey
-  counts: { devices: number; printers: number; alarms: number }
-  criticalAlarms: number
+  counts: { devices: number; printers: number }
   onNavigate: (view: ViewKey) => void
   version?: string
 }
@@ -25,7 +23,6 @@ const ITEMS: Array<{ key: ViewKey; label: string; icon: IconName }> = [
   { key: 'devices', label: '设备', icon: 'devices' },
   { key: 'printers', label: '打印机', icon: 'printer' },
   { key: 'printermanage', label: '打印管理', icon: 'wrench' },
-  { key: 'alarms', label: '告警', icon: 'alarm' },
   { key: 'router', label: '路由器', icon: 'router' },
   { key: 'watches', label: '监控', icon: 'activity' },
   { key: 'diagnostics', label: '诊断', icon: 'activity' },
@@ -33,7 +30,7 @@ const ITEMS: Array<{ key: ViewKey; label: string; icon: IconName }> = [
   { key: 'settings', label: '设置', icon: 'info' },
 ]
 
-export function Sidebar({ view, counts, criticalAlarms, onNavigate, version }: SidebarProps) {
+export function Sidebar({ view, counts, onNavigate, version }: SidebarProps) {
   return (
     <nav className="sidebar" aria-label="主导航">
       <div className="sidebar__group-label">监控</div>
@@ -43,10 +40,7 @@ export function Sidebar({ view, counts, criticalAlarms, onNavigate, version }: S
             ? counts.devices
             : item.key === 'printers'
               ? counts.printers
-              : item.key === 'alarms'
-                ? counts.alarms
-                : null
-        const alert = item.key === 'alarms' && criticalAlarms > 0
+              : null
         return (
           <button
             key={item.key}
@@ -57,11 +51,7 @@ export function Sidebar({ view, counts, criticalAlarms, onNavigate, version }: S
           >
             <Icon name={item.icon} size={15} className="sidebar__icon" />
             <span className="sidebar__label">{item.label}</span>
-            {count !== null && (
-              <span className={alert ? 'sidebar__count sidebar__count--alert' : 'sidebar__count'}>
-                {count}
-              </span>
-            )}
+            {count !== null && <span className="sidebar__count">{count}</span>}
           </button>
         )
       })}

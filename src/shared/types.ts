@@ -17,7 +17,6 @@ export type DeviceKind =
   | 'unknown';
 
 export type LinkState = 'online' | 'offline' | 'degraded' | 'scanning';
-export type AlarmSeverity = 'critical' | 'warning' | 'info';
 export type DataSource = 'live' | 'mixed' | 'demo';
 
 export interface NetQuality {
@@ -161,8 +160,6 @@ export interface AppSettings {
   snmpEnabled: boolean;
   /** mDNS 打印机发现（增强路径，默认关闭） */
   useMdns: boolean;
-  /** 告警产生时弹系统桌面通知（Windows 通知中心） */
-  notifyDesktop: boolean;
   /** 点关闭按钮时最小化到系统托盘而不是退出（托盘菜单"退出"始终真正退出） */
   closeToTray: boolean;
   /**
@@ -170,8 +167,6 @@ export interface AppSettings {
    * 关闭即清除盘上已存凭据，且后续登录不再落盘；自动重登也随之停用。
    */
   rememberRouterPassword: boolean;
-  /** 告警 Webhook 推送地址（task-025，默认空 = 停用）；HTTP(S) POST，5s 超时不重试 */
-  notifyWebhookUrl: string;
 }
 
 /** 设置页载荷 = AppSettings + 主进程注入的只读信息。 */
@@ -277,40 +272,6 @@ export interface TerminalResult {
   error: string | null;
 }
 
-/**
- * 状态流转账目（task-017）：每条告警的 raise / re-raised / acked / resolved
- * 全部留痕，详情面板按时间线渲染，流转可追溯。有界（最新 ALARM_TRACE_MAX 条）。
- */
-export interface AlarmTraceEntry {
-  at: number;
-  /** cleared-by-user = 用户手动清除（task-021 语义 A）；其余为引擎自动流转 */
-  type: 'raised' | 're-raised' | 'acked' | 'resolved' | 'cleared-by-user';
-  /** type === 'acked'/'cleared-by-user' 时的操作人（主进程注入）；其余恒 null */
-  by: string | null;
-}
-
-export interface Alarm {
-  id: string;
-  severity: AlarmSeverity;
-  code: string;
-  targetType: 'device' | 'printer' | 'system';
-  targetId: string;
-  targetName: string;
-  message: string;
-  detail: string | null;
-  raisedAt: number;
-  ackAt: number | null;
-  /** 确认人（主进程注入 OS 用户名，渲染层不可伪造）；null = 未确认，或 task-015 升级前的旧数据 */
-  ackBy: string | null;
-  resolvedAt: number | null;
-  /** 最后一次触发时间（首次 = raisedAt；抑制窗口内重开时刷新） */
-  lastRaisedAt: number;
-  /** 触发次数（首次 = 1；抑制窗口内重复触发合并 +1，不新建记录） */
-  occurrences: number;
-  /** 状态流转账目（task-017），按发生顺序追加，渲染层倒序展示 */
-  trace: AlarmTraceEntry[];
-}
-
 export interface ScanProgress {
   active: boolean;
   pct: number;
@@ -342,7 +303,6 @@ export interface SystemStat {
   txBps: number | null;
   /** 总带宽历史环（task-025，60 点）：rxBps/txBps 为 null 的点 = 该轮采样失败（曲线断开，诚实呈现） */
   bandwidthHistory: BandwidthPoint[];
-  alarmCounts: { critical: number; warning: number; info: number };
   scan: ScanProgress;
   /**
    * task-026 语义：lastScanAt / nextScanInMs / autoScanIntervalSec 均指"深度扫描"
@@ -400,7 +360,6 @@ export interface Snapshot {
   dataSource: DataSource;
   devices: Device[];
   printers: Printer[];
-  alarms: Alarm[];
   system: SystemStat;
   /** 持续 Ping 监控目标状态（task-025） */
   watches: WatchStatus[];
@@ -421,9 +380,6 @@ export interface LanApi {
   refresh(): Promise<{ started: boolean }>;
   setAutoScan(enabled: boolean, intervalSec?: number): Promise<{ autoScan: boolean; intervalSec: number }>;
   getDeviceDetail(deviceId: string): Promise<DeviceDetail | null>;
-  ackAlarm(alarmId: string): Promise<{ ok: boolean }>;
-  /** 用户手动清除告警（task-021 语义 A，操作人主进程注入）；单条传 [id] */
-  alarmsClear(ids: Alarm['id'][]): Promise<void>;
   /** 导出运行报告（task-025：format 缺省 json，新增 html 自包含报告） */
   exportReport(format?: 'json' | 'html'): Promise<{ ok: boolean; path: string | null; error?: string }>;
   /** 设置设备显示别名（null/空串清除）；与打印机别名共用一张持久化表 */
@@ -443,9 +399,7 @@ export interface LanApi {
   // —— 诊断扩展（task-025） ——
   /** 自定义端口范围扫描（单次 ≤1024 端口） */
   diagPortScan(ip: string, from: number, to: number): Promise<PortScanResult>;
-  // —— 通知 / 配置（task-025） ——
-  /** 向指定 URL 发送一条 webhook 测试消息，结果如实返回 */
-  webhookTest(url: string): Promise<{ ok: boolean; status: number | null; error: string | null }>;
+  // —— 配置（task-025） ——
   /** 导出配置到下载目录（settings+别名+备注+标签+监控+打印管理+firstSeen） */
   configExport(): Promise<{ ok: boolean; path: string | null; error?: string }>;
   /** 导入配置（渲染层传 JSON 文本；逐键合并，非法键跳过并计入 skipped） */
@@ -495,7 +449,6 @@ export interface LanApi {
   terminalRun(command: string): Promise<TerminalResult>;
   onSnapshot(cb: (s: Snapshot) => void): () => void;
   onScanProgress(cb: (p: ScanProgress) => void): () => void;
-  onAlarm(cb: (a: Alarm) => void): () => void;
   onRouterStatus(cb: (s: RouterStatus) => void): () => void;
 }
 

@@ -4,9 +4,7 @@
  *   B. WatchManager 持续 Ping 监控（变迁 / 窗口 / 恢复）
  *   C. 端口扫描器（参数校验 + 本机真实端口）
  *   D. HTML 报告（转义 + 结构）
- *   E. Webhook（URL 校验 + 本机 HTTP 服务器往返）
  *   F. tracert 结构化跳数解析
- *   G. AlarmEngine.ingestExternal / ingestResolve（外部告警通道）
  *   H. store 备注/标签/监控目标持久化 + 配置导入导出数据形状
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -14,15 +12,12 @@ import fs from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
-import http from 'node:http';
 
 import { buildMagicPacket, normalizeMac, RE_MAC } from '../src/main/engine/wol';
 import { WatchManager, cleanWatchNote } from '../src/main/engine/watch';
 import { scanPortRange } from '../src/main/engine/diag/portscan';
 import { buildHtmlReport, escapeHtml } from '../src/main/engine/report-html';
-import { isValidWebhookUrl, postWebhook } from '../src/main/engine/notify/webhook';
 import { parseTracertHopsDetailed } from '../src/main/engine/diag/netdiag';
-import { AlarmEngine, ALARM_CODES } from '../src/main/engine/alarms';
 import { JsonStore, defaultState, normalizeTags } from '../src/main/engine/store';
 import type { Snapshot } from '../src/shared/types';
 
@@ -226,7 +221,6 @@ describe('D. HTML 导出报告（task-025）', () => {
       },
     ],
     printers: [],
-    alarms: [],
     system: {
       totalDevices: 1,
       online: 1,
@@ -237,7 +231,6 @@ describe('D. HTML 导出报告（task-025）', () => {
       rxBps: 1500,
       txBps: 500,
       bandwidthHistory: [],
-      alarmCounts: { critical: 0, warning: 0, info: 0 },
       scan: { active: false, pct: 100, phase: 'idle', scanned: 0, total: 0, startedAt: null },
       lastScanAt: null,
       nextScanInMs: null,
@@ -261,54 +254,11 @@ describe('D. HTML 导出报告（task-025）', () => {
     expect(html).toContain('192.168.2.0/24');
     expect(html).toContain('<h2 id="devices">设备</h2>');
     expect(html).toContain('<p class="empty">暂无打印机数据</p>');
-    expect(html).toContain('<p class="empty">无活跃告警</p>');
+    expect(html).toContain('<h2 id="warnings">降级信息（数据可信度）</h2>');
   });
 
   it('escapeHtml 覆盖五个危险字符', () => {
     expect(escapeHtml(`<a href="x">&'</a>`)).toBe('&lt;a href=&quot;x&quot;&gt;&amp;&#39;&lt;/a&gt;');
-  });
-});
-
-// ===================== E. Webhook =====================
-describe('E. Webhook 推送（task-025）', () => {
-  it('URL 校验：仅 http/https', () => {
-    expect(isValidWebhookUrl('https://example.com/hook')).toBe(true);
-    expect(isValidWebhookUrl('http://127.0.0.1:9911/hook')).toBe(true);
-    expect(isValidWebhookUrl('ftp://example.com')).toBe(false);
-    expect(isValidWebhookUrl('not a url')).toBe(false);
-  });
-
-  it('本机服务器 2xx → ok:true + status；5xx → ok:false + status 如实', async () => {
-    const server = http.createServer((req, res) => {
-      let body = '';
-      req.on('data', (c) => {
-        body += c;
-      });
-      req.on('end', () => {
-        const payload = JSON.parse(body) as { event?: string };
-        res.statusCode = payload.event === 'boom' ? 500 : 200;
-        res.end('ok');
-      });
-    });
-    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
-    const addr = server.address();
-    const port = typeof addr === 'object' && addr ? addr.port : 0;
-    try {
-      const okRes = await postWebhook(`http://127.0.0.1:${port}/hook`, { event: 'alarm.created' });
-      expect({ ok: okRes.ok, status: okRes.status, error: okRes.error }).toEqual({ ok: true, status: 200, error: null });
-      const badRes = await postWebhook(`http://127.0.0.1:${port}/hook`, { event: 'boom' });
-      expect(badRes.ok).toBe(false);
-      expect(badRes.status).toBe(500);
-    } finally {
-      server.close();
-    }
-  });
-
-  it('拒绝连接 → ok:false + error（绝不抛）', async () => {
-    const res = await postWebhook('http://127.0.0.1:1/hook', { event: 'test' }, 1000);
-    expect(res.ok).toBe(false);
-    expect(res.status).toBeNull();
-    expect(res.error).toBeTruthy();
   });
 });
 
@@ -336,37 +286,6 @@ describe('F. tracert 结构化跳数（task-025）', () => {
   it('无法解析的文本 → 空数组（诚实降级）', () => {
     expect(parseTracertHopsDetailed('完全无法识别的输出')).toEqual([]);
     expect(parseTracertHopsDetailed('')).toEqual([]);
-  });
-});
-
-// ===================== G. 告警外部注入通道 =====================
-describe('G. AlarmEngine.ingestExternal / ingestResolve（task-025）', () => {
-  it('WATCH_DOWN：创建 → 活跃期去重（null）→ 恢复 → 再次创建', () => {
-    const engine = new AlarmEngine(100, 0);
-    const now = Date.now();
-    const first = engine.ingestExternal(ALARM_CODES.WATCH_DOWN, 'critical', 'device', '192.168.2.7', 'NAS', '监控目标宕机：NAS', 'IP 192.168.2.7', now);
-    expect(first).not.toBeNull();
-    expect(first?.severity).toBe('critical');
-    expect(first?.occurrences).toBe(1);
-    expect(first?.trace.map((t) => t.type)).toEqual(['raised']);
-
-    // 活跃期同因注入不重复创建
-    expect(engine.ingestExternal(ALARM_CODES.WATCH_DOWN, 'critical', 'device', '192.168.2.7', 'NAS', 'x', null, now + 1000)).toBeNull();
-
-    // 恢复
-    const resolved = engine.ingestResolve(ALARM_CODES.WATCH_DOWN, '192.168.2.7', now + 2000);
-    expect(resolved?.id).toBe(first?.id);
-    expect(resolved?.resolvedAt).toBe(now + 2000);
-    expect(first?.trace.map((t) => t.type)).toEqual(['raised', 'resolved']);
-    // 已恢复后再 resolve → null
-    expect(engine.ingestResolve(ALARM_CODES.WATCH_DOWN, '192.168.2.7', now + 3000)).toBeNull();
-
-    // 抑制窗口内（10 分钟）再次宕机 → 合并重开原记录（occurrences+1），不新建不重复推送
-    const second = engine.ingestExternal(ALARM_CODES.WATCH_DOWN, 'critical', 'device', '192.168.2.7', 'NAS', 'x', null, now + 4000);
-    expect(second).not.toBeNull();
-    expect(second?.id).toBe(first?.id);
-    expect(second?.occurrences).toBe(2);
-    expect(second?.trace[second.trace.length - 1]?.type).toBe('re-raised');
   });
 });
 
@@ -416,7 +335,6 @@ describe('H. store 备注/标签/监控目标（task-025）', () => {
     expect(store.get().deviceNotes).toEqual({});
     expect(store.get().deviceTags).toEqual({});
     expect(store.get().watchList).toEqual([]);
-    expect(store.get().settings.notifyWebhookUrl).toBe('');
     expect(store.addWatchTarget('300.1.1.1', null).ok).toBe(false);
     expect(store.aliasOf('dev-x')).toBe('旧');
   });
@@ -434,6 +352,5 @@ describe('H. store 备注/标签/监控目标（task-025）', () => {
     expect(state.deviceNotes).toEqual({});
     expect(state.deviceTags).toEqual({});
     expect(state.watchList).toEqual([]);
-    expect(state.settings.notifyWebhookUrl).toBe('');
   });
 });

@@ -19,7 +19,9 @@ describe('G4. hintsFromHits 服务映射', () => {
   it('已知服务应映射到对应类型（iot/mobile/apple）', () => {
     const hints = hintsFromHits([
       hit('_googlecast._tcp.local', '192.168.1.30', '客厅电视'),
-      hit('_companion._tcp.local', '192.168.1.51', 'iPhone'),
+      // task-028：_companion-link 同时被 macOS/iOS 自报（Handoff/接力），降为 apple；
+      // mobile 语义由 iOS 专属的 _apple-mobdev2 承担
+      hit('_apple-mobdev2._tcp.local', '192.168.1.51', 'iPhone'),
       hit('_airplay._tcp.local', '192.168.1.60', 'MacBook'),
     ]);
     const byIp = new Map(hints.map((h) => [h.ip, h]));
@@ -39,10 +41,10 @@ describe('G4. hintsFromHits 服务映射', () => {
 
   it('同 IP 多命中：mobile > iot > apple（优先级，不看先后顺序）', () => {
     // apple 先、mobile 后 → mobile 胜
-    const a = hintsFromHits([hit('_airplay._tcp.local', '10.0.0.5'), hit('_companion._tcp.local', '10.0.0.5')]);
+    const a = hintsFromHits([hit('_airplay._tcp.local', '10.0.0.5'), hit('_apple-mobdev2._tcp.local', '10.0.0.5')]);
     expect(a[0]?.kind).toBe('mobile');
     // mobile 先、iot 后 → mobile 仍胜（rank 高者赢，不是最后写入者赢）
-    const b = hintsFromHits([hit('_companion._tcp.local', '10.0.0.6'), hit('_googlecast._tcp.local', '10.0.0.6')]);
+    const b = hintsFromHits([hit('_apple-mobdev2._tcp.local', '10.0.0.6'), hit('_googlecast._tcp.local', '10.0.0.6')]);
     expect(b[0]?.kind).toBe('mobile');
     // iot 先、apple 后 → iot 胜
     const c = hintsFromHits([hit('_hap._tcp.local', '10.0.0.7'), hit('_raop._tcp.local', '10.0.0.7')]);
@@ -53,17 +55,29 @@ describe('G4. hintsFromHits 服务映射', () => {
     expect(hintsFromHits([hit('_GOOGLECAST._TCP.LOCAL', '10.0.0.9')])[0]?.kind).toBe('iot');
   });
 
-  it('服务映射表只含高置信条目：_airplay/_raop 必须是 apple（不定类型）', () => {
+  it('服务映射表只含高置信条目：_airplay/_raop/_companion-link 必须是 apple（不定类型）', () => {
     expect(DEVICE_MDNS_SERVICES['_airplay._tcp.local']).toBe('apple');
     expect(DEVICE_MDNS_SERVICES['_raop._tcp.local']).toBe('apple');
-    expect(DEVICE_MDNS_SERVICES['_companion._tcp.local']).toBe('mobile');
-    // task-023 扩充（9 → 17）
+    // task-028：_companion-link 为 macOS/iOS 共用 → 降为 apple；mobile 由 iOS 专属
+    // _apple-mobdev2 承担
+    expect(DEVICE_MDNS_SERVICES['_companion-link._tcp.local']).toBe('apple');
+    expect(DEVICE_MDNS_SERVICES['_apple-mobdev2._tcp.local']).toBe('mobile');
+    // task-023 扩充（9 → 17）+ task-027 扩充（17 → 21）+ task-028 AP/IoT/printer 生态（→ 29）
     expect(DEVICE_MDNS_SERVICES['_nvstream._tcp.local']).toBe('workstation');
     expect(DEVICE_MDNS_SERVICES['_ipp._tcp.local']).toBe('printer');
     expect(DEVICE_MDNS_SERVICES['_axis-video._tcp.local']).toBe('camera');
     expect(DEVICE_MDNS_SERVICES['_sleep-proxy._tcp.local']).toBe('apple');
     expect(DEVICE_MDNS_SERVICES['_googlerpc._tcp.local']).toBe('iot');
-    expect(Object.keys(DEVICE_MDNS_SERVICES).length).toBe(17);
+    expect(DEVICE_MDNS_SERVICES['_miio._udp.local']).toBe('iot');
+    expect(DEVICE_MDNS_SERVICES['_ipp-tls._tcp.local']).toBe('printer');
+    expect(DEVICE_MDNS_SERVICES['_uscan._tcp.local']).toBe('printer');
+    expect(DEVICE_MDNS_SERVICES['_uscans._tcp.local']).toBe('printer');
+    expect(DEVICE_MDNS_SERVICES['_airport._tcp.local']).toBe('ap');
+    expect(DEVICE_MDNS_SERVICES['_ubnt._tcp.local']).toBe('ap');
+    expect(DEVICE_MDNS_SERVICES['_matter._tcp.local']).toBe('iot');
+    expect(DEVICE_MDNS_SERVICES['_printer._tcp.local']).toBe('printer');
+    expect(DEVICE_MDNS_SERVICES['_workstation._tcp.local']).toBe('workstation');
+    expect(Object.keys(DEVICE_MDNS_SERVICES).length).toBe(29);
   });
 
   it('超时预算默认 1s（phaseFingerprint 预算内）', () => {

@@ -124,12 +124,6 @@ export function SettingsView({
   const [exportBusy, setExportBusy] = useState(false)
   const [exportPath, setExportPath] = useState<string | null>(null)
 
-  // 告警 Webhook（task-025）
-  const [webhookDraft, setWebhookDraft] = useState('')
-  const [webhookTesting, setWebhookTesting] = useState(false)
-  const [webhookMsg, setWebhookMsg] = useState<string | null>(null)
-  const [webhookTone, setWebhookTone] = useState<'ok' | 'crit'>('ok')
-
   // 配置导入/导出（task-025）
   const [cfgBusy, setCfgBusy] = useState(false)
   const [cfgMsg, setCfgMsg] = useState<string | null>(null)
@@ -152,7 +146,6 @@ export function SettingsView({
         if (!alive) return
         setSettings(s)
         setIntervalDraft(String(s.autoScanIntervalSec))
-        setWebhookDraft(s.notifyWebhookUrl ?? '')
       })
       .catch((err: unknown) => {
         if (alive) setMsg({ tone: 'crit', text: err instanceof Error ? err.message : String(err) })
@@ -200,47 +193,6 @@ export function SettingsView({
     }
   }, [hasApi, exportBusy])
 
-  /* -------- 告警 Webhook（task-025） -------- */
-  const saveWebhook = useCallback(async () => {
-    const url = webhookDraft.trim()
-    if (url && !/^https?:\/\//i.test(url)) {
-      setWebhookMsg('URL 需以 http:// 或 https:// 开头')
-      setWebhookTone('crit')
-      return
-    }
-    await update({ notifyWebhookUrl: url }, url ? 'Webhook 已保存' : 'Webhook 已清空（通知停用）')
-  }, [webhookDraft, update])
-
-  const testWebhook = useCallback(async () => {
-    if (webhookTesting) return
-    const url = webhookDraft.trim()
-    if (!url) {
-      setWebhookMsg('请先填写 Webhook URL')
-      setWebhookTone('crit')
-      return
-    }
-    setWebhookTesting(true)
-    setWebhookMsg(null)
-    try {
-      const res = await window.lanApi.webhookTest(url)
-      if (res.ok) {
-        setWebhookMsg(`测试成功：服务端返回 ${res.status}`)
-        setWebhookTone('ok')
-      } else if (res.status !== null) {
-        setWebhookMsg(`服务端返回 ${res.status}（非 2xx），消息未确认送达`)
-        setWebhookTone('crit')
-      } else {
-        setWebhookMsg(`发送失败：${res.error ?? '未知原因'}`)
-        setWebhookTone('crit')
-      }
-    } catch (err) {
-      setWebhookMsg(err instanceof Error ? err.message : String(err))
-      setWebhookTone('crit')
-    } finally {
-      setWebhookTesting(false)
-    }
-  }, [webhookDraft, webhookTesting])
-
   /* -------- 配置导入/导出（task-025） -------- */
   const onConfigExport = useCallback(async () => {
     if (cfgBusy) return
@@ -283,7 +235,6 @@ export function SettingsView({
         const s = await window.lanApi.settingsGet()
         setSettings(s)
         setIntervalDraft(String(s.autoScanIntervalSec))
-        setWebhookDraft(s.notifyWebhookUrl ?? '')
       } else {
         setCfgTone('crit')
         setCfgMsg(res.error ?? '导入失败')
@@ -336,13 +287,6 @@ export function SettingsView({
             disabled={busy}
           />
           <Switch
-            on={settings.notifyDesktop}
-            onToggle={() => void update({ notifyDesktop: !settings.notifyDesktop }, settings.notifyDesktop ? '已关闭告警桌面通知' : '已开启告警桌面通知')}
-            label="告警桌面通知"
-            hint="新告警产生时弹 Windows 系统通知"
-            disabled={busy}
-          />
-          <Switch
             on={settings.closeToTray}
             onToggle={() => void update({ closeToTray: !settings.closeToTray }, settings.closeToTray ? '已关闭最小化到托盘（点关闭即退出）' : '关闭窗口时将最小化到系统托盘')}
             label="关闭时最小化到托盘"
@@ -388,41 +332,6 @@ export function SettingsView({
           {intervalInvalid && (
             <div className="u-11 u-crit">间隔需为 30-3600 之间的整数秒</div>
           )}
-        </div>
-      </div>
-
-      {/* —— 告警 Webhook（task-025） —— */}
-      <div className="card">
-        <div className="card__head">
-          <span className="card__title">告警 Webhook</span>
-          <span className="card__hint">告警产生/恢复时 POST JSON；服务端返回 2xx 才算送达；留空停用</span>
-        </div>
-        <div className="settings-stack">
-          <div className="settings-row">
-            <span className="u-115">Webhook URL</span>
-            <div className="alias-edit">
-              <input
-                className="input alias-edit__input"
-                type="text"
-                placeholder="https://example.com/hook"
-                value={webhookDraft}
-                onChange={(e) => {
-                  setWebhookDraft(e.target.value)
-                  setWebhookMsg(null)
-                }}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') void saveWebhook()
-                }}
-              />
-              <button type="button" className="btn btn--ghost btn--sm" disabled={busy} onClick={() => void saveWebhook()}>
-                保存
-              </button>
-              <button type="button" className="btn btn--ghost btn--sm" disabled={webhookTesting} onClick={() => void testWebhook()}>
-                {webhookTesting ? '发送中…' : '发送测试'}
-              </button>
-            </div>
-          </div>
-          {webhookMsg && <div className="u-11" data-tone={webhookTone === 'ok' ? undefined : 'crit'}>{webhookMsg}</div>}
         </div>
       </div>
 

@@ -55,7 +55,7 @@ const dbPath = path.join(dir, 'svesc-state.db');
 const stats = {};
 if (fs.existsSync(dbPath)) {
   const db = new DatabaseSync(dbPath, { readOnly: true });
-  const tables = ['settings', 'aliases', 'devices', 'device_status_log', 'alarms', 'printers_manual', 'printers_ignored', 'known_device_keys'];
+  const tables = ['settings', 'aliases', 'devices', 'device_status_log', 'printers_manual', 'printers_ignored'];
   for (const t of tables) {
     stats[t] = (db.prepare(`SELECT COUNT(*) AS n FROM ${t}`).get() ?? { n: -1 }).n;
   }
@@ -74,7 +74,6 @@ const checks = [
   ['设备状态行数 > 0', stats.devices > 0],
   ['状态转移日志 ≥ 2（首次记录 + 变化）', stats.device_status_log >= 2],
   ['重启后 firstSeen 恢复', result.deviceRows === 0 || result.firstSeenRestored > 0],
-  ['告警实时落库 + 重启恢复', result.alarmRestored],
 ];
 
 let failed = 0;

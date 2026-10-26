@@ -7,7 +7,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import { resolveLinkState } from '../src/main/engine/scheduler';
-import { ALARM_THRESHOLDS } from '../src/shared/constants';
+import { HEARTBEAT_PROBE } from '../src/shared/constants';
 import { quality } from './fixtures';
 
 const idle = {
@@ -39,12 +39,12 @@ describe('§5.1 在线判定优先级', () => {
 });
 
 describe('§5.1 离线判定（唯一路径，task-026 加速）', () => {
-  it(`连续缺席 ${ALARM_THRESHOLDS.offlineArpMisses} 个观测轮且 ping 不通时应判 offline`, () => {
-    expect(resolveLinkState({ ...idle, arpMissStreak: ALARM_THRESHOLDS.offlineArpMisses })).toBe('offline');
+  it(`连续缺席 ${HEARTBEAT_PROBE.offlineArpMisses} 个观测轮且 ping 不通时应判 offline`, () => {
+    expect(resolveLinkState({ ...idle, arpMissStreak: HEARTBEAT_PROBE.offlineArpMisses })).toBe('offline');
   });
 
   it('缺席不足阈值时不得提前判 offline（确认窗口防抖）', () => {
-    expect(resolveLinkState({ ...idle, arpMissStreak: ALARM_THRESHOLDS.offlineArpMisses - 1 })).toBe('online');
+    expect(resolveLinkState({ ...idle, arpMissStreak: HEARTBEAT_PROBE.offlineArpMisses - 1 })).toBe('online');
   });
 });
 

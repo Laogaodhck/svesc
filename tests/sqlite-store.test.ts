@@ -1,12 +1,12 @@
 /**
  * task-018：SQLite 持久化回归锁。
  *
- * 覆盖：设置/别名/告警/首次接入/打印管理 roundtrip、迁移版本管理、
- * 旧版 svesc-state.json 平滑导入、设备状态同步与状态转移日志、
+ * 覆盖：设置/别名/首次接入/打印管理 roundtrip、迁移版本管理、
+ * 旧版 svesc-state.json 平滑导入（v1 遗留告警字段忽略）、设备状态同步与状态转移日志、
  * first_seen 只减不增、降级内存模式（初始化失败不崩）。
  */
 import { describe, expect, it } from 'vitest';
-import { existsSync, mkdtempSync, mkdirSync, renameSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { SqliteStore } from '../src/main/engine/db/sqlite';
@@ -25,15 +25,14 @@ describe('SQLite 基础 roundtrip', () => {
   it('设置读写：patch 落库，重开读回', () => {
     const dir = freshDir();
     const store = makeStore(dir);
-    store.setSettings({ autoScan: false, autoScanIntervalSec: 120, notifyDesktop: false });
+    store.setSettings({ autoScan: false, autoScanIntervalSec: 120 });
     store.close();
 
     const reopened = makeStore(dir);
     const s = reopened.settings;
-    expect({ autoScan: s.autoScan, interval: s.autoScanIntervalSec, notify: s.notifyDesktop }).toEqual({
+    expect({ autoScan: s.autoScan, interval: s.autoScanIntervalSec }).toEqual({
       autoScan: false,
       interval: 120,
-      notify: false,
     });
     // 未改过的字段保持默认
     expect(s.closeToTray).toBe(true);
@@ -55,43 +54,6 @@ describe('SQLite 基础 roundtrip', () => {
     expect(reopened.aliasOf('prn-192.168.2.213')).toBe('前台打印机');
     const state = reopened.get();
     expect(state.aliases).toEqual({ 'prn-192.168.2.213': '前台打印机' });
-    reopened.close();
-  });
-
-  it('告警历史全量落账 + 单条实时 upsert；重开不丢（trace 保真）', () => {
-    const dir = freshDir();
-    const store = makeStore(dir);
-    const alarm = {
-      id: 'alm-x1',
-      severity: 'critical' as const,
-      code: 'DEVICE_OFFLINE',
-      targetType: 'device' as const,
-      targetId: 'dev-192.168.2.52',
-      targetName: 'test',
-      message: '设备离线：test',
-      detail: null,
-      raisedAt: T0,
-      ackAt: T0 + 1,
-      ackBy: 'tester',
-      resolvedAt: null,
-      lastRaisedAt: T0,
-      occurrences: 2,
-      trace: [{ at: T0, type: 'raised' as const, by: null }],
-    };
-    store.upsertAlarm(alarm);
-    store.setAlarmHistory([{ ...alarm, id: 'alm-x2', occurrences: 1 }], ['aa-bb-cc-00-00-01']);
-    store.close();
-
-    const reopened = makeStore(dir);
-    const alarms = reopened.get().alarms;
-    expect(alarms.map((a) => a.id).sort()).toEqual(['alm-x1', 'alm-x2']);
-    const x1 = alarms.find((a) => a.id === 'alm-x1');
-    expect({ ackBy: x1?.ackBy, occurrences: x1?.occurrences, trace: x1?.trace }).toEqual({
-      ackBy: 'tester',
-      occurrences: 2,
-      trace: [{ at: T0, type: 'raised', by: null }],
-    });
-    expect(reopened.get().knownDeviceKeys).toEqual(['aa-bb-cc-00-00-01']);
     reopened.close();
   });
 
@@ -178,6 +140,7 @@ describe('迁移与旧数据升级（task-018）', () => {
       JSON.stringify({
         version: 1,
         aliases: { 'dev-192.168.2.52': '财务部-01' },
+        // v1 遗留字段（alarms / knownDeviceKeys）：告警移除后导入时应整体忽略，不影响其它数据
         alarms: [
           {
             id: 'alm-legacy',
@@ -204,10 +167,8 @@ describe('迁移与旧数据升级（task-018）', () => {
     const store = makeStore(dir);
     const state = store.get();
     expect(state.aliases).toEqual({ 'dev-192.168.2.52': '财务部-01' });
-    expect(state.alarms.map((a) => ({ id: a.id, occurrences: a.occurrences }))).toEqual([
-      { id: 'alm-legacy', occurrences: 1 }, // 旧数据补形状
-    ]);
-    expect(state.knownDeviceKeys).toEqual(['aa-bb-cc-00-00-01']);
+    expect(state.alarms).toBeUndefined();
+    expect(state.knownDeviceKeys).toBeUndefined();
     expect(state.firstSeen).toEqual({ '192.168.2.52': T0 });
     expect({ autoScan: state.settings.autoScan, interval: state.settings.autoScanIntervalSec }).toEqual({
       autoScan: false,

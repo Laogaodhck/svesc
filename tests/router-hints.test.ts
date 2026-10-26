@@ -104,6 +104,14 @@ vi.mock('../src/main/engine/discovery/netbios', async (importOriginal) => {
     queryNetbiosNames: async () => new Map<string, string | null>(),
   };
 });
+// task-027：HTTP 管理页指纹是新的网络 IO 出口，测试里同样必须替掉（不碰网络）
+vi.mock('../src/main/engine/discovery/http-fingerprint', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/main/engine/discovery/http-fingerprint')>();
+  return {
+    ...actual,
+    discoverHttpFingerprints: async () => [],
+  };
+});
 
 // 反向 DNS 会 spawn nslookup：替成可控桩（io.rdns 决定哪些 IP 有 rDNS 结果）
 vi.mock('../src/main/engine/discovery/index', async (importOriginal) => {

@@ -44,8 +44,9 @@ describe('G5. parseNbtstat 解析', () => {
   });
 
   it('采集约束常量锁（预算保护）', () => {
-    expect(NBTSTAT_MAX_HOSTS).toBe(8);
-    expect(NBTSTAT_CONCURRENCY).toBe(4);
+    // task-027 8→16、并发 4→16：并发=上限 → 16 台单波完成，最坏墙钟=单台超时 2s（2.6s 旅标内）
+    expect(NBTSTAT_MAX_HOSTS).toBe(16);
+    expect(NBTSTAT_CONCURRENCY).toBe(16);
     expect(NBTSTAT_TIMEOUT_MS).toBe(2000);
   });
 });

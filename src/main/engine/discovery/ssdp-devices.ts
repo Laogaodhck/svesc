@@ -11,6 +11,8 @@
  *  - urn:schemas-upnp-org:device:MediaRenderer        → iot（osHint '投屏/音响 (UPnP)'）
  *  - urn:schemas-upnp-org:device:MediaServer          → 不定 kind，仅 osHint 兜底
  *    （NAS / PC / 电视都可能自称 MediaServer，定 kind 就是猜）
+ * task-027 深挖：DigitalSecurityCamera → camera、Printer → printer（UPnP 标准设备类，
+ * 设备自报不算猜）；同时提取描述页 friendlyName 作为 displayName 候补（SSDP 富名通道）。
  *
  * 任何异常静默返回 []（增强路径，绝不拖垮扫描主流程）。
  */
@@ -52,8 +54,14 @@ export function parseDeviceTypeFromXml(xml: string): string | null {
   return m ? m[1] ?? null : null;
 }
 
+/** 描述 XML 的首个 friendlyName（task-027：SSDP 富名通道，用于 displayName 候补）。 */
+export function parseFriendlyNameFromXml(xml: string): string | null {
+  const m = /<[\w.-]*:?friendlyName>\s*([^<\s][^<]*?)\s*<\/[\w.-]*:?friendlyName>/i.exec(xml);
+  return m ? m[1] ?? null : null;
+}
+
 export interface SsdpClassification {
-  kind: 'router' | 'ap' | 'iot' | null;
+  kind: 'router' | 'ap' | 'iot' | 'camera' | 'printer' | null;
   osHint: string;
 }
 
@@ -67,6 +75,12 @@ export function classifySsdpDeviceType(deviceType: string): SsdpClassification |
   if (t.includes('wlanaccesspointdevice')) {
     return { kind: 'ap', osHint: '无线AP (UPnP)' };
   }
+  if (t.includes('digitalsecuritycamera')) {
+    return { kind: 'camera', osHint: '网络摄像机 (UPnP)' };
+  }
+  if (t.includes('printer')) {
+    return { kind: 'printer', osHint: '打印机 (UPnP)' };
+  }
   if (t.includes('mediarenderer')) {
     return { kind: 'iot', osHint: '投屏/音响 (UPnP)' };
   }
@@ -76,8 +90,13 @@ export function classifySsdpDeviceType(deviceType: string): SsdpClassification |
   return null;
 }
 
-/** 聚合优先级：ap > router > iot > 仅 osHint（MediaServer）。同 IP 高优先级胜出。 */
+/**
+ * 聚合优先级（task-027）：camera > printer > ap > router > iot > 仅 osHint（MediaServer）。
+ * 同 IP 高优先级胜出。camera/printer 是设备类自报的直接身份，优先于角色类。
+ */
 function rank(c: SsdpClassification): number {
+  if (c.kind === 'camera') return 6;
+  if (c.kind === 'printer') return 5;
   if (c.kind === 'ap') return 4;
   if (c.kind === 'router') return 3;
   if (c.kind === 'iot') return 2;
@@ -86,19 +105,21 @@ function rank(c: SsdpClassification): number {
 
 export interface SsdpDeviceHint {
   ip: string;
-  kind: 'router' | 'ap' | 'iot' | null;
+  kind: 'router' | 'ap' | 'iot' | 'camera' | 'printer' | null;
   osHint: string;
+  /** 描述页 friendlyName（task-027）：无 rDNS/mDNS 名时作 displayName 候补。 */
+  name: string | null;
 }
 
-/** 同 IP 聚合（纯函数）：按 rank 取最高；低优先 osHint 丢弃。 */
+/** 同 IP 聚合（纯函数）：按 rank 取最高；低优先 osHint 丢弃（name 随高优先条目）。 */
 export function aggregateSsdpHints(
-  entries: ReadonlyArray<{ ip: string; classification: SsdpClassification }>,
+  entries: ReadonlyArray<{ ip: string; classification: SsdpClassification; name?: string | null }>,
 ): SsdpDeviceHint[] {
   const byIp = new Map<string, SsdpDeviceHint>();
-  for (const { ip, classification } of entries) {
+  for (const { ip, classification, name } of entries) {
     const prev = byIp.get(ip);
     if (!prev || rank(classification) > rank(prev)) {
-      byIp.set(ip, { ip, kind: classification.kind, osHint: classification.osHint });
+      byIp.set(ip, { ip, kind: classification.kind, osHint: classification.osHint, name: name ?? null });
     }
   }
   return Array.from(byIp.values());
@@ -172,7 +193,7 @@ export async function discoverSsdpDevices(timeoutMs = SSDP_DISCOVER_TIMEOUT_MS):
   // 描述页拉取总预算：窗口结束后最多再花 600ms（与 mDNS/nbtstat 并行时
   // phaseFingerprint 总耗时不超 1.6s 旅标的关键）
   const descDeadline = Date.now() + 600;
-  const entries: Array<{ ip: string; classification: SsdpClassification }> = [];
+  const entries: Array<{ ip: string; classification: SsdpClassification; name?: string | null }> = [];
   let cursor = 0;
   const worker = async (): Promise<void> => {
     for (;;) {
@@ -194,7 +215,9 @@ export async function discoverSsdpDevices(timeoutMs = SSDP_DISCOVER_TIMEOUT_MS):
         const deviceType = parseDeviceTypeFromXml(res.body);
         if (!deviceType) continue;
         const classification = classifySsdpDeviceType(deviceType);
-        if (classification) entries.push({ ip, classification });
+        if (!classification) continue;
+        const friendlyName = parseFriendlyNameFromXml(res.body);
+        entries.push({ ip, classification, name: friendlyName });
       } catch {
         /* 单个描述失败忽略 */
       }

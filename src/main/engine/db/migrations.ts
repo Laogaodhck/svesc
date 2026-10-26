@@ -115,4 +115,9 @@ export const MIGRATIONS: Migration[] = [
       )`,
     ],
   },
+  {
+    version: 3,
+    name: '告警功能移除：DROP alarms / known_device_keys（回滚旧版本会按 v1 重建空表，无数据损失）',
+    statements: ['DROP TABLE IF EXISTS alarms', 'DROP INDEX IF EXISTS idx_alarms_key', 'DROP INDEX IF EXISTS idx_alarms_raised', 'DROP TABLE IF EXISTS known_device_keys'],
+  },
 ];

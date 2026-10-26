@@ -49,7 +49,7 @@ describe('JsonStore.settings 扩展字段', () => {
     // 手写"旧版本"状态文件：settings 只有旧有的两个字段
     writeFileSync(
       filePath,
-      JSON.stringify({ version: 1, aliases: {}, alarms: [], knownDeviceKeys: [], settings: { autoScan: true, autoScanIntervalSec: 60 } }),
+      JSON.stringify({ version: 1, aliases: {}, settings: { autoScan: true, autoScanIntervalSec: 60 } }),
       'utf8',
     );
 
@@ -60,10 +60,8 @@ describe('JsonStore.settings 扩展字段', () => {
       showVirtualPrinters: false,
       snmpEnabled: true,
       useMdns: false,
-      notifyDesktop: true,
       closeToTray: true,
       rememberRouterPassword: true,
-      notifyWebhookUrl: '',
     });
   });
 
@@ -74,10 +72,8 @@ describe('JsonStore.settings 扩展字段', () => {
       showVirtualPrinters: false,
       snmpEnabled: true,
       useMdns: false,
-      notifyDesktop: true,
       closeToTray: true,
       rememberRouterPassword: true,
-      notifyWebhookUrl: '',
     });
   });
 });

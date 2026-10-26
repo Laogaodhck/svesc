@@ -14,9 +14,13 @@
  */
 import { spawn, type ChildProcess } from 'node:child_process';
 
-/** 每轮最多采集的设备数（phaseFingerprint 预算内）。 */
-export const NBTSTAT_MAX_HOSTS = 8;
-export const NBTSTAT_CONCURRENCY = 4;
+/**
+ * 每轮最多采集的设备数与并发（task-027 8→16、4→16）：并发 = 上限，16 台单波
+ * 同时发起，最坏墙钟 = 单台超时 2s（旧 8 台@4 也是 2 波 × 2s，覆盖面翻倍、
+ * 墙钟不劣化），phaseFingerprint 2.6s 旅标不受影响。全部超时等价于整波 2s。
+ * 轮转 cursor 由调用方决定候选顺序，保证均匀覆盖。 */
+export const NBTSTAT_MAX_HOSTS = 16;
+export const NBTSTAT_CONCURRENCY = 16;
 export const NBTSTAT_TIMEOUT_MS = 2000;
 
 /**

@@ -7,7 +7,6 @@
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron';
 import { CH } from '../shared/channels';
 import type {
-  Alarm,
   DeviceDetail,
   DiagKind,
   DiagResult,
@@ -40,14 +39,12 @@ const api: LanApi = {
     ipcRenderer.invoke(CH.setAutoScan, enabled, intervalSec),
   getDeviceDetail: (deviceId: string): Promise<DeviceDetail | null> =>
     ipcRenderer.invoke(CH.getDeviceDetail, deviceId),
-  ackAlarm: (alarmId: string): Promise<{ ok: boolean }> => ipcRenderer.invoke(CH.ackAlarm, alarmId),
-  alarmsClear: (ids: string[]): Promise<void> => ipcRenderer.invoke(CH.alarmsClear, ids),
   exportReport: (format?: 'json' | 'html'): Promise<{ ok: boolean; path: string | null; error?: string }> =>
     ipcRenderer.invoke(CH.exportReport, format),
   setDeviceAlias: (deviceId: string, alias: string | null): Promise<{ ok: boolean }> =>
     ipcRenderer.invoke(CH.setDeviceAlias, deviceId, alias),
 
-  // task-025：设备运维（WOL / 备注 / 标签）+ 持续监控 + 端口扫描 + webhook + 配置导入导出
+  // task-025：设备运维（WOL / 备注 / 标签）+ 持续监控 + 端口扫描 + 配置导入导出
   deviceWake: (deviceId: string): Promise<{ ok: boolean; error: string | null }> =>
     ipcRenderer.invoke(CH.deviceWake, deviceId),
   deviceSetNote: (deviceId: string, note: string | null): Promise<{ ok: boolean }> =>
@@ -60,8 +57,6 @@ const api: LanApi = {
   watchRemove: (ip: string): Promise<{ ok: boolean }> => ipcRenderer.invoke(CH.watchRemove, ip),
   diagPortScan: (ip: string, from: number, to: number): Promise<PortScanResult> =>
     ipcRenderer.invoke(CH.diagPortScan, ip, from, to),
-  webhookTest: (url: string): Promise<{ ok: boolean; status: number | null; error: string | null }> =>
-    ipcRenderer.invoke(CH.webhookTest, url),
   configExport: (): Promise<{ ok: boolean; path: string | null; error?: string }> =>
     ipcRenderer.invoke(CH.configExport),
   configImport: (json: string): Promise<{ ok: boolean; imported: string[]; skipped: string[]; error: string | null }> =>
@@ -112,7 +107,6 @@ const api: LanApi = {
 
   onSnapshot: (cb: (s: Snapshot) => void): (() => void) => subscribe<Snapshot>(CH.snapshot, cb),
   onScanProgress: (cb: (p: ScanProgress) => void): (() => void) => subscribe<ScanProgress>(CH.scanProgress, cb),
-  onAlarm: (cb: (a: Alarm) => void): (() => void) => subscribe<Alarm>(CH.alarm, cb),
   onRouterStatus: (cb: (s: RouterStatus) => void): (() => void) => subscribe<RouterStatus>(CH.routerStatus, cb),
 };
 

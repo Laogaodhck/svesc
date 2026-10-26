@@ -109,19 +109,6 @@ export function printerStateTone(state: string): Tone {
   }
 }
 
-export function severityTone(severity: string): Tone {
-  switch (severity) {
-    case 'critical':
-      return 'crit'
-    case 'warning':
-      return 'warn'
-    case 'info':
-      return 'accent'
-    default:
-      return 'muted'
-  }
-}
-
 /** 耗材种类 → CSS 变量色（K/C/M/Y/鼓/废粉）。 */
 export function consumableColor(kind: string): string {
   switch (kind) {

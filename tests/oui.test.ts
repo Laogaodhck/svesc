@@ -91,15 +91,21 @@ describe('G. task-023 IEEE 扩充表与 lookupVendor', () => {
   });
 
   it('lookupVendor 应穿透到扩充表：Honor/Xiaomi 新前缀命中（真实 IEEE 前缀）', () => {
-    // 扩充表抽查：从表里取一条 Honor 与一条 Xiaomi 前缀反查
-    const pick = (name: string): string | undefined =>
-      Object.entries(OUI_EXTENDED).find(([, v]) => v === name)?.[0];
+    // 扩充表抽查：task-028 后表内是完整法律名（"Honor Device"），按前缀取一条反查，
+    // 断言"取到的前缀 + 查回的厂商名"自洽即可（不锁死 IEEE 的注册名写法）
+    const pick = (name: string): { prefix: string; vendor: string } | undefined => {
+      // 跳过手写主表已覆盖的前缀（主表优先于扩充表，同名不同写法会干扰反查自洽性）
+      const entry = Object.entries(OUI_EXTENDED).find(
+        ([k, v]) => v.startsWith(name) && !(k in OUI_TABLE),
+      );
+      return entry ? { prefix: entry[0], vendor: entry[1] } : undefined;
+    };
     const honor = pick('Honor');
     const xiaomi = pick('Xiaomi');
     expect(honor, '扩充表应包含 Honor 前缀').toBeTruthy();
     expect(xiaomi, '扩充表应包含 Xiaomi 前缀').toBeTruthy();
-    expect(lookupVendor(`${honor}-11-22-33`)).toBe('Honor');
-    expect(lookupVendor(`${xiaomi}-11-22-33`)).toBe('Xiaomi');
+    expect(lookupVendor(`${honor!.prefix}-11-22-33`)).toBe(honor!.vendor);
+    expect(lookupVendor(`${xiaomi!.prefix}-11-22-33`)).toBe(xiaomi!.vendor);
   });
 
   it('主表优先于扩充表（同前缀冲突时手写表权威）', () => {

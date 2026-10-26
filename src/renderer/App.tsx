@@ -1,11 +1,10 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
-import type { Alarm, Device, Snapshot } from '../shared/types'
+import type { Device, Snapshot } from '../shared/types'
 import { AppShell } from './components/AppShell'
 import { OverviewView } from './views/OverviewView'
 import { DevicesView } from './views/DevicesView'
 import { PrintersView } from './views/PrintersView'
 import { PrinterManageView } from './views/PrinterManageView'
-import { AlarmsView } from './views/AlarmsView'
 import { RouterView } from './views/RouterView'
 import { DiagnosticsView } from './views/DiagnosticsView'
 import { TerminalView } from './views/TerminalView'
@@ -21,7 +20,6 @@ import { publishPerf, recordPerf, settleSnapshotRender } from './lib/perf'
 
 const NO_DEVICES: Device[] = []
 const NO_PRINTERS: Snapshot['printers'] = []
-const NO_ALARMS: Alarm[] = []
 
 export function App() {
   const feed = useLiveFeed()
@@ -30,8 +28,7 @@ export function App() {
   const [view, setView] = useState<ViewKey>('overview')
   const [detailId, setDetailId] = useState<string | null>(null)
   const [localAuto, setLocalAuto] = useState<boolean | null>(null)
-  const [acking, setAcking] = useState<string | null>(null)
-  /** 告警跳转要定位的打印机（PrintersView 滚动 + 高亮；进入其它视图时清除） */
+  /** 打印机跳转定位（PrintersView 滚动 + 高亮；进入其它视图时清除） */
   const [focusPrinterId, setFocusPrinterId] = useState<string | null>(null)
   /** 诊断中心预填目标：设备详情"网络诊断"跳转时携带，进入诊断页消费一次后清除 */
   const [diagPresetTarget, setDiagPresetTarget] = useState<string | null>(null)
@@ -45,7 +42,6 @@ export function App() {
   const system = snapshot?.system
   const devices = snapshot?.devices ?? NO_DEVICES
   const printers = snapshot?.printers ?? NO_PRINTERS
-  const alarms = snapshot?.alarms ?? NO_ALARMS
 
   const autoScan = localAuto ?? system?.autoScan ?? false
   const scanning = system?.scan?.active ?? feed.progress?.active ?? false
@@ -55,8 +51,6 @@ export function App() {
       ? snapshot.ts + system.nextScanInMs
       : null
 
-  const activeAlarms = alarms.filter((a) => a.resolvedAt === null)
-  const criticalAlarms = activeAlarms.filter((a) => a.severity === 'critical').length
   const detailDevice = detailId ? devices.find((d) => d.id === detailId) ?? null : null
 
   /* -------- 渲染耗时：IPC 回调打点 → React commit 结算 -------- */
@@ -140,87 +134,6 @@ export function App() {
     feed.setAutoScan(next)
   }, [autoScan, feed])
 
-  const onAck = useCallback(
-    async (alarmId: string) => {
-      setAcking(alarmId)
-      await feed.ackAlarm(alarmId)
-      setAcking(null)
-    },
-    [feed]
-  )
-
-  /** 批量确认：串行逐条调 IPC（幂等操作），单条失败走全局错误条可见，不中断后续 */
-  const [ackingAll, setAckingAll] = useState(false)
-  const onAckAll = useCallback(
-    async (ids: string[]) => {
-      setAckingAll(true)
-      try {
-        for (const id of ids) {
-          await feed.ackAlarm(id)
-        }
-      } finally {
-        setAckingAll(false)
-      }
-    },
-    [feed]
-  )
-
-  /* -------- 告警手动清除（task-021 F1）：语义 A，置 resolvedAt + trace 记录操作人 -------- */
-  const [clearing, setClearing] = useState<string | null>(null)
-  const [clearingAll, setClearingAll] = useState(false)
-  const [clearError, setClearError] = useState<string | null>(null)
-
-  const onClear = useCallback(async (alarmId: string) => {
-    setClearing(alarmId)
-    setClearError(null)
-    try {
-      // 单条传 [id]（冻结形状）；成功后主进程推送的快照会自动刷新列表
-      await window.lanApi.alarmsClear([alarmId])
-    } catch (err) {
-      setClearError(
-        err instanceof Error ? `清除失败：${err.message}` : `清除失败：${String(err)}`
-      )
-    } finally {
-      setClearing(null)
-    }
-  }, [])
-
-  /** 批量清除当前范围：与 onAckAll 同构，串行逐条，失败可见且不中断后续 */
-  const onClearRange = useCallback(async (ids: string[]) => {
-    setClearingAll(true)
-    setClearError(null)
-    try {
-      for (const id of ids) {
-        await window.lanApi.alarmsClear([id])
-      }
-    } catch (err) {
-      setClearError(
-        err instanceof Error ? `批量清除中断：${err.message}` : `批量清除中断：${String(err)}`
-      )
-    } finally {
-      setClearingAll(false)
-    }
-  }, [])
-
-  const openAlarmTarget = useCallback(
-    (alarm: Alarm) => {
-      // 统一走 navigate（清抽屉/focus/diag + 滚回顶部），再叠加目标专属状态。
-      // 顺序保证：navigate 先清 detailId，随后 device 分支重设 targetId 开抽屉。
-      if (alarm.targetType === 'device') {
-        navigate('devices')
-        setDetailId(alarm.targetId)
-      } else if (alarm.targetType === 'printer') {
-        // 审计 L-2：跳转后定位到目标打印机卡（滚动 + 高亮），多台时不用自己找
-        navigate('printers')
-        setFocusPrinterId(alarm.targetId)
-      } else {
-        // 审计 H-2：system 类告警此前点击整行无任何响应（半成品交互）
-        navigate('overview')
-      }
-    },
-    [navigate],
-  )
-
   const content = (() => {
     if (!snapshot) {
       return (
@@ -266,7 +179,6 @@ export function App() {
         return (
           <PrintersView
             printers={printers}
-            alarms={alarms}
             scanning={scanning}
             now={snapshot.ts}
             showVirtual={showVirtualPrinters}
@@ -283,22 +195,6 @@ export function App() {
           <SettingsView
             showVirtualPrinters={showVirtualPrinters}
             onShowVirtualChange={setShowVirtualPrinters}
-          />
-        )
-      case 'alarms':
-        return (
-          <AlarmsView
-            alarms={alarms}
-            now={snapshot.ts}
-            onAck={onAck}
-            onAckAll={onAckAll}
-            onClear={onClear}
-            onClearRange={onClearRange}
-            onOpenTarget={openAlarmTarget}
-            acking={acking}
-            ackingAll={ackingAll}
-            clearing={clearing}
-            clearingAll={clearingAll}
           />
         )
       case 'router':
@@ -329,7 +225,6 @@ export function App() {
             now={snapshot.ts}
             scanning={scanning}
             onOpenDetail={openDetail}
-            onOpenAlarm={openAlarmTarget}
             onOpenDevice={openDetail}
             onNavigate={navigate}
           />
@@ -359,9 +254,7 @@ export function App() {
             devices: devices.length,
             // 审计 M-5：恒用非虚拟口径（虚拟开关在打印机页内，副作用不应漂移到侧边栏）
             printers: printers.filter((p) => p.connection !== 'virtual').length,
-            alarms: activeAlarms.length,
           },
-          criticalAlarms,
           onNavigate: navigate,
           version: appVersion,
         }}
@@ -395,21 +288,6 @@ export function App() {
           />
         }
       >
-        {clearError && (
-          <div className="banner" role="alert">
-            <Icon name="warn" size={14} />
-            <span className="banner__text">{clearError}</span>
-            <button
-              type="button"
-              className="banner__close"
-              onClick={() => setClearError(null)}
-              aria-label="关闭错误提示"
-              title="关闭"
-            >
-              <Icon name="close" size={13} />
-            </button>
-          </div>
-        )}
         {feed.error && (
           <div className="banner" role="alert">
             <Icon name="warn" size={14} />

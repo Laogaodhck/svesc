@@ -265,11 +265,6 @@
   background: var(--bg);
 }
 
-.sidebar__count--alert {
-  color: var(--crit);
-  background: var(--crit-a10);
-}
-
 .sidebar__footer {
   margin-top: auto;
   padding: 10px 8px 2px;

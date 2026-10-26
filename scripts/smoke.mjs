@@ -3,7 +3,7 @@
  * 冒烟脚本：真实拉起 Electron 窗口 → 逐视图截图 → 落盘 snapshot.json。
  *
  * 用法：node scripts/smoke.mjs [--out <dir>] [--timeout <ms>]
- * 产出：overview.png / devices.png / detail.png / printers.png / alarms.png + snapshot.json
+ * 产出：overview.png / devices.png / detail.png / printers.png / printermanage.png / settings.png / diagnostics.png / router.png + snapshot.json
  *
  * 主进程侧只暴露钩子，截图例程在 SMOKE=1 分支里由 src/main/smoke.ts 执行（生产路径不参与）。
  */
@@ -100,7 +100,7 @@ const exitCode = await new Promise((resolve) => {
 clearTimeout(timer);
 
 // —— 证据校验 ——
-const expected = ['overview.png', 'devices.png', 'printers.png', 'detail.png', 'alarms.png', 'router.png'];
+const expected = ['overview.png', 'devices.png', 'printers.png', 'detail.png', 'router.png'];
 let bad = 0;
 console.log('\n[smoke] 截图完整性：');
 for (const name of expected) {
@@ -122,7 +122,7 @@ if (fs.existsSync(snapshotPath)) {
   try {
     const snap = JSON.parse(fs.readFileSync(snapshotPath, 'utf8'));
     console.log(
-      `\n[smoke] snapshot: devices=${snap.devices?.length ?? 0} printers=${snap.printers?.length ?? 0} alarms=${snap.alarms?.length ?? 0} dataSource=${snap.dataSource}`,
+      `\n[smoke] snapshot: devices=${snap.devices?.length ?? 0} printers=${snap.printers?.length ?? 0} dataSource=${snap.dataSource}`,
     );
     if (!snap.devices?.length || !snap.printers?.length) bad += 1;
   } catch (err) {

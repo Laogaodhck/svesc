@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * 长跑取证：真实引擎跑 95s（>90s）+ 注入时钟的 DEVICE_NEW 生命周期检查。
+ * 长跑取证：真实引擎跑 95s（>90s），验证质量口径在真实时间轴上成立。
  *
  * 用法：
  *   node scripts/soak-check.mjs                  # 默认 95s
@@ -57,9 +57,8 @@ console.log('---- 采样（每 5s）----');
 for (const s of result.samples) {
   const detail = s.degradedDetail.map((d) => `${d.ip}:${d.grade}/s=${d.samples}/loss=${d.lossPct.toFixed(1)}%`).join(' ');
   console.log(
-    `  t+${String(Math.round(s.elapsedMs / 1000)).padStart(3)}s  degraded=${s.degraded}  unknown=${s.unknown}  ` +
-      `info=${s.alarmCounts.info}  NEW(active/resolved)=${s.deviceNewActive}/${s.deviceNewResolved}  ` +
-      `sameMs=${s.maxSameMsResolved}${detail ? `  [${detail}]` : ''}`,
+    `  t+${String(Math.round(s.elapsedMs / 1000)).padStart(3)}s  degraded=${s.degraded}  unknown=${s.unknown}` +
+      `${detail ? `  [${detail}]` : ''}`,
   );
 }
 
@@ -74,21 +73,8 @@ for (const q of result.finalQuality) {
 const late = result.samples.filter((s) => s.elapsedMs >= 60_000);
 const lateDegraded = late.reduce((sum, s) => sum + s.degraded, 0);
 const degradedFromTooFewSamples = late.flatMap((s) => s.degradedDetail).filter((d) => d.samples < 2).length;
-const lc = result.lifecycle;
 
 const checks = [
-  ['lifecycle: 首轮 seed 不产生 DEVICE_NEW', lc.seededCreated === 0, `seededCreated=${lc.seededCreated}`],
-  ['lifecycle: 第二轮新 MAC 产生 1 条', lc.created === 1, `created=${lc.created}`],
-  ['lifecycle: 产生后第 3 轮仍 active', lc.activeAfterNextRounds === 1, `active=${lc.activeAfterNextRounds}`],
-  ['lifecycle: 90s 后仍 active', lc.activeAfter90s === 1, `active=${lc.activeAfter90s}`],
-  ['lifecycle: 90s 后 alarmCounts.info=1', lc.infoCountAfter90s === 1, `info=${lc.infoCountAfter90s}`],
-  ['lifecycle: ack 后 resolved', lc.ackedResolved === true, `ackedResolved=${lc.ackedResolved}`],
-  [
-    'lifecycle: TTL 10min 自动 resolved',
-    lc.ttlResolved === true && lc.ttlResolvedAtDeltaMs === 600_000,
-    `resolved@+${lc.ttlResolvedAtDeltaMs}ms`,
-  ],
-  ['lifecycle: 无同毫秒批量恢复', lc.batchResolved === 0, `maxSameMs=${lc.batchResolved}`],
   ['soak: ≥60s 后无 degraded（真实丢包除外）', lateDegraded === 0, `degraded=${lateDegraded}`],
   ['soak: 无"样本不足导致的 degraded"', degradedFromTooFewSamples === 0, `samples<2 的 degraded=${degradedFromTooFewSamples}`],
 ];
@@ -103,7 +89,7 @@ for (const [label, pass, actual] of checks) {
 fs.mkdirSync(path.dirname(outPath), { recursive: true });
 fs.writeFileSync(
   outPath,
-  JSON.stringify({ durationMs: result.durationMs, lifecycle: lc, samples: result.samples, finalQuality: result.finalQuality }, null, 2),
+  JSON.stringify({ durationMs: result.durationMs, samples: result.samples, finalQuality: result.finalQuality }, null, 2),
   'utf8',
 );
 console.log(`\nsoak report → ${outPath}`);

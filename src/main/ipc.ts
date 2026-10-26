@@ -9,7 +9,6 @@ import { app, ipcMain, type BrowserWindow } from 'electron';
 import { CH } from '../shared/channels';
 import { DIAG } from '../shared/constants';
 import type {
-  Alarm,
   DiagKind,
   DiagResult,
   PrintJobAction,
@@ -48,27 +47,6 @@ export function registerIpc(win: BrowserWindow, engine: Engine, router: RouterMa
       engine.setAutoScan(Boolean(enabled), intervalSec),
   );
   ipcMain.handle(CH.getDeviceDetail, async (_event, deviceId: string) => engine.getDeviceDetail(String(deviceId)));
-  ipcMain.handle(CH.ackAlarm, (_event, alarmId: string): { ok: boolean } => {
-    // 确认人由主进程注入（task-015：渲染层不可伪造——权限控制点）；取 OS 用户名，失败兜底
-    let ackBy: string | null;
-    try {
-      ackBy = os.userInfo().username || '未知用户';
-    } catch {
-      ackBy = '未知用户';
-    }
-    return { ok: engine.ackAlarm(String(alarmId), ackBy) };
-  });
-  ipcMain.handle(CH.alarmsClear, (_event, ids: unknown): void => {
-    // 清除人由主进程注入（task-021，同 ackBy：渲染层不可伪造）
-    let by: string;
-    try {
-      by = os.userInfo().username || '未知用户';
-    } catch {
-      by = '未知用户';
-    }
-    const list = Array.isArray(ids) ? ids.map((v) => String(v)) : [];
-    engine.clearAlarms(list, by);
-  });
   ipcMain.handle(CH.exportReport, (_event, format: unknown) =>
     // 审计 L6：导出附上路由器状态与打印管理配置（旧实现只有 Snapshot）
     // task-025：format 支持 json（缺省）/ html
@@ -112,8 +90,7 @@ export function registerIpc(win: BrowserWindow, engine: Engine, router: RouterMa
     return res;
   });
 
-  // —— 通知 / 配置通道（task-025） ——
-  ipcMain.handle(CH.webhookTest, async (_event, url: string) => engine.webhookTest(String(url ?? '')));
+  // —— 配置通道（task-025） ——
   ipcMain.handle(CH.configExport, () => engine.configExport());
   ipcMain.handle(CH.configImport, (_event, json: string) => engine.configImport(String(json ?? '')));
 
@@ -204,10 +181,8 @@ export function registerIpc(win: BrowserWindow, engine: Engine, router: RouterMa
       'showVirtualPrinters',
       'snmpEnabled',
       'useMdns',
-      'notifyDesktop',
       'closeToTray',
       'rememberRouterPassword',
-      'notifyWebhookUrl',
     ] as const;
     const clean: Record<string, unknown> = {};
     for (const key of allowed) if (key in patch) clean[key] = patch[key];
@@ -312,10 +287,6 @@ export function pushSnapshot(snapshot: Snapshot): void {
 
 export function pushScanProgress(progress: ScanProgress): void {
   send(CH.scanProgress, progress);
-}
-
-export function pushAlarm(alarm: Alarm): void {
-  send(CH.alarm, alarm);
 }
 
 export function pushRouterStatus(status: RouterStatus): void {

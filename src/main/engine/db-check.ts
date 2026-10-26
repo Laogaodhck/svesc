@@ -48,8 +48,6 @@ export interface DbCheckResult {
   firstSeenRestored: number;
   /** 目标设备的状态转移历史条数（≥2 = 首次记录 + 状态变化） */
   statusHistory: number;
-  /** 告警实时落库验证：插入测试告警 → 重开 → 读回 */
-  alarmRestored: boolean;
   /** 数据库文件路径 */
   dbPath: string;
 }
@@ -72,29 +70,12 @@ export async function runDbCheck(options: { userDataDir: string }): Promise<DbCh
     statusHistory = (engineA.store.getDeviceStatusHistory?.(target.ip, 10) ?? []).length;
   }
 
-  // ② 别名 + 告警实时落库
+  // ② 别名落盘
   let aliasWritten = false;
   if (target) {
     engineA.setDeviceAlias(target.id, 'DB-CHECK-别名');
     aliasWritten = engineA.store.aliasOf(target.id) === 'DB-CHECK-别名';
   }
-  engineA.store.upsertAlarm?.({
-    id: 'alm-dbcheck',
-    severity: 'info',
-    code: 'DEVICE_NEW',
-    targetType: 'device',
-    targetId: 'dev-dbcheck',
-    targetName: '持久化检查',
-    message: 'SQLite 检查告警',
-    detail: null,
-    raisedAt: Date.now(),
-    ackAt: null,
-    ackBy: null,
-    resolvedAt: null,
-    lastRaisedAt: Date.now(),
-    occurrences: 1,
-    trace: [],
-  });
 
   // ③ 模拟应用退出
   engineA.stop();
@@ -104,7 +85,6 @@ export async function runDbCheck(options: { userDataDir: string }): Promise<DbCh
   const aliasRestored = target ? engineB.store.aliasOf(target.id) === 'DB-CHECK-别名' : false;
   const persisted = engineB.store.get();
   const firstSeenRestored = Object.keys(persisted.firstSeen).length;
-  const alarmRestored = persisted.alarms.some((a) => a.id === 'alm-dbcheck');
   const deviceRows = devices.filter((d) => !d.id.startsWith('sim-')).length;
   engineB.stop();
 
@@ -114,7 +94,6 @@ export async function runDbCheck(options: { userDataDir: string }): Promise<DbCh
     deviceRows,
     firstSeenRestored,
     statusHistory: Array.isArray(statusHistory) ? statusHistory.length : 0,
-    alarmRestored,
     dbPath: engineB.store instanceof Object && 'filePath' in engineB.store ? String((engineB.store as { filePath: string }).filePath) : '',
   };
 }

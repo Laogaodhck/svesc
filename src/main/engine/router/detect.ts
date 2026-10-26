@@ -14,7 +14,10 @@ export interface FingerprintRule {
 
 export const FINGERPRINTS: readonly FingerprintRule[] = [
   { brand: 'openwrt', keywords: ['openwrt', 'luci', 'lede'] },
-  { brand: 'tplink', keywords: ['tp-link', 'tplink'] },
+  // task-030：TP-LINK dynaform 固件自报形态（真机 TL-7DR7290 实测）——title 是
+  // 型号（"TL-7DR7290"）不含 "tp-link" 字样，靠 proName 变量 / dynaform 资源路径 /
+  // tplogin.cn 本地域名认出；hint 取 <title> 即型号
+  { brand: 'tplink', keywords: ['tp-link', 'tplink', 'tplogin', 'proname', 'dynaform'] },
   { brand: 'xiaomi', keywords: ['miwifi', 'xiaomi', '小米路由'] },
   { brand: 'asus', keywords: ['asus', 'asusrouter'] },
   { brand: 'huawei', keywords: ['huawei', 'hg8145', 'hg5', 'tc7102'] },

@@ -1,5 +1,5 @@
 {
-  "ts": 1792974216608,
+  "ts": 1793026748324,
   "subnet": "192.168.0.0/24",
   "dataSource": "live",
   "devices": [
@@ -13,7 +13,7 @@
       "kind": "workstation",
       "state": "online",
       "firstSeen": 1792950160584,
-      "lastSeen": 1792974212623,
+      "lastSeen": 1793026744689,
       "openPorts": [
         445,
         3389
@@ -45,12 +45,12 @@
       "ip": "192.168.0.1",
       "mac": "60-a3-e3-1d-1a-50",
       "hostname": null,
-      "vendor": null,
+      "vendor": "TP-LINK TECHNOLOGIES",
       "osHint": null,
       "kind": "router",
       "state": "online",
       "firstSeen": 1792950160627,
-      "lastSeen": 1792974212623,
+      "lastSeen": 1793026744689,
       "openPorts": [
         80
       ],
@@ -73,7 +73,7 @@
       "rttHistory": [],
       "isGateway": true,
       "isSelf": false,
-      "displayName": null,
+      "displayName": "Wireless Router TL-7DR7290",
       "ipConflict": false
     },
     {
@@ -81,12 +81,12 @@
       "ip": "192.168.0.50",
       "mac": "60-a3-e3-5e-2c-2c",
       "hostname": null,
-      "vendor": null,
-      "osHint": null,
-      "kind": "unknown",
+      "vendor": "TP-LINK TECHNOLOGIES",
+      "osHint": "网络设备固件",
+      "kind": "router",
       "state": "online",
       "firstSeen": 1792950160627,
-      "lastSeen": 1792974212623,
+      "lastSeen": 1793026744689,
       "openPorts": [
         80
       ],
@@ -117,12 +117,12 @@
       "ip": "192.168.0.101",
       "mac": "78-a6-a0-a7-71-14",
       "hostname": null,
-      "vendor": "EZVIZ",
+      "vendor": "Hangzhou Ezviz Software",
       "osHint": "监控摄像固件",
       "kind": "camera",
       "state": "online",
       "firstSeen": 1792950160627,
-      "lastSeen": 1792974212623,
+      "lastSeen": 1793026744689,
       "openPorts": [
         8000
       ],
@@ -153,12 +153,12 @@
       "ip": "192.168.0.104",
       "mac": "ac-b7-22-70-d7-3c",
       "hostname": null,
-      "vendor": null,
-      "osHint": null,
-      "kind": "unknown",
+      "vendor": "Qingdao Haier Technology",
+      "osHint": "智能家居/IoT 设备（OUI 厂商 Qingdao Haier Technology 推断）",
+      "kind": "iot",
       "state": "online",
       "firstSeen": 1792950160627,
-      "lastSeen": 1792974212623,
+      "lastSeen": 1793026744689,
       "openPorts": [],
       "quality": {
         "latencyMs": null,
@@ -188,11 +188,11 @@
       "mac": "a2-a3-e3-1d-1a-50",
       "hostname": null,
       "vendor": "随机 MAC（厂商不可判）",
-      "osHint": null,
+      "osHint": "MAC 尾段与网关一致（本地管理位变体，疑似路由器虚拟接口/Mesh 子节点）",
       "kind": "unknown",
       "state": "online",
       "firstSeen": 1792950160627,
-      "lastSeen": 1792974212623,
+      "lastSeen": 1793026744689,
       "openPorts": [],
       "quality": {
         "latencyMs": null,
@@ -217,16 +217,16 @@
       "ipConflict": false
     },
     {
-      "id": "dev-192.168.0.109",
-      "ip": "192.168.0.109",
-      "mac": "54-ea-e1-37-c7-d4",
+      "id": "dev-192.168.0.106",
+      "ip": "192.168.0.106",
+      "mac": "b0-81-01-70-50-ae",
       "hostname": null,
-      "vendor": null,
-      "osHint": null,
-      "kind": "unknown",
+      "vendor": "Honor Device",
+      "osHint": "移动设备（OUI 厂商 Honor Device 推断）",
+      "kind": "mobile",
       "state": "online",
-      "firstSeen": 1792974176269,
-      "lastSeen": 1792974212623,
+      "firstSeen": 1792950160627,
+      "lastSeen": 1793026744689,
       "openPorts": [],
       "quality": {
         "latencyMs": null,
@@ -256,11 +256,11 @@
       "mac": "c2-c8-35-ab-33-5c",
       "hostname": null,
       "vendor": "随机 MAC（厂商不可判）",
-      "osHint": null,
+      "osHint": "私有 MAC（随机化地址，厂商不可判；多为手机/平板的 MAC 随机化）",
       "kind": "unknown",
       "state": "online",
       "firstSeen": 1792950160627,
-      "lastSeen": 1792974212623,
+      "lastSeen": 1793026744689,
       "openPorts": [],
       "quality": {
         "latencyMs": null,
@@ -289,12 +289,12 @@
       "ip": "192.168.0.111",
       "mac": "d8-e2-3f-c9-60-e4",
       "hostname": null,
-      "vendor": null,
-      "osHint": null,
-      "kind": "unknown",
+      "vendor": "Qingdao Haier Technology",
+      "osHint": "智能家居/IoT 设备（OUI 厂商 Qingdao Haier Technology 推断）",
+      "kind": "iot",
       "state": "online",
       "firstSeen": 1792950160627,
-      "lastSeen": 1792974212623,
+      "lastSeen": 1793026744689,
       "openPorts": [],
       "quality": {
         "latencyMs": null,
@@ -323,12 +323,46 @@
       "ip": "192.168.0.114",
       "mac": "20-54-fa-2d-78-ce",
       "hostname": null,
-      "vendor": null,
-      "osHint": null,
-      "kind": "unknown",
+      "vendor": "HUAWEI TECHNOLOGIES",
+      "osHint": "移动设备（OUI 厂商 HUAWEI TECHNOLOGIES 推断）",
+      "kind": "mobile",
       "state": "online",
       "firstSeen": 1792950160627,
-      "lastSeen": 1792974212623,
+      "lastSeen": 1793026744689,
+      "openPorts": [],
+      "quality": {
+        "latencyMs": null,
+        "jitterMs": null,
+        "packetLossPct": 0,
+        "score": 0,
+        "grade": "unknown",
+        "samples": 0
+      },
+      "bandwidth": {
+        "rxBps": 0,
+        "txBps": 0,
+        "share": 0,
+        "connections": 0,
+        "attributable": false,
+        "estimated": true
+      },
+      "rttHistory": [],
+      "isGateway": false,
+      "isSelf": false,
+      "displayName": null,
+      "ipConflict": false
+    },
+    {
+      "id": "dev-192.168.0.115",
+      "ip": "192.168.0.115",
+      "mac": "2a-37-63-e1-80-4f",
+      "hostname": null,
+      "vendor": "随机 MAC（厂商不可判）",
+      "osHint": "私有 MAC（随机化地址，厂商不可判；多为手机/平板的 MAC 随机化）",
+      "kind": "unknown",
+      "state": "online",
+      "firstSeen": 1792950392591,
+      "lastSeen": 1793026744689,
       "openPorts": [],
       "quality": {
         "latencyMs": null,
@@ -358,11 +392,11 @@
       "mac": "92-bb-70-9a-62-57",
       "hostname": null,
       "vendor": "随机 MAC（厂商不可判）",
-      "osHint": null,
+      "osHint": "私有 MAC（随机化地址，厂商不可判；多为手机/平板的 MAC 随机化）",
       "kind": "unknown",
       "state": "online",
       "firstSeen": 1792950160627,
-      "lastSeen": 1792974212623,
+      "lastSeen": 1793026744689,
       "openPorts": [],
       "quality": {
         "latencyMs": null,
@@ -387,17 +421,19 @@
       "ipConflict": false
     },
     {
-      "id": "dev-192.168.0.120",
-      "ip": "192.168.0.120",
-      "mac": "d4-1a-3f-1e-6f-77",
+      "id": "dev-192.168.0.119",
+      "ip": "192.168.0.119",
+      "mac": "d4-5d-64-a9-8a-f1",
       "hostname": null,
-      "vendor": null,
-      "osHint": null,
-      "kind": "unknown",
+      "vendor": "ASUSTek COMPUTER",
+      "osHint": "Windows (SMB) · 华硕主板（OUI ASUSTek COMPUTER）",
+      "kind": "workstation",
       "state": "online",
-      "firstSeen": 1792950160627,
-      "lastSeen": 1792974212623,
-      "openPorts": [],
+      "firstSeen": 1793015209484,
+      "lastSeen": 1793026744689,
+      "openPorts": [
+        445
+      ],
       "quality": {
         "latencyMs": null,
         "jitterMs": null,
@@ -426,48 +462,12 @@
       "mac": "d6-30-a3-fd-32-90",
       "hostname": null,
       "vendor": "随机 MAC（厂商不可判）",
-      "osHint": null,
+      "osHint": "私有 MAC（随机化地址，厂商不可判；多为手机/平板的 MAC 随机化）",
       "kind": "unknown",
       "state": "online",
       "firstSeen": 1792950160627,
-      "lastSeen": 1792974212623,
+      "lastSeen": 1793026744689,
       "openPorts": [],
-      "quality": {
-        "latencyMs": null,
-        "jitterMs": null,
-        "packetLossPct": 0,
-        "score": 0,
-        "grade": "unknown",
-        "samples": 0
-      },
-      "bandwidth": {
-        "rxBps": 0,
-        "txBps": 0,
-        "share": 0,
-        "connections": 0,
-        "attributable": false,
-        "estimated": true
-      },
-      "rttHistory": [],
-      "isGateway": false,
-      "isSelf": false,
-      "displayName": null,
-      "ipConflict": false
-    },
-    {
-      "id": "dev-192.168.0.128",
-      "ip": "192.168.0.128",
-      "mac": "3c-7c-3f-51-83-f1",
-      "hostname": null,
-      "vendor": null,
-      "osHint": "Windows (SMB)",
-      "kind": "workstation",
-      "state": "online",
-      "firstSeen": 1792974176269,
-      "lastSeen": 1792974212623,
-      "openPorts": [
-        445
-      ],
       "quality": {
         "latencyMs": null,
         "jitterMs": null,
@@ -509,7 +509,7 @@
       "consumables": [],
       "jobs": [],
       "source": "spooler",
-      "lastSeen": 1792974216608
+      "lastSeen": 1793026748323
     },
     {
       "id": "prn-fax",
@@ -528,7 +528,7 @@
       "consumables": [],
       "jobs": [],
       "source": "spooler",
-      "lastSeen": 1792974216608
+      "lastSeen": 1793026748323
     },
     {
       "id": "prn-microsoft-xps-document-writer",
@@ -547,7 +547,7 @@
       "consumables": [],
       "jobs": [],
       "source": "spooler",
-      "lastSeen": 1792974216608
+      "lastSeen": 1793026748323
     },
     {
       "id": "prn-onenote-desktop-",
@@ -566,7 +566,7 @@
       "consumables": [],
       "jobs": [],
       "source": "spooler",
-      "lastSeen": 1792974216608
+      "lastSeen": 1793026748323
     },
     {
       "id": "prn-onenote-for-windows-10",
@@ -585,78 +585,7 @@
       "consumables": [],
       "jobs": [],
       "source": "spooler",
-      "lastSeen": 1792974216608
-    }
-  ],
-  "alarms": [
-    {
-      "id": "alm-mvoij4lp-1",
-      "severity": "info",
-      "code": "DEVICE_NEW",
-      "targetType": "device",
-      "targetId": "dev-192.168.0.109",
-      "targetName": "192.168.0.109",
-      "message": "新设备接入：192.168.0.109",
-      "detail": "IP 192.168.0.109 · MAC 54-ea-e1-37-c7-d4 · 厂商 未知",
-      "raisedAt": 1792974176269,
-      "ackAt": null,
-      "ackBy": null,
-      "resolvedAt": null,
-      "lastRaisedAt": 1792974176269,
-      "occurrences": 1,
-      "trace": [
-        {
-          "at": 1792974176269,
-          "type": "raised",
-          "by": null
-        }
-      ]
-    },
-    {
-      "id": "alm-mvoij4lp-2",
-      "severity": "info",
-      "code": "DEVICE_NEW",
-      "targetType": "device",
-      "targetId": "dev-192.168.0.128",
-      "targetName": "192.168.0.128",
-      "message": "新设备接入：192.168.0.128",
-      "detail": "IP 192.168.0.128 · MAC 3c-7c-3f-51-83-f1 · 厂商 未知",
-      "raisedAt": 1792974176269,
-      "ackAt": null,
-      "ackBy": null,
-      "resolvedAt": null,
-      "lastRaisedAt": 1792974176269,
-      "occurrences": 1,
-      "trace": [
-        {
-          "at": 1792974176269,
-          "type": "raised",
-          "by": null
-        }
-      ]
-    },
-    {
-      "id": "alm-mvo4dgfe-1",
-      "severity": "info",
-      "code": "DEVICE_NEW",
-      "targetType": "device",
-      "targetId": "dev-192.168.0.115",
-      "targetName": "192.168.0.115",
-      "message": "新设备接入：192.168.0.115",
-      "detail": "IP 192.168.0.115 · MAC 2a-37-63-e1-80-4f · 厂商 随机 MAC（厂商不可判）",
-      "raisedAt": 1792950397034,
-      "ackAt": null,
-      "ackBy": null,
-      "resolvedAt": 1792950997034,
-      "lastRaisedAt": 1792950397034,
-      "occurrences": 1,
-      "trace": [
-        {
-          "at": 1792950397034,
-          "type": "raised",
-          "by": null
-        }
-      ]
+      "lastSeen": 1793026748323
     }
   ],
   "system": {
@@ -666,20 +595,15 @@
     "degraded": 0,
     "printers": 5,
     "printersWithFault": 0,
-    "rxBps": 18757895,
-    "txBps": 33415579,
+    "rxBps": 3048101,
+    "txBps": 272608,
     "bandwidthHistory": [
       {
-        "ts": 1792974202406,
-        "rxBps": 18757895,
-        "txBps": 33415579
+        "ts": 1793026738944,
+        "rxBps": 3048101,
+        "txBps": 272608
       }
     ],
-    "alarmCounts": {
-      "critical": 0,
-      "warning": 0,
-      "info": 2
-    },
     "scan": {
       "active": false,
       "pct": 100,
@@ -688,7 +612,7 @@
       "total": 0,
       "startedAt": null
     },
-    "lastScanAt": 1792974212623,
+    "lastScanAt": 1793026744689,
     "nextScanInMs": null,
     "autoScan": false,
     "autoScanIntervalSec": 0

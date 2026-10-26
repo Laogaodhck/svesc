@@ -30,8 +30,12 @@ export function encodeDnsName(name: string): Buffer {
   return Buffer.concat(chunks);
 }
 
-/** 构造一个 PTR 查询报文（QDCOUNT=1）。 */
-export function buildMdnsQuery(service: string, txId = 0): Buffer {
+/**
+ * 构造一个 PTR 查询报文（QDCOUNT=1）。
+ * `unicastResponse=true` 时把 QU 位置 1（QCLASS=0x8001），要求响应方单播回复——
+ * 只有绑定 5353 失败、退回临时端口的兜底路径才需要。
+ */
+export function buildMdnsQuery(service: string, txId = 0, unicastResponse = false): Buffer {
   const header = Buffer.alloc(12);
   header.writeUInt16BE(txId, 0);
   header.writeUInt16BE(0x0000, 2); // flags: 标准查询
@@ -42,7 +46,7 @@ export function buildMdnsQuery(service: string, txId = 0): Buffer {
   const question = Buffer.concat([
     encodeDnsName(service),
     Buffer.from([0x00, 0x0c]), // QTYPE = PTR
-    Buffer.from([0x00, 0x01]), // QCLASS = IN
+    Buffer.from(unicastResponse ? [0x80, 0x01] : [0x00, 0x01]), // QCLASS = IN (+ QU)
   ]);
   return Buffer.concat([header, question]);
 }
@@ -121,18 +125,42 @@ export async function discoverMdnsPrinters(timeoutMs = TIMEOUTS.mdns): Promise<M
   return hits.map((h) => ({ name: h.name, ip: h.ip, port: h.port, service: h.service }));
 }
 
-/** mDNS 命中（PTR 实例 + SRV 端口 + A 地址尽力解析）。 */
+/** mDNS 命中（PTR 实例 + SRV 端口 + A 地址尽力解析 + TXT 自报型号）。 */
 export interface MdnsHit {
   name: string;
   ip: string | null;
   port: number | null;
   service: string;
+  /** TXT 自报型号（`model=` / `md=` / `ty=`），没有则 null。 */
+  model?: string | null;
+}
+
+/** 从 TXT 记录里取设备自报型号（纯函数）：model > md > ty，最后一个同名键生效。 */
+export function parseTxtModel(data: Buffer): string | null {
+  if (data.length === 0) return null;
+  const fields = data.toString('utf8').split('|');
+  let model: string | null = null;
+  for (const field of fields) {
+    const eq = field.indexOf('=');
+    if (eq <= 0) continue;
+    const key = field.slice(0, eq).trim().toLowerCase();
+    if (key !== 'model' && key !== 'md' && key !== 'ty') continue;
+    const value = field.slice(eq + 1).trim();
+    if (value) model = value;
+  }
+  return model;
 }
 
 /**
  * 通用 mDNS 查询（task-020 从 discoverMdnsPrinters 抽出）：对一组服务发 PTR 查询，
- * 聚合响应里的 PTR / SRV / A 记录。任何异常静默返回 []（增强路径，不拖垮主流程）。
- * 打印机发现与全设备类型侦测（discovery/mdns-devices.ts）共用本层。
+ * 聚合响应里的 PTR / SRV / A / TXT 记录。任何异常静默返回 []（增强路径，不拖垮主流程）。
+ *
+ * task-028 修复（实测本机只在绑定 5353 并加入组播组后才能收到局域网应答）：
+ *  - 优先 bind(5353, reuseAddr) + addMembership(224.0.0.251)：不加入组播组时，
+ *    内核根本不会把 224.0.0.251:5353 的应答递交给本 socket；
+ *  - 5353 被占用/绑定失败时退回临时端口，并把查询 QCLASS 的 QU 位置 1，
+ *    让响应方单播回来（老实现只有这一条路，且没有 QU 位，基本收不到包）；
+ *  - 查询在窗口内重发一次，抵消 UDP 丢包与设备延迟应答。
  */
 export async function mdnsQuery(services: readonly string[], timeoutMs: number = TIMEOUTS.mdns): Promise<MdnsHit[]> {
   if (services.length === 0) return [];
@@ -147,10 +175,13 @@ export async function mdnsQuery(services: readonly string[], timeoutMs: number =
         return;
       }
       let closed = false;
+      let sent = false;
+      let retry: NodeJS.Timeout | null = null;
       const close = (): void => {
         if (closed) return;
         closed = true;
         clearTimeout(timer);
+        if (retry) clearTimeout(retry);
         try {
           socket.close();
         } catch {
@@ -161,7 +192,6 @@ export async function mdnsQuery(services: readonly string[], timeoutMs: number =
 
       const timer = setTimeout(close, timeoutMs);
 
-      socket.on('error', close);
       socket.on('message', (msg) => {
         try {
           const records = parseMdnsRecords(msg);
@@ -180,23 +210,61 @@ export async function mdnsQuery(services: readonly string[], timeoutMs: number =
             const target = srv ? readName(srv.data, 6).name : '';
             const port = srv && srv.data.length >= 6 ? srv.data.readUInt16BE(4) : null;
             const ip = ipByName.get(target.toLowerCase()) ?? null;
+            const txt = records.find((r) => r.type === 16 && r.name.toLowerCase() === instance.toLowerCase());
+            const model = txt ? parseTxtModel(txt.data) : null;
             const friendly = instance.replace(new RegExp(`\\.${service.replace(/\./g, '\\.')}$`, 'i'), '');
             const key = `${friendly}|${ip ?? ''}|${service}`;
-            if (!found.has(key)) found.set(key, { name: friendly, ip, port, service });
+            if (!found.has(key)) found.set(key, { name: friendly, ip, port, service, model });
           }
         } catch {
           /* 单包解析失败忽略 */
         }
       });
 
-      // 多播地址不可用（无局域网）时 send 会同步/异步报错 → 静默结束
-      try {
+      /** 发一轮查询；multicastOk=false 时用 QU 位请对方单播回复。 */
+      const sendAll = (multicastOk: boolean): void => {
+        if (closed) return;
         for (const service of services) {
-          const query = buildMdnsQuery(service);
-          socket.send(query, MDNS_PORT, MDNS_ADDR, (err) => {
-            if (err) close();
+          socket.send(buildMdnsQuery(service, 0, !multicastOk), MDNS_PORT, MDNS_ADDR, (err) => {
+            if (err && !multicastOk) close();
           });
         }
+        sent = true;
+      };
+
+      socket.on('error', () => {
+        // bind 5353 失败（被 Bonjour/其它守护进程独占）→ 换临时端口 + QU 查询
+        if (!sent) {
+          try {
+            socket.bind(0, () => sendAll(false));
+            return;
+          } catch {
+            /* 落到 close */
+          }
+        }
+        close();
+      });
+
+      // 先绑 5353 再入组：顺序反了会 EADDRINUSE（Windows）
+      try {
+        socket.bind(MDNS_PORT, () => {
+          let multicastOk = false;
+          try {
+            socket.addMembership(MDNS_ADDR);
+            try {
+              socket.setMulticastTTL(255);
+            } catch {
+              /* 部分平台不支持，忽略 */
+            }
+            multicastOk = true;
+          } catch {
+            /* 无可用网卡/不支持组播：仍尝试组播发送，多半收不到 */
+          }
+          sendAll(multicastOk);
+          if (timeoutMs >= 800) {
+            retry = setTimeout(() => sendAll(multicastOk), Math.min(500, Math.floor(timeoutMs / 2)));
+          }
+        });
       } catch {
         close();
       }

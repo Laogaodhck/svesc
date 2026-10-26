@@ -1,6 +1,7 @@
 /**
  * task-023：SSDP 全网设备自报发现纯函数。
  * 覆盖：M-SEARCH 构造 / LOCATION 提取 / 描述 XML deviceType 解析 / 分类与聚合。
+ * task-027：friendlyName 解析（displayName 候补）、DigitalSecurityCamera/Printer 分类。
  */
 import { describe, expect, it } from 'vitest';
 import {
@@ -8,6 +9,7 @@ import {
   buildMsearchAll,
   classifySsdpDeviceType,
   parseDeviceTypeFromXml,
+  parseFriendlyNameFromXml,
   parseSsdpLocation,
 } from '../src/main/engine/discovery/ssdp-devices';
 
@@ -81,26 +83,62 @@ describe('ssdp-devices.classifySsdpDeviceType', () => {
     expect(ms?.osHint).toBe('媒体服务器 (UPnP)');
   });
 
-  it('未收录类型（Basic/Camera 等）返回 null——不猜', () => {
+  it('未收录类型（Basic 等）返回 null——不猜', () => {
     expect(classifySsdpDeviceType('urn:schemas-upnp-org:device:Basic:1')).toBeNull();
-    expect(classifySsdpDeviceType('urn:schemas-upnp-org:device:Printer:1')).toBeNull();
+  });
+
+  it('task-027：DigitalSecurityCamera → camera；Printer → printer（UPnP 标准设备类自报）', () => {
+    expect(classifySsdpDeviceType('urn:schemas-upnp-org:device:DigitalSecurityCamera:1')).toEqual({
+      kind: 'camera',
+      osHint: '网络摄像机 (UPnP)',
+    });
+    expect(classifySsdpDeviceType('urn:schemas-upnp-org:device:Printer:1')).toEqual({
+      kind: 'printer',
+      osHint: '打印机 (UPnP)',
+    });
+  });
+});
+
+describe('ssdp-devices.parseFriendlyNameFromXml（task-027）', () => {
+  it('标准描述页取首个 friendlyName', () => {
+    expect(parseFriendlyNameFromXml(DESC_XML('urn:schemas-upnp-org:device:MediaRenderer:1'))).toBe(
+      'Test Device',
+    );
+  });
+
+  it('无 friendlyName / 畸形 XML 返回 null', () => {
+    expect(parseFriendlyNameFromXml('<root></root>')).toBeNull();
+    expect(parseFriendlyNameFromXml('')).toBeNull();
   });
 });
 
 describe('ssdp-devices.aggregateSsdpHints', () => {
-  it('同 IP 按优先级聚合：ap > router > iot > 仅 osHint', () => {
+  it('同 IP 按优先级聚合：camera > printer > ap > router > iot > 仅 osHint；name 随高优先条目', () => {
     const out = aggregateSsdpHints([
-      { ip: '192.168.2.1', classification: { kind: 'router', osHint: 'UPnP IGD（网关）' } },
-      { ip: '192.168.2.2', classification: { kind: 'iot', osHint: '投屏/音响 (UPnP)' } },
-      { ip: '192.168.2.2', classification: { kind: null, osHint: '媒体服务器 (UPnP)' } },
-      { ip: '192.168.2.3', classification: { kind: 'ap', osHint: '无线AP (UPnP)' } },
+      { ip: '192.168.2.1', classification: { kind: 'router', osHint: 'UPnP IGD（网关）' }, name: 'Home Gateway' },
+      { ip: '192.168.2.2', classification: { kind: 'iot', osHint: '投屏/音响 (UPnP)' }, name: '客厅电视' },
+      { ip: '192.168.2.2', classification: { kind: null, osHint: '媒体服务器 (UPnP)' }, name: '客厅电视' },
+      { ip: '192.168.2.3', classification: { kind: 'ap', osHint: '无线AP (UPnP)' }, name: 'AP-2F' },
+      { ip: '192.168.2.4', classification: { kind: 'printer', osHint: '打印机 (UPnP)' }, name: 'HP LaserJet' },
+      { ip: '192.168.2.4', classification: { kind: 'camera', osHint: '网络摄像机 (UPnP)' }, name: 'Cam-01' },
+      { ip: '192.168.2.5', classification: { kind: 'ap', osHint: '无线AP (UPnP)' } },
     ]);
-    expect(out).toHaveLength(3);
+    expect(out).toHaveLength(5);
     expect(out.find((h) => h.ip === '192.168.2.2')).toEqual({
       ip: '192.168.2.2',
       kind: 'iot',
       osHint: '投屏/音响 (UPnP)',
+      name: '客厅电视',
     });
     expect(out.find((h) => h.ip === '192.168.2.3')?.kind).toBe('ap');
+    // camera(6) > printer(5)：设备类直接身份优先
+    expect(out.find((h) => h.ip === '192.168.2.4')).toEqual({
+      ip: '192.168.2.4',
+      kind: 'camera',
+      osHint: '网络摄像机 (UPnP)',
+      name: 'Cam-01',
+    });
+    // 无 name 字段的条目补 null（不炸）
+    expect(out.find((h) => h.ip === '192.168.2.5')?.name).toBeNull();
   });
 });

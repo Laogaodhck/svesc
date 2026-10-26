@@ -1,10 +1,10 @@
 /**
- * 系统托盘（Tray）：常驻图标 + 右键菜单 + 关闭到托盘 + 任务栏告警角标。
+ * 系统托盘（Tray）：常驻图标 + 右键菜单 + 关闭到托盘。
  *
  * 行为约定：
  *  - 托盘单击：窗口可见且有焦点 → 隐藏；否则显示并聚焦（Windows 习惯）
  *  - 右键菜单：显示主窗口 / 立即扫描 / 实时监控开关 / 开机自启（仅打包版）/ 退出
- *  - 菜单随快照心跳（5s）重建，实时监控勾选态与告警计数保持新鲜
+ *  - 菜单随快照心跳（5s）重建，实时监控勾选态保持新鲜
  *  - "退出"是唯一真退出路径：markQuitting() 置位后窗口 close 不再拦
  *  - SMOKE 模式下主进程不创建托盘（秒退场景不留无常驻）
  */
@@ -16,7 +16,6 @@ let tray: Tray | null = null
 let engineRef: Engine | null = null
 let getWindowRef: (() => BrowserWindow | null) | null = null
 let quitting = false
-let badgeImage: Electron.NativeImage | null = null
 
 /** 真退出置位（tray 菜单"退出"与 before-quit 都会走这里）。 */
 export function markQuitting(): void {
@@ -61,8 +60,6 @@ export function refreshTray(): void {
   if (!tray || !engineRef) return
   const engine = engineRef
   const settings = engine.getSettings()
-  const snap = engine.getSnapshot()
-  const activeAlarms = snap.alarms.filter((a) => a.resolvedAt === null).length
 
   const loginItemChecked = app.isPackaged ? app.getLoginItemSettings().openAtLogin : false
   const menu = Menu.buildFromTemplate([
@@ -84,7 +81,7 @@ export function refreshTray(): void {
     },
     { type: 'separator' },
     {
-      label: activeAlarms > 0 ? `退出（${activeAlarms} 条活跃告警）` : '退出',
+      label: '退出',
       click: () => {
         markQuitting()
         app.quit()
@@ -92,36 +89,16 @@ export function refreshTray(): void {
     },
   ])
   tray.setContextMenu(menu)
-  tray.setToolTip(
-    activeAlarms > 0
-      ? `SVESC 局域网管理台 · ${activeAlarms} 条活跃告警`
-      : 'SVESC 局域网管理台',
-  )
-}
-
-/** 任务栏告警角标：>0 时叠红点，=0 清除。 */
-export function updateBadge(win: BrowserWindow | null, activeAlarms: number): void {
-  if (!win || win.isDestroyed()) return
-  try {
-    if (activeAlarms > 0 && badgeImage) {
-      win.setOverlayIcon(badgeImage, `${activeAlarms} 条活跃告警`)
-    } else {
-      win.setOverlayIcon(null, '')
-    }
-  } catch {
-    /* overlay 失败不影响主链路 */
-  }
+  tray.setToolTip('SVESC 局域网管理台')
 }
 
 export function createTray(opts: {
   trayIconPath: string
-  badgeIconPath: string
   getWindow: () => BrowserWindow | null
   engine: Engine
 }): Tray {
   engineRef = opts.engine
   getWindowRef = opts.getWindow
-  badgeImage = nativeImage.createFromPath(opts.badgeIconPath)
 
   const icon = nativeImage.createFromPath(opts.trayIconPath)
   tray = new Tray(icon.isEmpty() ? nativeImage.createFromPath(path.join(process.resourcesPath || '', 'icon.png')) : icon)

@@ -11,7 +11,6 @@
  * 状态判定严格按 plan.md §5.1 的 6 级优先级：ARP 在位 = 在线，**ICMP 超时绝不判离线**。
  */
 import type {
-  Alarm,
   BandwidthPoint,
   DataSource,
   Device,
@@ -27,7 +26,6 @@ import type {
   WatchTarget,
 } from '../../shared/types';
 import {
-  ALARM_THRESHOLDS,
   CONCURRENCY,
   DEMO_DEVICE_THRESHOLD,
   HEARTBEAT_PROBE,
@@ -41,7 +39,6 @@ import {
   WINDOW,
 } from '../../shared/constants';
 import { WatchManager } from './watch';
-import { ALARM_CODES } from './alarms';
 import { readArp, type ArpEntry, type ArpScanResult } from './discovery/arp';
 import { pingSweep, pingQuality } from './discovery/ping';
 import { probeHosts } from './discovery/ports';
@@ -51,6 +48,14 @@ import { ReverseDnsCache } from './discovery';
 import { discoverMdnsDevices, type MdnsDeviceHint } from './discovery/mdns-devices';
 import { discoverCamerasWsdiscovery, type WsdCameraHint } from './discovery/wsdiscovery';
 import { discoverSsdpDevices, type SsdpDeviceHint } from './discovery/ssdp-devices';
+import { discoverHttpFingerprints, type HttpFingerprintHint } from './discovery/http-fingerprint';
+import {
+  discoverOnvifDevices,
+  ONVIF_MAX_TARGETS,
+  ONVIF_PORTS,
+  type OnvifHint,
+  type OnvifProbeTarget,
+} from './discovery/onvif-http';
 import { queryNetbiosNames, NBTSTAT_MAX_HOSTS } from './discovery/netbios';
 import { QualityTracker } from './network/monitor';
 import { isDegraded } from './network/quality';
@@ -58,7 +63,6 @@ import { BandwidthMeter, readConnections, type BandwidthSample } from './network
 import { readSpooler } from './printers/spooler';
 import { collectPrinters, hasFault } from './printers/printer-service';
 import { discoverMdnsPrinters } from './printers/mdns';
-import { AlarmEngine, type AlarmEvaluation } from './alarms';
 import { Simulator } from './simulator';
 
 export interface SchedulerConfig {
@@ -80,9 +84,6 @@ export interface SchedulerConfig {
 export interface SchedulerHooks {
   onSnapshot?: (snapshot: Snapshot) => void;
   onScanProgress?: (progress: ScanProgress) => void;
-  onAlarm?: (alarm: Alarm) => void;
-  /** 本轮自动恢复的告警（task-025：webhook resolved 触发点） */
-  onAlarmResolved?: (alarms: Alarm[]) => void;
   nextRequestId?: () => number;
   /** 打印管理页配置提供者（手动打印机 + 忽略列表）；未注入 = 无管理配置 */
   getPrinterManage?: () => { manual: { ip: string; note: string | null; addedAt: number }[]; ignored: string[] };
@@ -198,7 +199,7 @@ export function resolveLinkState(input: {
   if (input.arpPresent || input.portResponded || input.pingAlive) {
     return degraded ? 'degraded' : 'online';
   }
-  if (input.arpMissStreak >= ALARM_THRESHOLDS.offlineArpMisses) return 'offline';
+  if (input.arpMissStreak >= HEARTBEAT_PROBE.offlineArpMisses) return 'offline';
   // ARP 老化有延迟：缺席不足 3 轮时不下离线结论
   return 'online';
 }
@@ -206,20 +207,27 @@ export function resolveLinkState(input: {
 export class Scheduler {
   private records = new Map<string, DeviceRecord>();
   private arp = new Map<string, ArpEntry>();
-  /** 最近一轮有效 ARP 读取解析出的同 IP 多 MAC 冲突（task-017，联动告警与设备徽标）。 */
+  /** 最近一轮有效 ARP 读取解析出的同 IP 多 MAC 冲突（task-017，联动设备列表 ipConflict 徽标）。 */
   private lastArpConflicts: { ip: string; macs: string[] }[] | null = null;
   /** 持久化恢复的首次接入时间覆盖表（key = IP）：新建记录时优先采用，跨重启保留"真正第一次"。 */
   private firstSeenOverrides = new Map<string, number>();
   private tracker = new QualityTracker();
   private meter: BandwidthMeter;
-  private alarms: AlarmEngine;
   private dns: ReverseDnsCache;
   /** mDNS 自报类型提示（task-020）：ip → {name, kind}，phaseFingerprint 每轮刷新。 */
   private mdnsHints = new Map<string, MdnsDeviceHint>();
   /** task-023：WS-Discovery 摄像头自报（ip → ipc/nvr）。 */
   private wsdiscoveryHints = new Map<string, WsdCameraHint>();
-  /** task-023：SSDP 设备自报（ip → kind/osHint）。 */
+  /** task-023：SSDP 设备自报（ip → kind/osHint/name）。 */
   private ssdpHints = new Map<string, SsdpDeviceHint>();
+  /** task-027：HTTP 管理页指纹（ip → kind/osHint）。 */
+  private httpHints = new Map<string, HttpFingerprintHint>();
+  /** task-028：ONVIF 设备服务自报（ip → osHint），摄像头的 HTTP 通道补强。 */
+  private onvifHints = new Map<string, OnvifHint>();
+  /** HTTP 管理页探测轮转游标：候选多于一轮配额（6）时均匀覆盖。 */
+  private httpCursor = 0;
+  /** ONVIF 探测轮转游标（与 HTTP 指纹各用一套，避免互相挤占覆盖）。 */
+  private onvifCursor = 0;
   /**
    * 路由器通道提示（task-022 C-1）：DHCP 租约 hostname 回填。
    * 内存态不持久化；主进程在路由器状态推送回调里每轮重灌，未登录时为空数组（不猜）。
@@ -238,12 +246,11 @@ export class Scheduler {
   private warningLog = new WarningLog();
   private lastScanAt: number | null = null;
   private lastSnapshot: Snapshot | null = null;
-  private lastAlarmEval: AlarmEvaluation | null = null;
   private scanInFlight = false;
   private heartbeatInFlight = false;
   private qualityInFlight = false;
   private printersInFlight = false;
-  /** 首次 refreshPrinters 成功后置 true（见 buildSnapshot 的 evaluate 入参说明）。 */
+  /** 首次 refreshPrinters 成功后置 true。 */
   private printersCollected = false;
   private bandwidthInFlight = false;
   private autoScan: boolean;
@@ -251,7 +258,7 @@ export class Scheduler {
   /** 未知 IP 滚动探测游标（task-026）：在 cfg.hosts 上轮转，254 个地址 ≈ 4 轮心跳覆盖完 */
   private unknownCursor = 0;
   private running = false;
-  /** 持续 Ping 监控（task-025）：独立 5s 轮询，变迁直接进告警引擎 */
+  /** 持续 Ping 监控（task-025）：独立 5s 轮询，变迁直接推新快照 */
   private watches: WatchManager;
   /** 总带宽历史环（task-025，60 点；失败轮为 null 点，曲线断开呈现） */
   private bandwidthHistory: BandwidthPoint[] = [];
@@ -261,44 +268,18 @@ export class Scheduler {
   constructor(
     private readonly cfg: SchedulerConfig,
     private readonly hooks: SchedulerHooks = {},
-    alarmEngine?: AlarmEngine,
   ) {
     this.meter = new BandwidthMeter(cfg.prefix, cfg.selfIp);
-    // 首轮扫描只做种（不产生 DEVICE_NEW）；第二轮起的新 MAC 才产生并保持 active 至 ack / TTL
-    this.alarms = alarmEngine ?? new AlarmEngine(WINDOW.alarmHistory);
     this.dns = new ReverseDnsCache();
     this.autoScan = cfg.autoScanIntervalSec > 0;
-    // task-025：监控目标宕机/恢复变迁 → WATCH_DOWN 告警（外部注入通道）+ 立即推帧
+    // task-025：监控目标宕机/恢复变迁 → 立即推帧（WatchesView 状态实时刷新）
     this.watches = new WatchManager({
       intervalMs: WATCH.intervalMs,
       windowSize: WATCH.windowSize,
       pingTimeoutMs: WATCH.pingTimeoutMs,
-      onTransition: (down, target) => this.handleWatchTransition(down, target),
+      onTransition: () => this.emitSnapshotNow(),
       onError: (message) => this.replaceWarnings('system', [message]),
     });
-  }
-
-  /** 监控目标状态变迁 → 告警联动（task-025）。 */
-  private handleWatchTransition(down: boolean, target: WatchTarget): void {
-    const targetId = target.ip;
-    const name = target.note ?? target.ip;
-    if (down) {
-      const alarm = this.alarms.ingestExternal(
-        ALARM_CODES.WATCH_DOWN,
-        'critical',
-        'device',
-        targetId,
-        name,
-        `监控目标宕机：${name}`,
-        `IP ${target.ip} · 持续 Ping 连续无响应`,
-        Date.now(),
-      );
-      if (alarm) this.hooks.onAlarm?.(alarm);
-    } else {
-      const resolved = this.alarms.ingestResolve(ALARM_CODES.WATCH_DOWN, targetId, Date.now());
-      if (resolved) this.hooks.onAlarmResolved?.([resolved]);
-    }
-    this.emitSnapshotNow();
   }
 
   /** 引擎门面：监控目标增删（持久化由调用方负责落 store，这里只改运行态）。 */
@@ -322,10 +303,6 @@ export class Scheduler {
   /** 启动前恢复持久化目标列表。 */
   hydrateWatches(targets: WatchTarget[]): void {
     this.watches.hydrate(targets);
-  }
-
-  get alarmEngine(): AlarmEngine {
-    return this.alarms;
   }
 
   /** 引擎门面通道：把非周期任务来源的故障（如 store 落盘失败）写进快照 warnings 并推送。 */
@@ -449,8 +426,7 @@ export class Scheduler {
       } else if (sample.intervalMs > 0) {
         this.pushBandwidthPoint({ ts: sample.at, rxBps: sample.rxBps, txBps: sample.txBps });
       }
-      // 带宽采样不推进告警的"连续轮次"计数
-      this.emitSnapshot(false);
+      this.emitSnapshot();
     } catch (err) {
       this.replaceWarnings('bandwidth', [`带宽采样失败：${err instanceof Error ? err.message : String(err)}`]);
     } finally {
@@ -468,7 +444,7 @@ export class Scheduler {
    * 5s 心跳（task-026 实时化）：重读 ARP（85ms）+ 三集合合并探测——
    * 缺席确认（无 ARP 的在册记录优先重探）∪ 在线全量（不再轮转 32）∪ 未知 IP 滚动（≈20s 覆盖全网）。
    * ARP 里冒出新设备时早推一帧（<100ms 可见，不必等本轮 ping 完成）。
-   * 离线判定在此加速：连续 `ALARM_THRESHOLDS.offlineArpMisses` 轮「无 ARP 且 ping 失败」→ offline（≈20s）。
+   * 离线判定在此加速：连续 `HEARTBEAT_PROBE.offlineArpMisses` 轮「无 ARP 且 ping 失败」→ offline（≈20s）。
    */
   async heartbeat(): Promise<void> {
     // 实时监控关闭 = 暂停实时探测：心跳完全不跑（设备状态冻结，诚实呈现"暂停"）；
@@ -495,7 +471,7 @@ export class Scheduler {
       if (targets.length > 0) {
         const sweep = await pingSweep(targets, { concurrency: CONCURRENCY.pingSweep, timeoutMs: TIMEOUTS.ping });
         for (const [ip, result] of sweep.results) {
-          // 未知 IP 被滚动探测 ping 中：立即建册（新设备由此进入快照与 DEVICE_NEW 告警）
+          // 未知 IP 被滚动探测 ping 中：立即建册（新设备由此进入快照）
           const rec = result.alive ? this.ensureRecord(ip, Date.now()) : this.records.get(ip);
           if (!rec) continue;
           rec.pingAlive = result.alive;
@@ -629,7 +605,7 @@ export class Scheduler {
       });
       this.printers = result.printers;
       this.printerReachable = result.reachable;
-      // 首轮打印机采集完成：此后告警引擎可信任 printers 列表是"全量当前监控集"
+      // 首轮打印机采集完成
       this.printersCollected = true;
       // R-03②：collectPrinters 的 errors 以前被调用方丢弃，Get-Printer 失败在界面上就是"没有打印机"
       this.replaceWarnings('printers', result.errors);
@@ -795,7 +771,7 @@ export class Scheduler {
     ctx.probeTargets = Array.from(candidates).filter((ip) => {
       if (ctx.arp2Entries.has(ip) || ctx.alive.has(ip)) return true;
       const rec = this.records.get(ip);
-      return rec ? rec.openPorts.length > 0 && rec.arpMissStreak < ALARM_THRESHOLDS.offlineArpMisses : false;
+      return rec ? rec.openPorts.length > 0 && rec.arpMissStreak < HEARTBEAT_PROBE.offlineArpMisses : false;
     });
     ctx.timings.candidates = ctx.probeTargets.length;
   }
@@ -838,7 +814,7 @@ export class Scheduler {
     const budgetLeft = ctx.deadline - Date.now();
     if ((needHostname.length > 0 || ctx.probeTargets.length > 0) && budgetLeft > 0) {
       await Promise.race([
-        Promise.all([this.resolveHostnames(needHostname), this.augmentDeviceIdentity()]),
+        Promise.all([this.resolveHostnames(needHostname), this.augmentDeviceIdentity(ctx)]),
         new Promise<void>((resolve) => setTimeout(resolve, Math.max(300, budgetLeft))),
       ]);
     }
@@ -846,29 +822,80 @@ export class Scheduler {
   }
 
   /**
-   * 设备身份增强（task-020/023，全部为尽力而为的增强路径）：
-   *  ① mDNS 类型侦测（1s 窗口）：自报服务 → iot/mobile/printer/camera 提示；
-   *  ② WS-Discovery 摄像头自报（1.2s 窗口，task-023）：ONVIF Types → ipc/nvr；
-   *  ③ SSDP 设备自报（1.5s 窗口，task-023）：UPnP deviceType → router/ap/iot；
-   *  ④ NetBIOS 名采集（≤8 台/轮，轮转覆盖）：回填 hostname，进入既有主机名指纹管线。
-   * ①②③④ 四路并行（总耗时≈最长一路而非相加，保住 phaseFingerprint 1.6s 旅标）；
+   * 设备身份增强（task-020/023/027/028，全部为尽力而为的增强路径）：
+   *  ① mDNS 类型侦测（1s 窗口）：自报服务 → iot/mobile/tablet/printer/camera 提示；
+   *  ② WS-Discovery 摄像头自报（1.2s 窗口，task-023）：组播 + 本轮存活 IP 单播补探；
+   *  ③ SSDP 设备自报（1.5s 窗口，task-023）：UPnP deviceType → router/ap/camera/printer/iot；
+   *  ④ ONVIF 设备服务探测（task-028）：POST /onvif/device_service 拿自报厂商/型号；
+   *  ⑤ NetBIOS 名采集（≤16 台/轮，轮转覆盖）：回填 hostname，进入既有主机名指纹管线；
+   *  ⑥ HTTP 管理页指纹（task-027）：已探明 80/8080 开放的候选 ≤6 台/轮，GET / 抓
+   *     title/Server 头 → 厂商型号自报分类。
+   * ①~⑥ 并行（总耗时≈最长一路而非相加，保住 phaseFingerprint 预算）；
    * 任何一步失败静默跳过，绝不拖垮扫描。
    */
-  private async augmentDeviceIdentity(): Promise<void> {
-    // nbtstat 与三个侦测窗口并行（都只写 hostname/hints，互不依赖）：
-    // 总耗时 ≈ max(1.0, 1.2, 1.5, nbtstat) 而非相加，保住 phaseFingerprint ≤1.6s 旅标
-    const [mdnsHints, wsdHints, ssdpHints, _nbt] = await Promise.all([
+  private async augmentDeviceIdentity(ctx: ScanCtx): Promise<void> {
+    // WS-Discovery 单播补探：只打本轮 ICMP 存活的主机，每台 1 包，最多 32 台。
+    // 组播被交换机/AP 过滤时，这条路径是摄像头唯一还可能应答的通道。
+    const wsUnicast = ctx.probeTargets.slice(0, 32);
+    const [mdnsHints, wsdHints, ssdpHints, onvifHints, httpHints, _nbt] = await Promise.all([
       discoverMdnsDevices().catch(() => [] as MdnsDeviceHint[]),
-      discoverCamerasWsdiscovery().catch(() => [] as WsdCameraHint[]),
+      discoverCamerasWsdiscovery(undefined, wsUnicast).catch(() => [] as WsdCameraHint[]),
       discoverSsdpDevices().catch(() => [] as SsdpDeviceHint[]),
+      this.probeOnvifDevices().catch(() => [] as OnvifHint[]),
+      this.probeHttpFingerprints().catch(() => [] as HttpFingerprintHint[]),
       this.queryNetbiosNamesForCandidates().catch(() => undefined),
     ]);
     for (const hint of mdnsHints) this.mdnsHints.set(hint.ip, hint);
     for (const hint of wsdHints) this.wsdiscoveryHints.set(hint.ip, hint);
     for (const hint of ssdpHints) this.ssdpHints.set(hint.ip, hint);
+    for (const hint of onvifHints) this.onvifHints.set(hint.ip, hint);
+    for (const hint of httpHints) this.httpHints.set(hint.ip, hint);
   }
 
-  /** nbtstat 名采集（≤8 台/轮，轮转覆盖；失败静默）。独立方法便于与侦测窗口并行。 */
+  /**
+   * ONVIF 设备服务探测（task-028）：候选 = 已探明 80/8080/8899/8000 开放的记录，
+   * 轮转游标每轮最多 6 台。失败静默——增强路径，绝不拖垮扫描。
+   */
+  private async probeOnvifDevices(): Promise<OnvifHint[]> {
+    const candidates: OnvifProbeTarget[] = [];
+    for (const r of this.records.values()) {
+      const port = ONVIF_PORTS.find((p) => r.openPorts.includes(p));
+      if (port !== undefined) candidates.push({ ip: r.ip, port });
+    }
+    candidates.sort((a, b) => ipToNumber(a.ip) - ipToNumber(b.ip));
+    if (candidates.length === 0) return [];
+    const n = Math.min(ONVIF_MAX_TARGETS, candidates.length);
+    const slice: OnvifProbeTarget[] = [];
+    for (let i = 0; i < n; i += 1) {
+      slice.push(candidates[(this.onvifCursor + i) % candidates.length]);
+    }
+    this.onvifCursor = (this.onvifCursor + n) % candidates.length;
+    return discoverOnvifDevices(slice);
+  }
+
+  /**
+   * HTTP 管理页指纹探测（task-027）：候选 = 已探明 80/8080 开放的记录，
+   * 轮转游标每轮最多 6 台（discoverHttpFingerprints 内部同样有上限，双保险）。
+   * 失败静默——增强路径，绝不拖垮扫描。
+   */
+  private async probeHttpFingerprints(): Promise<HttpFingerprintHint[]> {
+    const candidates: { ip: string; port: 80 | 8080 }[] = [];
+    for (const r of this.records.values()) {
+      if (r.openPorts.includes(80)) candidates.push({ ip: r.ip, port: 80 });
+      else if (r.openPorts.includes(8080)) candidates.push({ ip: r.ip, port: 8080 });
+    }
+    candidates.sort((a, b) => ipToNumber(a.ip) - ipToNumber(b.ip));
+    if (candidates.length === 0) return [];
+    const n = Math.min(6, candidates.length);
+    const slice: { ip: string; port: 80 | 8080 }[] = [];
+    for (let i = 0; i < n; i += 1) {
+      slice.push(candidates[(this.httpCursor + i) % candidates.length]);
+    }
+    this.httpCursor = (this.httpCursor + n) % candidates.length;
+    return discoverHttpFingerprints(slice);
+  }
+
+  /** nbtstat 名采集（≤16 台/轮，轮转覆盖；失败静默）。独立方法便于与侦测窗口并行。 */
   private async queryNetbiosNamesForCandidates(): Promise<void> {
     try {
       const candidates = Array.from(this.records.values())
@@ -933,7 +960,7 @@ export class Scheduler {
    * 依据本轮观测刷新 `arpPresent` 与缺席计数（task-026：心跳与扫描轮**统一推进**缺席）。
    *
    * - 缺席计数两处调用均推进：心跳（5s）与扫描轮各计 1 轮，连续
-   *   `ALARM_THRESHOLDS.offlineArpMisses`（4）轮「无 ARP 且 ping 失败」→ offline ≈ 20s。
+   *   `HEARTBEAT_PROBE.offlineArpMisses`（4）轮「无 ARP 且 ping 失败」→ offline ≈ 20s。
    *   心跳只在 ARP 读取可用时调用本方法——缺席必须基于真实观测，读失败沿用上一轮视图不推进。
    * - `lastSeen` 只在本轮真的观测到（ARP 在位 / 本轮 ping 回包）时推进：
    *   陈旧的 `portResponded` 不得给设备续命（心跳侧对缺席设备另有显式失效逻辑）。
@@ -1039,6 +1066,8 @@ export class Scheduler {
     for (const rec of this.records.values()) {
       const isSelf = this.cfg.selfIp !== null && rec.ip === this.cfg.selfIp;
       const isGateway = this.cfg.gateway !== null && rec.ip === this.cfg.gateway;
+      // task-029：网关 MAC（同源 MAC 提示用），网关记录未就绪时为 null
+      const gatewayMac = this.cfg.gateway !== null ? this.records.get(this.cfg.gateway)?.mac ?? null : null;
       const quality = this.tracker.quality(rec.ip);
       // task-020：mDNS 自报类型（上轮 phaseFingerprint 采集）作为指纹输入；
       // mDNS 实例名（如"客厅的 Chromecast"）在无主机名时兜底显示名
@@ -1046,6 +1075,10 @@ export class Scheduler {
       // task-023：WS-Discovery / SSDP 自报身份（上轮 phaseFingerprint 采集）
       const wsdHint = this.wsdiscoveryHints.get(rec.ip) ?? null;
       const ssdpHint = this.ssdpHints.get(rec.ip) ?? null;
+      // task-027：HTTP 管理页指纹（上轮 phaseFingerprint 采集）
+      const httpHint = this.httpHints.get(rec.ip) ?? null;
+      // task-028：ONVIF 设备服务自报（上轮 phaseFingerprint 采集）
+      const onvifHint = this.onvifHints.get(rec.ip) ?? null;
       // task-022 C-1：设备自身 hostname 为空时用 DHCP 租约自报回填（单点回填，
       // 同时服务指纹管线与展示）。不覆盖 rDNS/mDNS 已有值，不 mutate 记录。
       const leaseHostname = rec.hostname === null ? this.leaseHostnameByMac(rec.mac) : null;
@@ -1060,11 +1093,17 @@ export class Scheduler {
         hostname: effectiveHostname,
         vendor,
         ttl: rec.ttl,
+        mac: rec.mac,
+        gatewayMac,
         isGateway,
         mdnsKind: mdnsHint?.kind ?? null,
+        mdnsOsHint: mdnsHint?.model ?? null,
         wsdiscoveryKind: wsdHint?.kind ?? null,
+        onvifKind: onvifHint ? 'camera' : null,
         ssdpKind: ssdpHint?.kind ?? null,
         ssdpOsHint: ssdpHint?.osHint ?? null,
+        httpKind: httpHint?.kind ?? null,
+        httpOsHint: httpHint?.osHint ?? null,
       });
       const state = resolveLinkState({
         isSelf,
@@ -1092,7 +1131,7 @@ export class Scheduler {
         rttHistory: this.tracker.history(rec.ip),
         isGateway,
         isSelf,
-        displayName: effectiveHostname ?? mdnsHint?.name ?? null,
+        displayName: effectiveHostname ?? mdnsHint?.name ?? ssdpHint?.name ?? null,
         ipConflict: conflictIps.has(rec.ip),
       });
     }
@@ -1125,36 +1164,10 @@ export class Scheduler {
 
   /**
    * 组装快照。
-   * @param evaluateAlarms false 时复用上一轮告警结论（带宽 2s 采样不推进"连续 2 轮"计数，
-   *   否则 poor 判定会被带宽 tick 加速成 4s 触发）
    */
-  buildSnapshot(evaluateAlarms = true): Snapshot {
+  buildSnapshot(): Snapshot {
     const now = Date.now();
     const realDevices = this.buildDevices();
-    let alarms: Alarm[];
-    if (evaluateAlarms || this.lastAlarmEval === null) {
-      const evaluation = this.alarms.evaluate({
-        devices: realDevices,
-        printers: this.printers,
-        printerReachable: this.printerReachable,
-        // task-017：最近一轮有效 ARP 的同 IP 多 MAC 冲突（null = 尚无有效读取，不新增不清理）
-        arpConflicts: this.lastArpConflicts,
-        // 告警引擎据此区分"启动早期空列表 tick"与"真实采集结果"：
-        // 只有后者才允许把消失打印机的活跃告警收尾
-        printersCollected: this.printersCollected,
-        now,
-      });
-      this.lastAlarmEval = evaluation;
-      for (const alarm of evaluation.created) this.hooks.onAlarm?.(alarm);
-      // task-025：本轮自动恢复的告警上抛（webhook resolved 触发点）
-      if (evaluation.resolved.length > 0) {
-        const resolvedAlarms = evaluation.alarms.filter((a) => evaluation.resolved.includes(a.id));
-        this.hooks.onAlarmResolved?.(resolvedAlarms);
-      }
-      alarms = evaluation.alarms;
-    } else {
-      alarms = this.lastAlarmEval.alarms;
-    }
 
     const composed = this.composeDevicesAndPrinters(realDevices, this.printers);
     const sample = this.meter.lastSample;
@@ -1174,7 +1187,6 @@ export class Scheduler {
       txBps: bandwidth?.txBps ?? null,
       // task-025：总带宽历史环（副本，防渲染层直接改引擎内存）
       bandwidthHistory: this.bandwidthHistory.map((p) => ({ ...p })),
-      alarmCounts: this.alarms.counts(),
       scan: this.progress,
       // lastScanAt / nextScanInMs / autoScanIntervalSec 在 task-026 后语义为"深度扫描"：
       // 端口/指纹/主机名采集仍靠全量扫描，活性判定已由 5s 心跳实时覆盖
@@ -1190,7 +1202,6 @@ export class Scheduler {
       dataSource: composed.dataSource,
       devices: composed.devices,
       printers: composed.printers,
-      alarms,
       system,
       // task-025：持续 Ping 监控状态（无目标时为空数组）
       watches: this.watches.status(),
@@ -1205,9 +1216,9 @@ export class Scheduler {
     return Math.max(0, this.lastScanAt + this.cfg.autoScanIntervalSec * 1000 - now);
   }
 
-  private emitSnapshot(evaluateAlarms = true): void {
+  private emitSnapshot(): void {
     try {
-      const snapshot = this.buildSnapshot(evaluateAlarms);
+      const snapshot = this.buildSnapshot();
       this.hooks.onSnapshot?.(snapshot);
       // 组装恢复正常 → 清掉上一次的组装失败告警
       this.replaceWarnings('system', []);
@@ -1259,40 +1270,6 @@ export class Scheduler {
     }));
 
     return { device, ports, connections, history };
-  }
-
-  ackAlarm(alarmId: string, ackBy?: string | null): boolean {
-    // ackBy 由主进程注入（task-015：确认人不可由渲染层伪造），透传给告警引擎
-    const ok = this.alarms.ack(alarmId, Date.now(), ackBy ?? null);
-    if (ok) this.emitSnapshot();
-    return ok;
-  }
-
-  /** 用户手动清除（task-021 语义 A）：透传给告警引擎，成功后立即推帧。 */
-  clearAlarm(alarmId: string, by: string): boolean {
-    const ok = this.alarms.clear(alarmId, by);
-    if (ok) this.emitSnapshot();
-    return ok;
-  }
-
-  /** 批量手动清除：返回成功条数；有任一成功即推帧。 */
-  clearAlarms(alarmIds: string[], by: string): number {
-    const cleared = this.alarms.clearMany(alarmIds, by);
-    if (cleared > 0) this.emitSnapshot();
-    return cleared;
-  }
-
-  get alarmEvaluation(): AlarmEvaluation | null {
-    return this.lastAlarmEval;
-  }
-
-  /** 供 store 持久化/恢复（别名、告警历史由上层管理）。 */
-  exportAlarmState(): { alarms: Alarm[]; knownDeviceKeys: string[] } {
-    return this.alarms.snapshotState();
-  }
-
-  hydrateAlarmState(state: { alarms?: Alarm[]; knownDeviceKeys?: string[] }): void {
-    this.alarms.hydrate(state);
   }
 
   /**

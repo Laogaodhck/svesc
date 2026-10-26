@@ -20,7 +20,6 @@ declare global {
         | 'printers'
         | 'printermanage'
         | 'settings'
-        | 'alarms'
         | 'router'
         | 'diagnostics'
         | 'terminal',

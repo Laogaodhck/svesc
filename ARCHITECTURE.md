@@ -10,7 +10,7 @@
 ```
 ┌──────────────────────────────────────────────────────────────────────────┐
 │ 渲染层 Renderer（React 19 + Vite 7）                      src/renderer/**  │
-│  Overview / Devices / Printers / Alarms / DeviceDetail 抽屉               │
+│  Overview / Devices / Printers / Watches / DeviceDetail 抽屉               │
 │  ▲ 只读 Snapshot，不发任何探测请求；订阅推送，2s/5s 增量重绘                 │
 └───────────────────────────────────┬──────────────────────────────────────┘
                                     │ contextBridge（src/main/preload.ts）
@@ -27,7 +27,7 @@
 │  discovery : subnet → arp → ping sweep → ports → oui → fingerprint        │
 │  network   : quality（冻结公式） / monitor（滑窗） / bandwidth（估算）        │
 │  printers  : snmp-ber → snmp-client → printer-mib / spooler → 三源合并       │
-│  orchestration : scheduler（分频+相位） / alarms（去重恢复） / store / simulator│
+│  orchestration : scheduler（分频+相位） / watch（持续监控） / store / simulator│
 └───────────────────────────────────┬──────────────────────────────────────┘
                                     │ child_process / net.Socket / dgram
 ┌───────────────────────────────────┴──────────────────────────────────────┐
@@ -56,8 +56,9 @@
 | `discovery/oui.ts` | OUI 前缀表（手写主表 + `oui-extended.ts` IEEE 官方数据生成表），未命中返回 `null` | 不按概率猜厂商；`isRandomizedMac` 识别本地管理位 MAC（随机化 Wi-Fi MAC 查不到厂商属预期） |
 | `discovery/oui-extended.ts` | `scripts/build-oui.mjs` 从 IEEE oui.txt 过滤白名单厂商生成（802 条/41 厂商，task-023） | 生成结果入库，原始 10MB 数据不入库；主表优先于扩充表 |
 | `discovery/wsdiscovery.ts` | ONVIF WS-Discovery（UDP 3702）摄像头自报发现：Probe → ProbeMatches Types → ipc/nvr（task-023） | 只认 Types 明确写摄像头类别的响应（Windows WSD/打印不猜）；异常静默 `[]` |
-| `discovery/ssdp-devices.ts` | SSDP `ssdp:all` M-SEARCH + 描述页 deviceType → router/ap/iot 自报发现（task-023） | MediaServer 等拿不准的不定 kind 只给 osHint；异常静默 `[]` |
-| `discovery/fingerprint.ts` | 端口优先的 `kind`/`osHint` 推断：打印机端口 → Windows 管理端口 → 网关（硬事实）→ 自报层（WS-D/SSDP/mDNS）→ 端口 → 主机名 → OUI → TTL 弱提示 | TTL 只作弱提示，绝不单独判 workstation/server；手机厂商 OUI 需"非网关+无管理端口"，osHint 明示推断来源 |
+| `discovery/ssdp-devices.ts` | SSDP `ssdp:all` M-SEARCH + 描述页 deviceType → router/ap/camera/printer/iot 自报发现（task-023/027）；friendlyName → displayName 候补（task-027） | MediaServer 等拿不准的不定 kind 只给 osHint；异常静默 `[]` |
+| `discovery/http-fingerprint.ts` | HTTP 管理页指纹（task-027）：对已探明 80/8080 开放的候选（≤6 台/轮轮转）GET `/`，title/Server 头厂商型号关键词分类 → printer/router/camera/server/iot | **恰好命中 1 类才定 kind**（≥2 类或 0 类不猜）；title 原文兜底 osHint；传输层注入；失败静默跳过 |
+| `discovery/fingerprint.ts` | 端口优先的 `kind`/`osHint` 推断：打印机端口 → Windows 管理端口 → 网关（硬事实）→ 自报层（WS-D/SSDP/mDNS/HTTP 管理页）→ 端口（含 8009 Chromecast/8554 RTSP/32400 Plex）→ 主机名（平板/电视/机顶盒/手机/PC 词根）→ OUI（手机/打印机/摄像头/NAS/IoT/电视/网络设备/PC 类别表）→ TTL 弱提示 | TTL 只作弱提示，绝不单独判 workstation/server；手机厂商 OUI 需"非网关+无管理端口"，PC 厂商 OUI 需"无管理端口"；电视厂商/PC 厂商 OUI 与 HTTP 自报的 osHint 均明示推断来源 |
 | `network/quality.ts` | **纯函数**质量评分（公式冻结） | 系数、取整时机不允许改；`samples < QUALITY_MIN_SAMPLES(8)` → `grade='unknown'`（score 保留），`>=8` 才出 85/70/50 分级 |
 | `network/monitor.ts` | 每设备滑窗（20 采样）+ RTT 历史（60 点） | 未响应只算丢包，不产生离线结论；数据源只有 `ping -n 4` 批量采样 |
 | `network/bandwidth.ts` | `netstat -e` 差分 + `netstat -ano` 连接归集 | 不与网卡计数器混算；无归集时 `attributable:false` |
@@ -69,16 +70,14 @@
 | `printers/print-ops.ts` | 打印操作（task-024）：任务取消/暂停/恢复（PrintJob cmdlet）、测试页（rundll32 printui.dll）、设默认（CIM SetDefaultPrinter） | 打印机名 `'`→`''` 转义 + 拒绝换行/反引号/双引号（≤220 字符）；jobId 强制正整数；printui 走 args 数组分离（MUI 铁律）；失败如实 `{ok:false,error}` 不吞错 |
 | `printers/printer-service.ts` | 三源合并 + **TCP 探活覆盖 state** + 耗材 provider 链（`snmp → ipp → unknown`，命中即短路） | `.213` 假在线必须被覆盖为 `offline`；网络不可达的打印机不查耗材（不为离线设备"猜"数据） |
 | `printers/mdns.ts` | `_ipp/_pdl-datastream` 组播发现（可选） | 任何异常静默返回 `[]` |
-| `alarms.ts` | 7 条规则、`(code,targetId)` 去重、自动恢复、历史上限 500 | 禁止为 ICMP 不可达告警；`DEVICE_NEW` 是事件型：保持 active 至 ack 或 `NEW_DEVICE_TTL_MS`(10min) 到期，**不参与"条件消失自动恢复"**；`NET_QUALITY` 需 `samples >= QUALITY_MIN_SAMPLES`（与 `computeQuality`/`isDegraded` 同源）；`ingestExternal/ingestResolve`（task-025）供外部模块注入告警，复用去重/冷静期/抑制窗口语义 |
 | `scheduler.ts` | 分频调度、4 相位扫描、质量采样、快照组装、状态判定 | `resolveLinkState` 是纯函数；**质量窗口只由 15s `ping -n 4` 填充**，扫描/心跳的存活 ping 不写入；带宽历史环（60 点，失败轮入 null 点）与 WatchManager 挂载于此（task-025） |
-| `soak.ts` | 长跑取证（真实 95s 采样 + 注入时钟的 DEVICE_NEW 生命周期检查） | 纯 Node，`npm run soak` 驱动 |
-| `store.ts` | JSON 持久化（别名/告警历史/设置/备注/标签/监控目标） | 目录注入；300ms debounce；损坏文件自动重建；`normalizeTags` 归一化（≤8 个/单个 ≤24 字符） |
-| `db/` | SqliteStore（better-sqlite3）与 JsonStore 同构；migrations 版本管理 | v2：`device_notes/device_tags/watch_targets`（task-025） |
-| `watch.ts` | 持续 Ping 监控（task-025）：`WatchManager` 每 5s ICMP 探测目标，环形窗口 60 点，宕机/恢复经 `ingestExternal/ingestResolve` 联动 AlarmEngine | 目标存 store（Json+Sqlite 同构）；`tickInFlight` 闸门防重入；宕机告警 WATCH_DOWN critical；无样本诚实 `unknown` |
+| `soak.ts` | 长跑取证（真实 95s 采样，质量/降级率稳定性统计） | 纯 Node，`npm run soak` 驱动 |
+| `store.ts` | JSON 持久化（别名/设置/备注/标签/监控目标/首次接入） | 目录注入；300ms debounce；损坏文件自动重建；`normalizeTags` 归一化（≤8 个/单个 ≤24 字符） |
+| `db/` | SqliteStore（better-sqlite3）与 JsonStore 同构；migrations 版本管理 | v2：`device_notes/device_tags/watch_targets`（task-025）；v3：DROP `alarms`/`known_device_keys`（告警功能移除） |
+| `watch.ts` | 持续 Ping 监控（task-025）：`WatchManager` 每 5s ICMP 探测目标，环形窗口 60 点 | 目标存 store（Json+Sqlite 同构）；`tickInFlight` 闸门防重入；宕机/恢复变迁经 `onTransition` 交 scheduler 即时重推快照；无样本诚实 `unknown` |
 | `wol.ts` | WOL 网络唤醒（task-025）：Magic Packet（6×0xFF+16×MAC，102 字节）UDP 广播 9/7 端口 | 只承诺"包已发出"；本机/网关/跨网段/未知 MAC/演示设备诚实拒绝 |
 | `diag/portscan.ts` | 自定义 TCP 端口扫描（task-025）：worker pool 并发 64，单次 ≤1024 端口 | `validateDiagTarget` 白名单校验；结果 `{ports,openPorts,durationMs}` |
-| `notify/webhook.ts` | 告警 Webhook（task-025）：`postWebhook` POST JSON，2xx 才算送达 | 仅 http/https；非 2xx 返回 status；绝不抛错，失败进 netlog |
-| `report-html.ts` | HTML 巡检报告（task-025）：自包含单文件（内联 CSS），设备/打印机/告警/降级四节 | `escapeHtml` 转义五字符；空数据占位「暂无」，不伪造内容 |
+| `report-html.ts` | HTML 巡检报告（task-025）：自包含单文件（内联 CSS），设备/打印机/降级三节 | `escapeHtml` 转义五字符；空数据占位「暂无」，不伪造内容 |
 | `simulator.ts` | mulberry32 种子生成的 12 设备 + 4 打印机 | 与真实数据凭 `sim-` 前缀区分 |
 
 ---
@@ -101,9 +100,6 @@
         │  ├─ bandwidth = BandwidthMeter.statFor(ip)    ← 估算 + attributable
         │  └─ state = resolveLinkState(6 级优先级)      ← ARP 主信号
         ▼
-告警引擎 evaluate(devices, printers, reachability)
-        │  去重键 (code,targetId) → created / resolved
-        ▼
 快照 Snapshot（+ 演示数据合并 + 别名覆盖）
         │  onSnapshot → ipc.pushSnapshot → webContents.send('lan:snapshot')
         ▼
@@ -121,7 +117,7 @@
 | 5 | ARP **连续 4 个观测轮**缺席且 ICMP 无响应（task-026：心跳 5s 与扫描轮**统一推进**缺席计数，≈20s 判离） | offline（**唯一**判离线路径） |
 | 6 | 有 ≥8 个质量样本（2 个 `ping -n 4` 批次）且（丢包 ≥20% 或延迟 >150ms） | degraded（覆盖 1-4） |
 
-本机实测：ARP 表 20-50 条，其中仅少数回 ICMP。若按"ping 不通即离线"，一次扫描会产出 20-30 条假离线 + 同样数量的噪音告警。这就是第 5 条存在的原因。
+本机实测：ARP 表 20-50 条，其中仅少数回 ICMP。若按"ping 不通即离线"，一次扫描会产出 20-30 条假离线。这就是第 5 条存在的原因。
 
 task-026 实时化补充：心跳每 5s 对**本轮真实观测**记账——ICMP 存活先全量归零、只有本轮回包才置 true（防陈旧证据粘滞）；缺席设备的陈旧端口响应证据同步失效（TCP 回包前提是 ARP 在位）；ARP 读失败的一轮不算观测、不推进缺席（缺席必须基于真实账本）。
 
@@ -252,10 +248,10 @@ printers 采集 4520ms（独立任务，不在扫描预算内；SNMP 命中即�
 | 无局域网 / 无法推导网段 | `detectSubnet()` 返回 null | `hosts=[]`，跳过扫描；`dataSource='demo'`（真实设备 0 台） |
 | `arp -a` 解析失败（编码/locale 变化） | 0 条目 + `parseWarning` | 回退 `Get-NetNeighbor`（JSON）；仍失败则本轮不判离线，并在 `snapshot.warnings` 留一条 `source='discovery'` |
 | 任一探测阶段失败（扫描轮异常 / `Get-Printer` 失败 / `netstat -e` 解析失败） | 命令返回空或抛错 | 写入 `snapshot.warnings`（上限 20 条、同源同文案去重、恢复即消失）；**不**把失败显示成 0 或"没有设备" |
-| ICMP 大面积被禁 | ping 存活率极低 | ARP + 端口作为在线主信号；`quality.grade='unknown'`，**不产生告警** |
+| ICMP 大面积被禁 | ping 存活率极低 | ARP + 端口作为在线主信号；`quality.grade='unknown'`，**不判离线** |
 | 无 spooler 权限 / 执行策略限制 | `Get-Printer` 失败 | 回退 `Get-CimInstance Win32_Printer` + `Win32_PrintJob`；再失败 `printers=[]` 且不影响设备面板 |
 | SNMP 161 被封 | 全部 timeout | 负缓存 5min；`consumables: []`，不重试风暴 |
-| 设备未启用 SNMP | `levelPct:null` | UI「设备不报告耗材」，不产生耗材告警（`null ≠ 耗尽`） |
+| 设备未启用 SNMP | `levelPct:null` | UI「设备不报告耗材」（`null ≠ 耗尽`） |
 | 反向 DNS 全失败 | `hostname:null` | 展示 IP；失败结果也缓存，不反复超时 |
 | GPU 进程崩溃（远程桌面/虚拟机） | Electron FATAL 退出 | 启动即 `disableHardwareAcceleration()` + `disable-gpu`（本机实测必须，否则应用起不来） |
 | 状态文件损坏 | JSON 解析异常 | 自动重建默认状态，不阻塞启动 |
@@ -275,15 +271,14 @@ printers 采集 4520ms（独立任务，不在扫描预算内；SNMP 命中即�
 3. **多网段**：`SubnetInfo` 已含 `iface/cidr/prefix/hosts`，把单条 `SchedulerConfig` 改成数组即可并行多网段；`DeviceRecord` 需加 `iface` 维度的 MAC 唯一性处理。
 4. **Prometheus 导出**：`Snapshot` 即指标快照，加一个 30s 周期把 `system/devices/printers` 映射成 `/metrics` 文本即可；`engine-check` 的 phase 计时可直接映射成扫描耗时指标。
 5. **历史时序**：目前每设备 60 点 RTT 在内存。若要长期留存，`store.ts` 可扩展为 append-only NDJSON（仍是零原生依赖）。
-6. **告警通知外发**：`alarms.ts` 的 `created` 输出已是事件流，接邮件/IM webhook 只是消费者问题，引擎无需改动。
 
 ## 9.5 打印管理页（新增需求）
 
-**导航**：独立"打印管理"视图（`PrinterManageView`），三项能力：手动添加打印机、别名、忽略。配置持久化于 `JsonStore.printers`（与别名/告警历史同一份 `svesc-state.json`）。
+**导航**：独立"打印管理"视图（`PrinterManageView`），三项能力：手动添加打印机、别名、忽略。配置持久化于 `JsonStore.printers`（与别名同一份 `svesc-state.json`）。
 
-- **手动添加**：IPv4 严格校验（`isValidIpv4`）+ 可选备注；同 IP 幂等更新备注。`collectPrinters` 按 IP 去重合并——自动发现已覆盖的 IP 不产生重复条目；**探活失败也保留并如实 offline**（`stateDetail` 标注"手动添加"），`reachable` 表同口径登记（否则告警引擎对手动打印机永远不评 PRINTER_OFFLINE）。
-- **忽略**：被忽略的自动发现条目在 `collectPrinters` 输出层过滤（不显示、不产生告警）；手动条目不受忽略影响（删除走 removeManualPrinter）。
-- **别名**：复用 `store.aliases`（key = printer id）；`applyAliases` 对 devices（displayName）与 printers（alias 字段）统一投影。别名只改显示名，告警 targetName 保持原队列名，便于对账。
+- **手动添加**：IPv4 严格校验（`isValidIpv4`）+ 可选备注；同 IP 幂等更新备注。`collectPrinters` 按 IP 去重合并——自动发现已覆盖的 IP 不产生重复条目；**探活失败也保留并如实 offline**（`stateDetail` 标注"手动添加"），`reachable` 表同口径登记（保证状态口径与自动发现一致）。
+- **忽略**：被忽略的自动发现条目在 `collectPrinters` 输出层过滤（不显示）；手动条目不受忽略影响（删除走 removeManualPrinter）。
+- **别名**：复用 `store.aliases`（key = printer id）；`applyAliases` 对 devices（displayName）与 printers（alias 字段）统一投影。别名只改显示名。
 - **刷新联动**：IPC 变更落盘后 `void scheduler.refreshPrinters()` 立即重采并推送快照。
 
 ## 9.6 打印操作通道（task-024）
@@ -368,3 +363,33 @@ printers 采集 4520ms（独立任务，不在扫描预算内；SNMP 命中即�
 - **autoScan 语义变更（UI 命名）**：「自动扫描」→「实时监控」：开 = 心跳 + 深度扫描全量运行；关 = 心跳早退 + 扫描停 → 设备状态冻结（TopBar/StatusBar/设置页/托盘菜单全链路文案更新，TopBar 新增脉冲 live-dot 与"实时监控中/已暂停"状态）。带宽/打印机/质量/持续 Ping 不受影响（R-04）。
 - **数据诚实边界不变**：状态判定仍以 ARP 在位为主信号，ICMP 超时绝不判离线；缺席计数只由真实观测推进；暂停即冻结、如实呈现"暂停"而非装作在线。
 - **验证**：全量 643 用例通过（R-06 离线判定改 4 轮口径 + 新增实时化用例：未知滚动发现/新设备早推帧/扫描早推帧/暂停冻结语义）；顺带修复测试基建两处真实网络泄漏——`netbios`（nbtstat spawn）与 IPP 耗材查询（`http.request`）此前未被 mock，其 `setTimeout` 超时守卫在 fake timers 下永不触发，设备一旦持有 9100/631 端口即真实连网挂死（scheduler-resilience 定向耗时 223s → 1.7s）；node+web 双 typecheck 通过；`src/main/engine` electron 引用恒 0。
+
+### 10.6 告警功能移除（2026-10-26）
+
+- **移除范围**：告警引擎（`engine/alarms.ts`，7 规则/去重/恢复/抑制）与全部下游——告警视图（AlarmsView）与侧边栏入口、总览活跃告警 KPI 与 timeline、桌面通知、托盘角标、Webhook 推送（`engine/notify/webhook.ts`）、告警持久化（JsonStore `alarms`/`knownDeviceKeys` 字段）、`ackAlarm/alarmsClear/webhookTest/alarm` 四条 IPC 通道、设置项 `notifyDesktop`/`notifyWebhookUrl`、HTML 报告告警节。
+- **保留并独立**：① 持续 Ping 监控（`watch.ts` 变迁改为 `onTransition → emitSnapshotNow` 即时重推快照，宕机在监控页以状态标示）；② 设备离线判定（缺席阈值迁至 `HEARTBEAT_PROBE.offlineArpMisses=4`，`resolveLinkState` 语义不变）；③ IP 冲突检测（`arp.ts` `collectArpConflicts` 纯函数 + `ipConflict` 徽标，独立于告警引擎）；④ warnings 降级信息；⑤ `firstSeen` 持久化；⑥ 打印机 `state='error'` 如实展示。
+- **迁移**：Sqlite `user_version` 追加 v3——DROP `alarms`/`known_device_keys` 及两个索引；旧版本回滚时按 v1 `CREATE TABLE IF NOT EXISTS` 重建空表，无数据损失。旧版 `svesc-state.json` 中的遗留告警字段导入时整体忽略。
+- **验证**：全量 557 用例通过；node+web 双 typecheck 通过；`src/main/engine` electron 引用恒 0；engine-check 全量断言 PASS；`src/` 仅 `db/migrations.ts` 保留 5 处告警字样（v1 建表供回滚 + v3 DROP 说明，有意保留）。
+
+### 10.7 task-027 设备识别引擎增强（2026-10-26）
+
+实测背景：engine-check 12 台设备 10 台 unknown——识别管线证据面不足。四个方向组合增强，全部为"设备自报或确定性推断"，不引入猜测性规则：
+
+- **自报数据深挖**：SSDP 描述页新增 DigitalSecurityCamera → camera、Printer → printer（UPnP 标准设备类，聚合优先级 camera > printer > ap > router > iot），并提取 friendlyName 作 displayName 第三候补（`hostname ?? mDNS 名 ?? SSDP friendlyName`）；mDNS 服务表 17 → 21（`_miio` 小米生态 → iot、`_ipp-tls/_uscan/_uscans` 扫描 → printer）。
+- **HTTP 管理页指纹（新模块 `discovery/http-fingerprint.ts`）**：对已探明 80/8080 开放的候选 ≤6 台/轮轮转 GET `/`，解析 title/Server 头。分类铁律：**关键词恰好命中 1 类才定 kind**（≥2 类同时命中即放弃），title 原文永远兜底 osHint；传输层可注入，失败静默。管线位置：自报层（2.8）与端口信号之间，title 原文兜底在 TTL 弱提示之前（7.5）。
+- **OUI 类型知识库**：fingerprint 新增两个确定性类别表——TV_VENDORS（TCL/海信/创维/酷开/长虹/Roku → iot）、PC_VENDORS（Intel/戴尔/联想/微软/宏碁/微星/技嘉/华擎/超微/富士通 → workstation，需"无管理端口"反证守卫）；Realtek 这类跨设备类芯片厂商刻意不进表。
+- **主机名词根扩充**：电视/机顶盒/游戏主机词根（androidtv/mitv/bravia/chromecast/xbox/shield/国产电视品牌…）判在手机词根之前（'androidtv' 含 'android'）；小米电视靠 `xiaomi-tv` 词根与手机 OUI 区分。
+- **端口/覆盖扩充**：PROBE_PORTS 16 → 22 端口（+548 AFP/1883 MQTT/5900 VNC/8009 Chromecast/8554 RTSP 备/32400 Plex；其中 8009→iot、8554→camera、32400→server 定 kind，其余只做端口标注）；NBTSTAT_MAX_HOSTS 8 → 16 且并发 4 → 16（并发=上限，单波完成，最坏墙钟 2s 不劣化，hostnames 2.6s 旅标实测 2093ms PASS）。
+- **scheduler 接线**：augmentDeviceIdentity 四路并行 → 五路（新增 HTTP 探针轮转游标 `httpCursor`）；buildDevices 指纹输入增加 `httpKind/httpOsHint`。
+- **验证**：全量 599 用例通过（+42）；node+web 双 typecheck 通过；engine-check 全 PASS（扫描 4850ms / hostnames 2093ms）；db-check 通过。
+
+### 10.8 task-028 五大生态识别扩充（2026-10-26）
+
+在 task-027 组合基础上按生态线继续扩充识别表，原则不变：只收无歧义厂商/词根，双料厂商靠反证守卫与词根顺序纠偏：
+
+- **手机生态**：PHONE_VENDORS 补 meizu/zte/nubia/hmd/nothing/fairphone/iqoo；主机名补 moto-/redmagic/nubia/iqoo。ZTE 双料风险（光猫）由"非网关 + 无管理端口"守卫承接（光猫几乎必开 80）。
+- **无线AP生态**：新增 AP_VENDORS 专业 AP 厂商表（ruckus/engenius/openmesh/wavlink/comfast/cambium → ap）；主机名补 unifi/wavlink/comfast/ruckus/engenius/edimax/airport；mDNS 新增 `_airport/_ubnt` → ap（mdnsKind 联合类型加 'ap'，聚合 rank=3.5，编译器强制同步）；NETWORK_VENDORS 补 linksys/mercury/netcore/netis/edimax/belkin/cudy/gl.inet/jcg。Meraki 刻意不进表（MS 交换机/MX 路由器同名）；UniFi 交换机名（sw+数字）由更早的 switch 词根接住。
+- **监控摄像头生态**：CAMERA_VENDORS 补 foscam/reolink/amcrest/vivotek/lorex/swann/hanwha/pelco/avigilon；主机名补对应品牌词 + `\bv380\b`；PROBE_PORTS 新增 34567（雄迈/大华系 DVR）、9527（雄迈系 Web）→ camera；HTTP 指纹补 dvr/foscam/reolink/amcrest/vivotek/hanwha/pelco。
+- **电脑主板生态**：PC 整机系列词根入主机名通道（ideapad/thinkbook/legion/latitude/vostro/inspiron/alienware/elitebook/probook/pavilion/spectre/vivobook/zenbook/clevo + \bomen|tuf|yoga\b + \bnuc(?:[-_ ]?\d+)?\b）。顺带修复：server 词根 `dc\d|ad\d` 改 `\bdc[-_]?\d|\bad[-_]?\d`（'IDEAPAD5' 原会误中 `ad5` 判 server）。
+- **路由器生态**：主机名补 miwifi/hiwifi/newifi/gl-inet/cudy/linksys/asuswrt/padavan + `\brt-(?:ax|ac|n|be)\d`（华硕 RT-AX88U 式命名）；HTTP 指纹补 asuswrt/padavan/gl-inet/cudy/linksys，IoT 补 tuya。
+- **验证**：全量 615 用例通过（+16）；node+web 双 typecheck 通过；engine-check 全 PASS。
