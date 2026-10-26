@@ -30,8 +30,8 @@ export const CH = {
   routerRefresh: 'router:refresh',
   routerLogin: 'router:login',
   routerLogout: 'router:logout',
-  routerReboot: 'router:reboot',
   routerOpenAdmin: 'router:openAdmin',
+  routerCheckWebSession: 'router:checkWebSession',
 
   // 打印管理
   printerGetManageConfig: 'printer:getManageConfig',

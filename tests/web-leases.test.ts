@@ -9,6 +9,7 @@ import {
   fetchWebLeases,
   parseLeasesFromHtml,
   WEB_LEASE_CANDIDATES,
+  WEB_LEASE_MAX_CANDIDATES,
 } from '../src/main/engine/router/web-leases';
 import { matchFingerprint } from '../src/main/engine/router/detect';
 
@@ -85,7 +86,7 @@ describe('fetchWebLeases（抓取循环，注入式传输）', () => {
     expect(calls[0]?.url).toBe('http://192.168.0.1/userRpm/DhcpSeartListRpm.htm');
   });
 
-  it('候选按品牌过滤：brand=xiaomi 时不尝试 tplink 专属页，只有通用候选', async () => {
+  it('候选按品牌过滤：brand=xiaomi 时只试小米专属页 + 通用候选（不试 tplink）', async () => {
     const tried: string[] = [];
     const res = await fetchWebLeases({
       gateway: '192.168.0.1',
@@ -97,10 +98,13 @@ describe('fetchWebLeases（抓取循环，注入式传输）', () => {
       },
     });
     expect(res.ok).toBe(false);
-    // 仅 /dhcp.htm 通用候选；失败后有一次 Host 覆写重试（同 URL 两次调用）
-    expect(tried).toHaveLength(2);
-    expect(tried[0]).toBe('http://192.168.0.1/dhcp.htm');
-    expect(tried[1]).toBe('http://192.168.0.1/dhcp.htm');
+    // task-032 候选扩充后：小米专属 1 条 + 通用 3 条 = 4 候选，每条失败含一次 Host 覆写重试
+    expect(tried).toHaveLength(8);
+    expect(tried[0]).toBe('http://192.168.0.1/cgi-bin/luci/admin/status/overview');
+    expect(tried).toContain('http://192.168.0.1/dhcp.htm');
+    expect(tried.every((u) => !u.includes('userRpm'))).toBe(true);
+    // note 截断：只列前 3 条 + 总数
+    expect((res.note ?? '').match(/等 4 个候选页/)).toBeTruthy();
   });
 
   it('前序候选失败 → 逐个尝试；Host 覆写重试用于防重绑定 302', async () => {
@@ -146,8 +150,9 @@ describe('fetchWebLeases（抓取循环，注入式传输）', () => {
 });
 
 describe('候选清单与品牌识别', () => {
-  it('候选清单 ≤5 条（轮询预算约束）且 path 均以 / 开头', () => {
-    expect(WEB_LEASE_CANDIDATES.length).toBeLessThanOrEqual(5);
+  it('候选清单总量受控且单次抓取有上限（轮询预算约束）、path 均以 / 开头', () => {
+    expect(WEB_LEASE_CANDIDATES.length).toBeLessThanOrEqual(20);
+    expect(WEB_LEASE_MAX_CANDIDATES).toBeLessThanOrEqual(6);
     for (const c of WEB_LEASE_CANDIDATES) expect(c.path.startsWith('/')).toBe(true);
   });
 

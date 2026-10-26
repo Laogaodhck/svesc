@@ -8,7 +8,6 @@
 import { ROUTER } from '../../../shared/constants';
 import type {
   DhcpLease,
-  RouterActionStatus,
   RouterBrand,
   RouterCapabilities,
   RouterIdentity,
@@ -25,7 +24,7 @@ import {
   parseIwinfoInfo,
   parseWirelessDevices,
 } from './openwrt';
-import { ssdpDiscover, upnpQuery, upnpReboot, resolveControlUrl, parseDeviceDescription } from './upnp';
+import { ssdpDiscover, upnpQuery, resolveControlUrl, parseDeviceDescription } from './upnp';
 import { fetchWebLeases } from './web-leases';
 import { httpRequest } from './httpx';
 
@@ -252,8 +251,13 @@ export class RouterManager {
       session: { loggedIn: false, user: null, error: null, kind: null, invalidatedAt: null },
       dhcpLeases: [],
       wirelessClients: [],
+      // 审查 R-2：wirelessStatus 与 systemBoard 同属 ubus 会话数据，登出必须一并清空
+      //（此前遗漏——导出报告携带 routerStatus，会把登出前的旧无线状态带走）
+      wirelessStatus: null,
       systemBoard: null,
     };
+    // 管理页租约实验通道状态同步归零：登出即清账，下次登录从满预算重新开始
+    this.webLeaseFailures = 0;
   }
 
   /**
@@ -264,6 +268,12 @@ export class RouterManager {
   markWebSession(loggedIn: boolean): void {
     if (loggedIn) {
       this.webSessionActive = true;
+      // 新会话建立 → 实验通道失败计数清零（审查 R-1：通道连续失败 ≥10 次会永久停用，
+      // 用户重新登录是一次全新的会话，必须重新获得抓取预算，否则重登也无法复活通道）
+      this.webLeaseFailures = 0;
+      // ubus 会话在时不降级 kind（数据通道可用性 ubus > web，与 doRefresh 的合成优先级一致）；
+      // 只翻转 webSessionActive 让实验通道可用，status 交由下一轮 doRefresh 合成
+      if (this.ubus !== null && this.ubus.loggedIn) return;
       this.status = {
         ...this.status,
         session: { ...this.status.session, loggedIn: true, user: null, error: null, kind: 'web' },
@@ -282,21 +292,6 @@ export class RouterManager {
   /** 管理页最终可达 URL（供主进程内置浏览器打开）；尚未探测到为 null。 */
   getAdminUrl(): string | null {
     return this.adminUrl;
-  }
-
-  /** 重启路由器：UPnP Reboot 或 OpenWrt system reboot，两路都不可用则 unsupported。 */
-  async reboot(): Promise<{ status: RouterActionStatus; error: string | null }> {
-    if (this.ubus && this.ubus.loggedIn) {
-      const res = await this.ubus.reboot();
-      if (res.ok) return { status: 'ok', error: null };
-      return { status: 'failed', error: res.error };
-    }
-    if (this.controlUrl) {
-      const res = await upnpReboot(this.controlUrl);
-      if (res.ok) return { status: 'ok', error: null };
-      return { status: 'failed', error: res.error };
-    }
-    return { status: 'unsupported', error: '当前路由器既没有 OpenWrt 会话也没有 UPnP controlURL，无法远程重启' };
   }
 
   /** 全量刷新：能力探测（限频）→ 按能力取数。并发调用自动合并。 */
@@ -448,20 +443,25 @@ export class RouterManager {
       }
     } else if (identity.brand === 'openwrt') {
       notes.push('检测到 OpenWrt，登录后可查看 DHCP 租约与无线客户端');
-    } else if (this.webSessionActive && this.webLeaseProvider !== null && this.webLeaseFailures < 10) {
-      // —— 管理页租约实验通道（task-030）：内置浏览器登录后，用分区 Cookie 抓
-      //     候选租约页并做品牌无关解析。仅 web 会话时尝试（ubus 优先级更高）；
-      //     连续失败 ≥10 次后停用（Cookie 失效或固件页型不在候选清单，空打无益）。
-      const cookie = await this.webLeaseProvider().catch(() => null);
-      if (cookie) {
-        const res = await fetchWebLeases({ gateway: gw, cookie, brand: identity.brand });
-        if (res.ok && res.leases.length > 0) {
-          dhcpLeases = res.leases;
-          this.webLeaseFailures = 0;
-        } else {
-          this.webLeaseFailures += 1;
+    } else if (this.webSessionActive && this.webLeaseProvider !== null) {
+      if (this.webLeaseFailures >= 10) {
+        // 审查 R-3：停用必须可感知——静默跳过会让 UI 显示"已登录"却没有任何租约来源说明
+        notes.push('管理页租约实验通道已停用（连续 10 次未抓到租约；重新在内嵌管理页登录可重置）');
+      } else {
+        // —— 管理页租约实验通道（task-030）：内置浏览器登录后，用分区 Cookie 抓
+        //     候选租约页并做品牌无关解析。仅 web 会话时尝试（ubus 优先级更高）；
+        //     连续失败 ≥10 次后停用（Cookie 失效或固件页型不在候选清单，空打无益）。
+        const cookie = await this.webLeaseProvider().catch(() => null);
+        if (cookie) {
+          const res = await fetchWebLeases({ gateway: gw, cookie, brand: identity.brand });
+          if (res.ok && res.leases.length > 0) {
+            dhcpLeases = res.leases;
+            this.webLeaseFailures = 0;
+          } else {
+            this.webLeaseFailures += 1;
+          }
+          if (res.note !== null) notes.push(res.note);
         }
-        if (res.note !== null) notes.push(res.note);
       }
     }
 

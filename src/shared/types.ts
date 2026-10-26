@@ -411,9 +411,13 @@ export interface LanApi {
     password: string,
   ): Promise<{ ok: boolean; error: string | null; persisted: boolean; persistError: string | null }>;
   routerLogout(): Promise<{ ok: boolean }>;
-  routerReboot(): Promise<{ status: RouterActionStatus; error: string | null }>;
   /** 打开内置浏览器窗口访问路由器管理页，用户在真实页面上完成登录 */
-  routerOpenAdmin(): Promise<{ ok: boolean; error: string | null; url: string | null }>;
+  /**
+   * 检测路由器管理页会话（task-032）：主进程读 persist:router-admin 分区的会话
+   * Cookie，命中即 router.markWebSession(true)。页面内嵌 webview（不再弹窗）在
+   * dom-ready / did-navigate 后调用。
+   */
+  routerCheckWebSession(): Promise<{ session: boolean }>;
   // —— 打印管理 ——
   printerGetManageConfig(): Promise<PrinterManageConfig>;
   printerAddManual(ip: string, note: string | null): Promise<{ ok: boolean; error: string | null }>;
@@ -474,6 +478,14 @@ export type RouterBrand =
   | 'asus'
   | 'huawei'
   | 'netgear'
+  | 'tenda'
+  | 'zte'
+  | 'h3c'
+  | 'ruijie'
+  | 'mercury'
+  | 'linksys'
+  | 'dlink'
+  | 'glinet'
   | 'generic'
   | null;
 
@@ -515,7 +527,6 @@ export interface WirelessClient {
   connectedForSec: number | null;
 }
 
-export type RouterActionStatus = 'ok' | 'unsupported' | 'auth-required' | 'failed';
 
 /**
  * OpenWrt 无线射频状态（task-024，iwinfo）。

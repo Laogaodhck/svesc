@@ -23,7 +23,7 @@ import { scanPortRange } from './engine/diag/portscan';
 import { remoteOpen } from './remote-ops';
 import { terminalRun } from './terminal';
 import { clearCredentials, saveCredentials } from './router-store';
-import { clearAdminCookies, openPrinterAdminWindow, openRouterAdminWindow } from './router-browser';
+import { checkRouterWebSession, clearAdminCookies, openPrinterAdminWindow } from './router-browser';
 
 let target: BrowserWindow | null = null;
 
@@ -34,6 +34,20 @@ function send(channel: string, payload: unknown): void {
   } catch {
     /* 窗口正在销毁 */
   }
+}
+
+/**
+ * 更新推送目标（审查 R-6，联动修复）：主窗口销毁后重建（activate 恢复路径）时，
+ * registerIpc 不能重跑（ipcMain.handle 重复注册会抛错），推送目标必须单独换绑——
+ * 否则 send() 对着已销毁窗口静默丢弃，新窗口永远收不到快照。
+ */
+export function setPushTarget(win: BrowserWindow): void {
+  target = win;
+}
+
+/** 窗口关闭时解绑推送目标（仅当关闭的正是当前目标）。 */
+export function clearPushTarget(win: BrowserWindow): void {
+  if (target === win) target = null;
 }
 
 export function registerIpc(win: BrowserWindow, engine: Engine, router: RouterManager): void {
@@ -99,6 +113,9 @@ export function registerIpc(win: BrowserWindow, engine: Engine, router: RouterMa
   ipcMain.handle(CH.routerRefresh, async (): Promise<RouterStatus> => router.refresh());
   ipcMain.handle(CH.routerLogin, async (_event, user: string, password: string) => {
     const res = await router.login(String(user), String(password));
+    // 审查 R-7（状态同步）：login() 内部的 refresh 是异步的，轮询推送最长滞后 10s——
+    // 登录/登出后立即推一帧，UI 即时反馈会话变化，不等下一轮轮询
+    pushRouterStatus(router.getStatus());
     if (res.ok) {
       // task-022 B-1：记住密码开关关闭 → 不落盘（也不清除——清理由 settingsUpdate 负责），
       // 渲染层如实提示"凭据未保存"的原因
@@ -115,13 +132,15 @@ export function registerIpc(win: BrowserWindow, engine: Engine, router: RouterMa
     router.logout();
     clearCredentials();
     await clearAdminCookies();
+    // 审查 R-7：登出后立即推帧——渲染层马上回到"未登录"，不等下一轮 10s 轮询
+    pushRouterStatus(router.getStatus());
     return { ok: true };
   });
-  ipcMain.handle(CH.routerReboot, async () => router.reboot());
-  // 内置浏览器登录：主进程开独立窗口加载管理页（探测到的落点 URL 优先），
-  // 登录成功由 Cookie 监视器回调 router.markWebSession(true)。
-  ipcMain.handle(CH.routerOpenAdmin, async () =>
-    openRouterAdminWindow(router, router.getAdminUrl(), engine.getGatewayIp()),
+  // 内置浏览器登录（task-032 重构）：管理页以 <webview> 内嵌在路由器页面（不再弹窗），
+  // 挂 persist:router-admin 分区；渲染层在 dom-ready / did-navigate 后调本通道，
+  // 主进程读分区会话 Cookie 命中即 markWebSession(true)。
+  ipcMain.handle(CH.routerCheckWebSession, () =>
+    checkRouterWebSession(router, engine.getGatewayIp()),
   );
 
   // —— 打印管理通道 ——

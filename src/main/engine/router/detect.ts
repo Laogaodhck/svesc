@@ -18,10 +18,19 @@ export const FINGERPRINTS: readonly FingerprintRule[] = [
   // 型号（"TL-7DR7290"）不含 "tp-link" 字样，靠 proName 变量 / dynaform 资源路径 /
   // tplogin.cn 本地域名认出；hint 取 <title> 即型号
   { brand: 'tplink', keywords: ['tp-link', 'tplink', 'tplogin', 'proname', 'dynaform'] },
-  { brand: 'xiaomi', keywords: ['miwifi', 'xiaomi', '小米路由'] },
+  { brand: 'xiaomi', keywords: ['miwifi', 'xiaomi', '小米路由', 'xiaoqiang'] },
   { brand: 'asus', keywords: ['asus', 'asusrouter'] },
-  { brand: 'huawei', keywords: ['huawei', 'hg8145', 'hg5', 'tc7102'] },
+  { brand: 'huawei', keywords: ['huawei', 'hg8145', 'hg5', 'tc7102', 'hilink'] },
   { brand: 'netgear', keywords: ['netgear'] },
+  // task-032：市面常见品牌扩充（管理页 title/Server 头自报形态）
+  { brand: 'tenda', keywords: ['tenda'] },
+  { brand: 'zte', keywords: ['zte', 'zxeco', '中兴'] },
+  { brand: 'h3c', keywords: ['h3c', 'imscloud'] },
+  { brand: 'ruijie', keywords: ['ruijie', '锐捷'] },
+  { brand: 'mercury', keywords: ['mercury', '水星'] },
+  { brand: 'linksys', keywords: ['linksys', 'linksyssmartwifi'] },
+  { brand: 'dlink', keywords: ['d-link', 'dlink'] },
+  { brand: 'glinet', keywords: ['gl-inet', 'glinet'] },
 ] as const;
 
 /** 指纹匹配（纯函数）：Server 头 + <title> + 正文前 8KB。未命中返回 null（不猜 generic）。 */

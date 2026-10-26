@@ -270,11 +270,6 @@ export class UbusClient {
     return res.ok ? parseWirelessDevices(res.payload) : [];
   }
 
-  async reboot(): Promise<{ ok: boolean; error: string | null }> {
-    const res = await this.call('system', 'reboot');
-    return res.ok ? { ok: true, error: null } : { ok: false, error: res.error };
-  }
-
   /** 底层 JSON-RPC：请求/响应/错误码统一收口。 */
   private async raw(params: unknown[]): Promise<UbusCallResult> {
     const body = buildRpcRequest(params, this.rpcId++);

@@ -182,8 +182,11 @@ describe('G. 主机名 / 厂商 / 网关', () => {
     ).toBe('router');
   });
 
-  it('没有任何信号时应返回 unknown（不猜）', () => {
-    expect(inferFingerprint({ ...base, openPorts: [] })).toEqual({ osHint: null, kind: 'unknown' });
+  it('没有任何信号时应返回 unknown（不猜，且说明缺哪些证据）', () => {
+    expect(inferFingerprint({ ...base, openPorts: [] })).toEqual({
+      osHint: '无证据可判（无开放端口、无主机名、OUI 不可判）',
+      kind: 'unknown',
+    });
   });
 });
 
@@ -226,10 +229,10 @@ describe('G2. 监控摄像识别（task-019）', () => {
 });
 
 describe('G3. 移动端与 Apple（task-019）', () => {
-  it('鸿蒙/小米生态主机名应判 mobile', () => {
+  it('鸿蒙/小米生态主机名应判 mobile（MiBox 是盒子归 iot，task-034 修正）', () => {
     expect(inferFingerprint({ ...base, openPorts: [], hostname: 'HONOR-Phone' }).kind).toBe('mobile');
     expect(inferFingerprint({ ...base, openPorts: [], hostname: 'xiaomi-14-ultra' }).kind).toBe('mobile');
-    expect(inferFingerprint({ ...base, openPorts: [], hostname: 'MIBOX4-living' }).kind).toBe('mobile');
+    expect(inferFingerprint({ ...base, openPorts: [], hostname: 'MIBOX4-living' }).kind).toBe('iot');
   });
 
   it('Apple OUI 且主机名不可判：kind 保持 unknown 但给出可读提示（不猜具体类型）', () => {
@@ -294,7 +297,7 @@ describe('G7. 手机主机名词根扩充（task-021 F3）', () => {
 
   it('误伤面反例：sm-office 不命中 sm-[a-z]\\d{3}（无数字的 sm- 词不得泛匹配）', () => {
     expect(inferFingerprint({ ...base, openPorts: [], hostname: 'sm-office' })).toEqual({
-      osHint: null,
+      osHint: '无证据可判（无开放端口、OUI 不可判）',
       kind: 'unknown',
     });
   });
@@ -388,8 +391,8 @@ describe('G10. task-027 电视/机顶盒主机名词根', () => {
     expect(inferFingerprint({ ...base, openPorts: [], hostname: 'xiaomi-tv-room' }).kind).toBe('iot');
   });
 
-  it('误伤面反例：mibox 词根保持既有判定（G3 锁定回归）', () => {
-    expect(inferFingerprint({ ...base, openPorts: [], hostname: 'MIBOX4-living' }).kind).toBe('mobile');
+  it('mibox 词根归 iot（task-034：小米盒子是影音设备，自 mobile 词根移出）', () => {
+    expect(inferFingerprint({ ...base, openPorts: [], hostname: 'MIBOX4-living' }).kind).toBe('iot');
   });
 
   it('误伤面反例：普通 PC 名不受电视词根影响', () => {
@@ -682,5 +685,55 @@ describe('G19. task-031 类型识别强化', () => {
     const fp = inferFingerprint({ ...base, openPorts: [], vendor: 'Realtek Semiconductor Corp.' });
     expect(fp.kind).toBe('unknown');
     expect(fp.osHint).toContain('Realtek');
+  });
+});
+
+// —— task-034：设备类型甄别增强（主机名/型号证据链） ——
+
+describe('G20. task-034 主机名/型号类型甄别', () => {
+  it('小米生态影音设备归 iot 不归 mobile（mibox/xiaoai 自 mobile 词根移出）', () => {
+    expect(inferFingerprint({ ...base, openPorts: [], hostname: 'MiBox-客厅' }).kind).toBe('iot');
+    expect(inferFingerprint({ ...base, openPorts: [], hostname: 'xiaoai-speaker' }).kind).toBe('iot');
+  });
+
+  it('平板词根扩充：三星 Galaxy Tab / 联想 TB-3xx / 品牌 Pad', () => {
+    for (const h of ['galaxy-tab-s9', 'Lenovo-TB-371FC', 'OPPO-Pad-2', 'redmi-pad-se']) {
+      const fp = inferFingerprint({ ...base, openPorts: [], hostname: h });
+      expect(fp.kind, h).toBe('tablet');
+    }
+  });
+
+  it('监控词根扩充：DVR/CCTV/ipcam/小米摄像机主机名 → camera', () => {
+    for (const h of ['DVR-客厅', 'cctv-backyard', 'ipcam-01', 'xiaobai-cam', 'chuangmi-cam-1080']) {
+      const fp = inferFingerprint({ ...base, openPorts: [], hostname: h });
+      expect(fp.kind, h).toBe('camera');
+    }
+  });
+
+  it('智能家居词根：米家/扫地机/涂鸦/ yeelink 主机名 → iot', () => {
+    for (const h of ['mijia-sensor', 'roborock-s8', 'roomba-j7', 'yeelink-bulb', 'tuya-plug']) {
+      const fp = inferFingerprint({ ...base, openPorts: [], hostname: h });
+      expect(fp.kind, h).toBe('iot');
+    }
+  });
+
+  it('手机词根补强：poco / xperia → mobile', () => {
+    expect(inferFingerprint({ ...base, openPorts: [], hostname: 'POCO-F5' }).kind).toBe('mobile');
+    expect(inferFingerprint({ ...base, openPorts: [], hostname: 'XQ-CT72' }).kind).toBe('unknown'); // 型号无词根不猜
+    expect(inferFingerprint({ ...base, openPorts: [], hostname: 'sony-xperia-1' }).kind).toBe('mobile');
+  });
+
+  it('网络终端：mesh 节点 → ap；ONU/ONT/光猫 → router', () => {
+    expect(inferFingerprint({ ...base, openPorts: [], hostname: 'mesh-node-2f' }).kind).toBe('ap');
+    expect(inferFingerprint({ ...base, openPorts: [], hostname: 'ONU-telecom' }).kind).toBe('router');
+    expect(inferFingerprint({ ...base, openPorts: [], hostname: '客厅光猫' }).kind).toBe('router');
+  });
+
+  it('最终 unknown 兜底必带原因（无端口/无主机名/OUI 不可判逐项列出）', () => {
+    const fp = inferFingerprint({ ...base, openPorts: [], hostname: null, vendor: null, ttl: null });
+    expect(fp.kind).toBe('unknown');
+    expect(fp.osHint).toBe('无证据可判（无开放端口、无主机名、OUI 不可判）');
+    const fp2 = inferFingerprint({ ...base, openPorts: [8888], hostname: null, vendor: null, ttl: 64 });
+    expect(fp2.osHint).toBe('无证据可判（无主机名、OUI 不可判）');
   });
 });

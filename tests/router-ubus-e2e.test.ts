@@ -177,10 +177,6 @@ const server = http.createServer((req, res) => {
       reply({ result: [0, WIFI_PAYLOAD] });
       return;
     }
-    if (object === 'system' && method === 'reboot') {
-      reply({ result: [0, {}] });
-      return;
-    }
     deny(-32000, 'Method not found');
   });
 });

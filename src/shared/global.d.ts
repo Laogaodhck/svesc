@@ -4,6 +4,20 @@
  */
 import type { LanApi } from './types';
 
+/** task-032：Electron <webview> 标签的 JSX 声明（React 19 类型体系下挂 react 模块）。 */
+declare module 'react' {
+  namespace JSX {
+    interface IntrinsicElements {
+      webview: React.DetailedHTMLProps<React.HTMLAttributes<HTMLElement>, HTMLElement> & {
+        src?: string;
+        partition?: string;
+        allowpopups?: boolean | 'true' | 'false';
+        useragent?: string;
+      };
+    }
+  }
+}
+
 declare global {
   interface Window {
     lanApi: LanApi;

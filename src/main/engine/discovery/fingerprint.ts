@@ -298,26 +298,33 @@ const NETWORK_VENDORS = [
 const AP_VENDORS = ['ruckus', 'engenius', 'openmesh', 'wavlink', 'comfast', 'cambium'];
 
 
-const RE_MOBILE_HOST = /iphone|ipad|android|redmi|galaxy|pixel|mi-?\d|honor|oppo|vivo|harmony|mibox|xiaoai|oneplus|realme|nokia|zenfone|huawei|sm-[a-z]\d{3}|moto[-_ ]|meizu|redmagic|nubia|iqoo/i;
+const RE_MOBILE_HOST = /iphone|android|redmi|poco|galaxy|pixel|mi-?\d|honor|oppo|vivo|harmony|oneplus|realme|nokia|zenfone|huawei|sm-[a-z]\d{3}|xperia|sony[-_ ]?xperia|moto[-_ ]|meizu|redmagic|nubia|iqoo/i;
 
-/** 监控主机名特征：品牌名 + 通用命名约定（cam-/ipc-/nvr）。task-023 加 consumer 品牌；task-028 补 foscam/reolink/amcrest/vivotek/hanwha/swann/lorex/v380。 */
-const RE_CAMERA_HOST = /hikvision|dahua|uniview|ezviz|imou|tpipc|foscam|reolink|amcrest|vivotek|hanwha|swann|lorex|\bv380\b|\bcam(?:era)?[-_]|[-_]cam\b|\bipc[-_]|\bnvr[-_]|[-_]nvr\b|\bnvr$/i;
+/** 监控主机名特征：品牌名 + 通用命名约定（cam-/ipc-/nvr）。task-023 加 consumer 品牌；task-028 补 foscam/reolink/amcrest/vivotek/hanwha/swann/lorex/v380；task-034 补 dvr/cctv/ipcam/xiaobai(小米摄像机)/chuangmi(米家摄像机)。 */
+const RE_CAMERA_HOST = /hikvision|dahua|uniview|ezviz|imou|tpipc|foscam|reolink|amcrest|vivotek|hanwha|swann|lorex|\bv380\b|\bcam(?:era)?[-_]|[-_]cam\b|\bipc[-_]|\bnvr[-_]|[-_]nvr\b|\bnvr$|\bdvr\b|cctv|ipcam|xiaobai|chuangmi[-_ ]?cam/i;
 
-/** 平板词根（task-023）。必须判在 mobile 之前（'ipad' 同时命中 mobile 词根）。 */
-const RE_TABLET_HOST = /ipad|matepad|tablet|mi[-_ ]?pad/i;
+/** 平板词根（task-023；task-034 补三星/联想/国产 Pad 命名）。必须判在 mobile 之前（'ipad' 同时命中 mobile 词根）。 */
+const RE_TABLET_HOST = /ipad|matepad|tablet|mi[-_ ]?pad|galaxy[-_ ]?tab|\btb[-_]?3\d{2}\w*|(?:huawei|honor|oppo|redmi|xiaomi)[-_ ]?pad/i;
 
 /**
  * 电视/机顶盒/游戏主机词根（task-027）。必须判在 mobile 之前：
  * 'androidtv' 含 'android'（手机词根），'xiaomi-tv' 含手机厂商词。
  * 'shield' 仅指 NVIDIA Shield 主机；'xbox' 是 Microsoft 主机（OUI 层之前认出）。
  */
-const RE_TV_HOST = /android[-_ ]?tv|google[-_ ]?tv|mi[-_ ]?tv|mitv|xiaomi[-_ ]?tv|apple[-_ ]?tv|appletv|bravia|chromecast|fire[-_ ]?tv|tv[-_ ]?box|xbox|shield|hisense|skyworth|coocaa|changhong|webox|小爱|电视|机顶盒/i;
+const RE_TV_HOST = /android[-_ ]?tv|google[-_ ]?tv|mi[-_ ]?tv|mitv|xiaomi[-_ ]?tv|apple[-_ ]?tv|appletv|bravia|chromecast|fire[-_ ]?tv|tv[-_ ]?box|xbox|shield|hisense|skyworth|coocaa|changhong|webox|小爱|电视|机顶盒|\bmibox/i;
 
 /** 交换机词根（task-023）：switch/sw+编号。仅主机名证据，不猜。 */
 const RE_SWITCH_HOST = /switch|交换机|\bsw[-_]?\d{1,3}\b/i;
 
-/** 无线 AP 词根（task-023）：ap+编号 / wireless ap / wap+编号。task-028 补 unifi/专业 AP 品牌词（unifi 的交换机 'sw-数字' 已被 switch 词根更早接住）。 */
-const RE_AP_HOST = /\bap[-_]?\d{1,3}\b|wireless.?ap|\bwap[-_]?\d{1,3}\b|unifi|wavlink|comfast|ruckus|engenius|edimax|airport/i;
+/**
+ * 智能家居词根（task-034）：米家生态默认主机名 + 通用 IoT 命名。
+ * 判在 mobile 之前——'xiaoai'（小爱音箱）、'mibox'（小米盒子）此前误挂在手机词根里，
+ * 实为影音/IoT；扫地机（roborock/roomba/vacuum）、米家传感器等主机名自报形态一并收口。
+ */
+const RE_IOT_HOST = /\bmijia\b|米家|roborock|roomba|irobot|yeelink|aqara|broadlink|switchbot|\btuya\b|\bvacuum\b|扫地机|xiaoai/i;
+
+/** 无线 AP 词根（task-023）：ap+编号 / wireless ap / wap+编号。task-028 补 unifi/专业 AP 品牌词；task-034 补 mesh 节点（Mesh 子节点即 AP 形态）。 */
+const RE_AP_HOST = /\bap[-_]?\d{1,3}\b|wireless.?ap|\bwap[-_]?\d{1,3}\b|unifi|wavlink|comfast|ruckus|engenius|edimax|airport|\bmesh[-_]?(?:node|sub|satellite)?\b/i;
 
 export function hasPrinterPort(openPorts: readonly number[]): boolean {
   return openPorts.includes(9100) || openPorts.includes(631) || openPorts.includes(515);
@@ -550,6 +557,10 @@ export function inferFingerprint(input: FingerprintInput): Fingerprint {
   if (RE_TV_HOST.test(host)) {
     return { osHint: '电视/影音设备（主机名特征）', kind: 'iot' };
   }
+  // 智能家居词根在 mobile 之前（task-034）：'xiaoai-音箱' 若落在手机词根会误判 mobile
+  if (RE_IOT_HOST.test(host)) {
+    return { osHint: '智能家居/IoT 设备（主机名特征）', kind: 'iot' };
+  }
   if (RE_MOBILE_HOST.test(host)) {
     return { osHint: '手机（主机名特征）', kind: 'mobile' };
   }
@@ -571,7 +582,7 @@ export function inferFingerprint(input: FingerprintInput): Fingerprint {
   if (RE_AP_HOST.test(host)) {
     return { osHint: '无线AP（主机名特征）', kind: 'ap' };
   }
-  if (/router|gateway|gw[-_]|tplink|tenda|openwrt|mikrotik|miwifi|hiwifi|newifi|gl-inet|cudy|linksys|asuswrt|padavan|xiaoqiang|\brt-(?:ax|ac|n|be)\d/i.test(host)) {
+  if (/router|gateway|gw[-_]|tplink|tenda|openwrt|mikrotik|miwifi|hiwifi|newifi|gl-inet|cudy|linksys|asuswrt|padavan|xiaoqiang|\brt-(?:ax|ac|n|be)\d|\bon[ut]\b|光猫/i.test(host)) {
     return { osHint: '网络设备固件', kind: 'router' };
   }
   if (/-pc$|desktop|laptop|notebook|thinkpad|thinkbook|macbook|ideapad|legion|latitude|vostro|inspiron|alienware|elitebook|probook|pavilion|spectre|vivobook|zenbook|clevo|\b(?:omen|tuf|yoga)\b|\bnuc(?:[-_ ]?\d+)?\b/i.test(host)) {
@@ -677,5 +688,11 @@ export function inferFingerprint(input: FingerprintInput): Fingerprint {
   if (input.ttl !== null && input.ttl >= 240) {
     return { osHint: '嵌入式/网络设备固件（TTL 弱提示）', kind: 'unknown' };
   }
-  return { osHint: null, kind: 'unknown' };
+  // 9) 最终兜底（task-034）：unknown 必须带原因——"识别不出来"本身要说明
+  //    是哪一层证据全部缺失，而不是留空白让用户无从判断
+  const reasons: string[] = [];
+  if (ports.length === 0) reasons.push('无开放端口');
+  if (!input.hostname) reasons.push('无主机名');
+  if (!input.vendor || input.vendor.includes('随机 mac')) reasons.push('OUI 不可判');
+  return { osHint: `无证据可判（${reasons.join('、') || '主机名/OUI/端口均无可识别线索'}）`, kind: 'unknown' };
 }

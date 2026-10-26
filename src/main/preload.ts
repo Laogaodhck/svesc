@@ -17,7 +17,6 @@ import type {
   PrintJobAction,
   RemoteOpKind,
   TerminalResult,
-  RouterActionStatus,
   RouterStatus,
   ScanProgress,
   Snapshot,
@@ -70,10 +69,8 @@ const api: LanApi = {
   ): Promise<{ ok: boolean; error: string | null; persisted: boolean; persistError: string | null }> =>
     ipcRenderer.invoke(CH.routerLogin, user, password),
   routerLogout: (): Promise<{ ok: boolean }> => ipcRenderer.invoke(CH.routerLogout),
-  routerReboot: (): Promise<{ status: RouterActionStatus; error: string | null }> =>
-    ipcRenderer.invoke(CH.routerReboot),
-  routerOpenAdmin: (): Promise<{ ok: boolean; error: string | null; url: string | null }> =>
-    ipcRenderer.invoke(CH.routerOpenAdmin),
+  routerCheckWebSession: (): Promise<{ session: boolean }> =>
+    ipcRenderer.invoke(CH.routerCheckWebSession),
 
   printerGetManageConfig: () => ipcRenderer.invoke(CH.printerGetManageConfig),
   printerAddManual: (ip: string, note: string | null) => ipcRenderer.invoke(CH.printerAddManual, ip, note),

@@ -1,18 +1,21 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
-import type { Device, RouterStatus } from '../../shared/types'
+import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
+import type { RouterStatus } from '../../shared/types'
 import { StatusPill } from '../components/atoms/StatusPill'
 import { EmptyState } from '../components/atoms/EmptyState'
 import { Icon } from '../components/Icon'
-import { Sparkline } from '../components/atoms/Sparkline'
-import { fmtBitRate, fmtDateTime } from '../lib/format'
 import type { Tone } from '../lib/semantics'
 
 /**
- * 路由器管理视图。
- * 数据诚实原则的三态呈现：
- *  - 能力不支持 → 明确标注"该路由器不支持"，按钮禁用
- *  - 未登录     → 登录表单 + 说明"登录后可查看"
- *  - 数据拿不到 → "—"（绝不显示 0）
+ * 路由器登录视图（task-035 重构）。
+ *
+ * 本页只保留登录闭环，其余功能（网关信息 / WAN 流量 / 协议矩阵 /
+ * DHCP 租约 / 无线状态与客户端 / 远程重启）已全部移除——DHCP 租约等
+ * 数据仍由引擎层持续采集并回填到设备列表，只是不再在本页展示。
+ *
+ * 两条登录路径，共享同一会话状态：
+ *  - 账密登录（OpenWrt ubus / Basic 认证自动适配）：表单校验 + 失败提示
+ *  - 内置浏览器登录：页面内嵌 webview 打开管理页，主进程检测分区
+ *    会话 Cookie 后自动置为「管理页会话」
  */
 
 const BRAND_LABEL: Record<string, string> = {
@@ -22,27 +25,26 @@ const BRAND_LABEL: Record<string, string> = {
   asus: '华硕',
   huawei: '华为',
   netgear: 'NETGEAR',
+  // task-032：市面常见品牌（与 detect.ts 指纹表同步扩充）
+  tenda: '腾达',
+  zte: '中兴',
+  h3c: 'H3C',
+  ruijie: '锐捷',
+  mercury: '水星',
+  linksys: 'Linksys',
+  dlink: 'D-Link',
+  glinet: 'GL.iNet',
   generic: '未知品牌',
 }
 
-function fmtBytes(n: number | null): string {
-  if (n === null) return '—'
-  const units = ['B', 'KB', 'MB', 'GB', 'TB']
-  let v = n
-  let i = 0
-  while (v >= 1000 && i < units.length - 1) {
-    v /= 1000
-    i += 1
-  }
-  return `${v.toFixed(v >= 100 ? 0 : 1)} ${units[i]}`
-}
-
-function secToDuration(sec: number | null): string {
-  if (sec === null) return '—'
-  const d = Math.floor(sec / 86400)
-  const h = Math.floor((sec % 86400) / 3600)
-  const m = Math.floor((sec % 3600) / 60)
-  return d > 0 ? `${d}天${h}小时` : h > 0 ? `${h}小时${m}分` : `${m}分钟`
+/** Electron <webview> 标签的导航能力（DOM 类型里没有，单独收窄声明）。 */
+interface WebviewLike extends HTMLElement {
+  goBack(): void
+  goForward(): void
+  reload(): void
+  getURL(): string
+  canGoBack(): boolean
+  canGoForward(): boolean
 }
 
 function phaseInfo(s: RouterStatus): { text: string; tone: Tone } {
@@ -53,85 +55,20 @@ function phaseInfo(s: RouterStatus): { text: string; tone: Tone } {
   return { text: '未知', tone: 'muted' }
 }
 
-function CapRow({ supported, label, note }: { supported: boolean; label: string; note: string }) {
-  return (
-    <div className="router-cap" data-supported={supported}>
-      <Icon name={supported ? 'check' : 'close'} size={14} className="router-cap__icon" />
-      <div className="router-cap__text">
-        <div className="router-cap__label">{label}</div>
-        <div className="router-cap__note">{supported ? note : '该路由器不支持'}</div>
-      </div>
-    </div>
-  )
-}
-
-export function RouterView({
-  devices,
-  onOpenDetail,
-}: {
-  devices: Device[]
-  onOpenDetail: (id: string) => void
-}) {
+export function RouterView() {
   const [status, setStatus] = useState<RouterStatus | null>(null)
   const [user, setUser] = useState('')
   const [password, setPassword] = useState('')
   const [loginBusy, setLoginBusy] = useState(false)
   const [loginMsg, setLoginMsg] = useState<{ tone: Tone; text: string } | null>(null)
-  const [adminBusy, setAdminBusy] = useState(false)
-  const [adminMsg, setAdminMsg] = useState<{ tone: Tone; text: string } | null>(null)
-  const [rebootConfirm, setRebootConfirm] = useState(false)
-  const [rebootBusy, setRebootBusy] = useState(false)
-  const [rebootMsg, setRebootMsg] = useState<{ tone: Tone; text: string } | null>(null)
+  // task-032：管理页内嵌 webview 面板开关（不再弹独立窗口）
+  const [adminOpen, setAdminOpen] = useState(false)
+  const [adminCurUrl, setAdminCurUrl] = useState<string | null>(null)
   const [refreshing, setRefreshing] = useState(false)
   const [probeErr, setProbeErr] = useState<string | null>(null)
   const [logoutBusy, setLogoutBusy] = useState(false)
   // task-022 B-1：记住密码开关（默认 true；登录前先同步到设置，主进程按当前设置决定是否落盘）
   const [remember, setRemember] = useState(true)
-
-  // —— task-024：WAN 速率序列（渲染侧累积，最多 60 点）——
-  // null = 本轮无速率读数（样本不足/UPnP 缺席），Sparkline 断线呈现，不补 0。
-  // 按 status.ts 去重：手动 refresh 与同轮轮询推送共享同一 ts，只采一次。
-  const lastTsRef = useRef<number>(0)
-  const wanSeriesRef = useRef<{ rx: Array<number | null>; tx: Array<number | null> }>({ rx: [], tx: [] })
-  const [wanSeries, setWanSeries] = useState<{ rx: Array<number | null>; tx: Array<number | null> }>({
-    rx: [],
-    tx: [],
-  })
-
-  /** 统一状态入口：setStatus + WAN 速率采样（初始拉取 / 轮询推送 / 手动刷新共用）。 */
-  const applyStatus = useCallback((s: RouterStatus) => {
-    setStatus(s)
-    if (s.ts === lastTsRef.current) return
-    lastTsRef.current = s.ts
-    const cur = wanSeriesRef.current
-    const rx = [...cur.rx, s.wan.rxBps].slice(-60)
-    const tx = [...cur.tx, s.wan.txBps].slice(-60)
-    wanSeriesRef.current = { rx, tx }
-    setWanSeries({ rx, tx })
-  }, [])
-
-  // —— task-024：租约/无线客户端 → 设备抽屉联动（IP/MAC 匹配；匹配不到的行不可点击，不硬凑） ——
-  const deviceByIp = useMemo(() => new Map(devices.map((d) => [d.ip, d])), [devices])
-  const deviceByMac = useMemo(() => {
-    const m = new Map<string, Device>()
-    for (const d of devices) if (d.mac) m.set(d.mac.toUpperCase(), d)
-    return m
-  }, [devices])
-
-  // —— 重启确认框焦点管理（alertdialog 约定：默认焦点落安全动作"取消"，Esc 关闭，关闭后焦点还给触发按钮） ——
-  const confirmRef = useRef<HTMLDivElement>(null)
-  const cancelBtnRef = useRef<HTMLButtonElement>(null)
-  const rebootTriggerRef = useRef<HTMLButtonElement | null>(null)
-  useEffect(() => {
-    if (!rebootConfirm) return
-    rebootTriggerRef.current = document.activeElement as HTMLButtonElement | null
-    cancelBtnRef.current?.focus()
-    confirmRef.current?.focus() // 兜底：容器可聚焦，保证 Escape 监听生效
-    return () => {
-      rebootTriggerRef.current?.focus()
-      rebootTriggerRef.current = null
-    }
-  }, [rebootConfirm])
 
   const hasApi = typeof window !== 'undefined' && window.lanApi !== undefined
 
@@ -157,7 +94,7 @@ export function RouterView({
     let alive = true
     void window.lanApi.routerGetStatus().then((s) => {
       if (alive) {
-        applyStatus(s)
+        setStatus(s)
         setProbeErr(null)
       }
     }).catch((err: unknown) => {
@@ -166,7 +103,7 @@ export function RouterView({
     })
     const off = window.lanApi.onRouterStatus((s) => {
       if (alive) {
-        applyStatus(s)
+        setStatus(s)
         setProbeErr(null)
       }
     })
@@ -174,14 +111,14 @@ export function RouterView({
       alive = false
       off()
     }
-  }, [hasApi, applyStatus])
+  }, [hasApi])
 
   const onRefresh = useCallback(async () => {
     if (!hasApi) return
     setRefreshing(true)
     try {
       const s = await window.lanApi.routerRefresh()
-      applyStatus(s)
+      setStatus(s)
       setProbeErr(null)
     } catch (err) {
       // 审计 M-3：刷新失败必须可见，不能静默
@@ -189,7 +126,7 @@ export function RouterView({
     } finally {
       setRefreshing(false)
     }
-  }, [hasApi, applyStatus])
+  }, [hasApi])
 
   const onLogin = useCallback(
     async (e: FormEvent) => {
@@ -226,45 +163,43 @@ export function RouterView({
     [hasApi, loginBusy, user, password, remember],
   )
 
-  const onOpenAdmin = useCallback(async () => {
-    if (!hasApi || adminBusy) return
-    setAdminBusy(true)
-    setAdminMsg(null)
-    try {
-      const res = await window.lanApi.routerOpenAdmin()
-      if (res.ok) {
-        setAdminMsg({
-          tone: 'ok',
-          text: '已打开管理页窗口，请在页面中完成登录；登录成功后本页会自动检测到会话。',
-        })
-      } else {
-        setAdminMsg({ tone: 'crit', text: res.error ?? '管理页打开失败' })
-      }
-    } catch (err) {
-      setAdminMsg({ tone: 'crit', text: err instanceof Error ? err.message : String(err) })
-    } finally {
-      setAdminBusy(false)
-    }
-  }, [hasApi, adminBusy])
+  // task-032：页面内嵌管理页 webview（不再弹窗）。导航/就绪后通知主进程检测
+  // 分区会话 Cookie（命中即 markWebSession，状态推送更新本页"已登录"展示）。
+  const webviewRef = useRef<WebviewLike | null>(null)
 
-  const onReboot = useCallback(async () => {
-    if (!hasApi || rebootBusy) return
-    setRebootConfirm(false)
-    setRebootBusy(true)
-    try {
-      const res = await window.lanApi.routerReboot()
-      if (res.status === 'ok') {
-        setRebootMsg({ tone: 'warn', text: '重启指令已下发，路由器将在数十秒内恢复' })
-      } else {
-        setRebootMsg({ tone: 'crit', text: res.error ?? '重启失败' })
-      }
-    } catch (err) {
-      // 审计 M-3：危险操作（重启路由器）失败必须让用户知道指令没有送达
-      setRebootMsg({ tone: 'crit', text: err instanceof Error ? err.message : String(err) })
-    } finally {
-      setRebootBusy(false)
+  useEffect(() => {
+    if (!adminOpen || !hasApi) return
+    const el = webviewRef.current
+    if (!el) return
+    const check = (): void => {
+      void window.lanApi
+        .routerCheckWebSession()
+        .catch(() => {
+          /* 检测失败不算登录失败，下一次导航会再触发 */
+        })
     }
-  }, [hasApi, rebootBusy])
+    const trackUrl = (): void => {
+      try {
+        setAdminCurUrl(el.getURL())
+      } catch {
+        /* webview 已销毁 */
+      }
+    }
+    el.addEventListener('dom-ready', check)
+    el.addEventListener('did-navigate', check)
+    el.addEventListener('did-navigate-in-page', check)
+    el.addEventListener('did-navigate', trackUrl)
+    el.addEventListener('did-navigate-in-page', trackUrl)
+    el.addEventListener('dom-ready', trackUrl)
+    return () => {
+      el.removeEventListener('dom-ready', check)
+      el.removeEventListener('did-navigate', check)
+      el.removeEventListener('did-navigate-in-page', check)
+      el.removeEventListener('did-navigate', trackUrl)
+      el.removeEventListener('did-navigate-in-page', trackUrl)
+      el.removeEventListener('dom-ready', trackUrl)
+    }
+  }, [adminOpen, hasApi])
 
   const onLogout = useCallback(async () => {
     if (!hasApi || logoutBusy) return
@@ -283,7 +218,7 @@ export function RouterView({
   if (!hasApi) {
     return (
       <div className="card">
-        <EmptyState icon="warn" title="未连接主进程" desc="路由器管理需要主进程提供 window.lanApi。" />
+        <EmptyState icon="warn" title="未连接主进程" desc="路由器登录需要主进程提供 window.lanApi。" />
       </div>
     )
   }
@@ -311,10 +246,9 @@ export function RouterView({
   }
 
   const phase = phaseInfo(status)
-  const caps = status.capabilities
   const loggedIn = status.session.loggedIn
-  /** ubus 数据卡（DHCP/无线）只在 ubus 会话下展示；管理页会话拿不到 ubus 数据，不得假装可看 */
-  const ubusData = status.session.kind === 'ubus'
+  // task-032：管理页落点 URL（指纹探测的重定向落点优先，兜底 http://网关/）
+  const adminUrl = status.identity?.adminUrl ?? (status.identity?.ip ? `http://${status.identity.ip}/` : null)
 
   return (
     <>
@@ -322,7 +256,10 @@ export function RouterView({
         <div>
           <div className="view-title">路由器</div>
           <div className="view-desc">
-            能力自动探测：UPnP IGD 取 WAN 信息；OpenWrt（ubus）登录后可管理。不支持的功能如实标注，绝不假装可操作。
+            {status.identity?.ip
+              ? `网关 ${status.identity.ip}`
+              : '尚未拿到网关地址，完成一轮局域网扫描后自动识别。'}
+            {status.identity?.brand && ` · ${BRAND_LABEL[status.identity.brand] ?? status.identity.brand}`}
           </div>
         </div>
         <div className="toolbar__meta">
@@ -334,7 +271,7 @@ export function RouterView({
         </div>
       </div>
 
-      {status.phase === 'unreachable' && (
+      {status.phase === 'unreachable' ? (
         <div className="card">
           <EmptyState
             icon="wifi-off"
@@ -342,129 +279,9 @@ export function RouterView({
             desc={status.lastError ?? '尚未完成首轮局域网扫描，暂时拿不到网关地址。完成扫描后本页会自动恢复。'}
           />
         </div>
-      )}
-
-      {status.phase !== 'unreachable' && (
+      ) : (
         <>
-          {/* —— 网关信息卡 —— */}
-          <div className="card router-grid">
-            <div className="router-kv">
-              <div className="router-kv__label">网关 IP</div>
-              <div className="router-kv__value mono">{status.identity?.ip ?? '—'}</div>
-            </div>
-            <div className="router-kv">
-              <div className="router-kv__label">品牌 / 固件指纹</div>
-              <div className="router-kv__value">
-                {status.identity?.brand
-                  ? `${BRAND_LABEL[status.identity.brand] ?? status.identity.brand}`
-                  : '未识别'}
-                {status.identity?.modelHint && (
-                  <span className="router-kv__hint mono"> {status.identity.modelHint}</span>
-                )}
-              </div>
-            </div>
-            <div className="router-kv">
-              <div className="router-kv__label">WAN IP（UPnP）</div>
-              <div className="router-kv__value mono">{status.wan.ip ?? '—'}</div>
-            </div>
-            <div className="router-kv">
-              <div className="router-kv__label">下行 / 上行</div>
-              <div className="router-kv__value mono">
-                {fmtBitRate(status.wan.rxBps)} <span className="router-kv__hint">/</span> {fmtBitRate(status.wan.txBps)}
-              </div>
-            </div>
-            <div className="router-kv">
-              <div className="router-kv__label">累计流量（设备计数器）</div>
-              <div className="router-kv__value mono">
-                ↓ {fmtBytes(status.wan.totalBytesRx)} · ↑ {fmtBytes(status.wan.totalBytesTx)}
-              </div>
-            </div>
-            <div className="router-kv">
-              <div className="router-kv__label">运行时间</div>
-              <div className="router-kv__value">
-                {status.systemBoard?.uptimeSec !== null && status.systemBoard !== null
-                  ? secToDuration(status.systemBoard.uptimeSec)
-                  : '—'}
-              </div>
-            </div>
-            <div className="router-kv">
-              <div className="router-kv__label">WAN 连接状态（UPnP）</div>
-              <div className="router-kv__value">{status.wan.connectionStatus ?? '—'}</div>
-            </div>
-            <div className="router-kv">
-              <div className="router-kv__label">WAN 连接时长（UPnP）</div>
-              <div className="router-kv__value">{secToDuration(status.wan.uptimeSec)}</div>
-            </div>
-          </div>
-
-          {/* —— WAN 流量趋势（task-024）：渲染侧 60 点采样；null 点断线呈现，不补 0 —— */}
-          <div className="card">
-            <div className="card__head">
-              <span className="card__title">WAN 流量趋势</span>
-              <span className="card__hint">
-                {wanSeries.rx.length > 0
-                  ? `最近 ${wanSeries.rx.length} 次采样 · 10s/点`
-                  : '等待速率样本（UPnP 计数器需 ≥2 次采样）'}
-              </span>
-            </div>
-            <div className="router-wan-chart">
-              <div className="router-wan-chart__row">
-                <span className="router-wan-chart__label">下行</span>
-                <Sparkline values={wanSeries.rx} width={440} height={40} area unit="bps" />
-                <span className="router-wan-chart__now mono">{fmtBitRate(status.wan.rxBps)}</span>
-              </div>
-              <div className="router-wan-chart__row">
-                <span className="router-wan-chart__label">上行</span>
-                <Sparkline values={wanSeries.tx} width={440} height={40} area stroke="var(--warn)" unit="bps" />
-                <span className="router-wan-chart__now mono">{fmtBitRate(status.wan.txBps)}</span>
-              </div>
-            </div>
-          </div>
-
-          {/* —— 能力矩阵 —— */}
-          <div className="card">
-            <div className="card__head">
-              <span className="card__title">协议能力</span>
-              <span className="card__hint">每项独立探测，逐次刷新</span>
-            </div>
-            <div className="router-caps">
-              <CapRow
-                supported={caps.upnp}
-                label="UPnP IGD"
-                note="WAN IP / 流量计数器 / 远程重启"
-              />
-              <CapRow
-                supported={caps.managementPage}
-                label="HTTP 管理页"
-                note={status.identity?.brand ? `已识别（${BRAND_LABEL[status.identity.brand]}）` : '可达，品牌未识别'}
-              />
-              <CapRow
-                supported={caps.openwrt}
-                label="OpenWrt ubus"
-                note={
-                  status.session.kind === 'ubus'
-                    ? `已登录（${status.session.user}）`
-                    : status.session.kind === 'web'
-                      ? '管理页会话已建立（不含 ubus 数据）'
-                      : status.session.kind === 'basic'
-                        ? 'Basic 认证会话已建立（不含 ubus 数据）'
-                        : '登录后可查看 DHCP 租约与无线客户端'
-                }
-              />
-            </div>
-            {status.capabilityNotes.length > 0 && (
-              <div className="router-notes">
-                {status.capabilityNotes.map((n, i) => (
-                  <div key={i} className="router-notes__item">
-                    <Icon name="info" size={13} />
-                    <span>{n}</span>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-
-          {/* —— 登录 / 管理区 —— */}
+          {/* —— 登录卡 —— */}
           <div className="card">
             <div className="card__head">
               <span className="card__title">路由器登录</span>
@@ -481,24 +298,16 @@ export function RouterView({
 
             <div className="router-login-web">
               <p className="router-login-web__desc">
-                推荐：在应用内打开路由器管理页，直接在真实页面上完成登录——适用于所有品牌路由器。
+                推荐：在本页内直接打开路由器管理页完成登录——适用于所有品牌路由器（不再弹出独立窗口）。
               </p>
               <div className="router-session">
-                <button type="button" className="btn" onClick={() => void onOpenAdmin()} disabled={adminBusy}>
+                <button type="button" className="btn" onClick={() => setAdminOpen((v) => !v)}>
                   <Icon name="router" size={14} />
-                  {adminBusy ? '打开中…' : '打开管理页（内置浏览器）'}
+                  {adminOpen ? '收起管理页' : '打开管理页（页面内嵌）'}
                 </button>
                 {loggedIn && (
                   <button type="button" className="btn btn--ghost" onClick={() => void onLogout()} disabled={logoutBusy}>
                     {logoutBusy ? '退出中…' : '退出登录'}
-                  </button>
-                )}
-                {/* 重启指令按能力路由（reboot() 内部 UPnP → ubus 依次尝试，都不支持则如实返回 unsupported）：
-                    UPnP 重启不需要登录，ubus 重启需要 ubus 会话。 */}
-                {(caps.upnp || status.session.kind === 'ubus') && (
-                  <button type="button" className="btn btn--danger" onClick={() => setRebootConfirm(true)}>
-                    <Icon name="warn" size={14} />
-                    重启路由器
                   </button>
                 )}
               </div>
@@ -506,11 +315,11 @@ export function RouterView({
 
             <div className="router-login-divider">
               <span>
-                账密登录（OpenWrt ubus 获取 DHCP/无线数据；华硕等 Basic 认证路由器会自动按 Basic 方式验证）
+                账密登录（OpenWrt ubus；华硕等 Basic 认证路由器会自动按 Basic 方式验证）
               </span>
             </div>
 
-            {status.session.kind !== 'ubus' && (
+            {status.session.kind !== 'ubus' ? (
               <form className="router-login" onSubmit={(e) => void onLogin(e)}>
                 <input
                   className="input"
@@ -544,12 +353,8 @@ export function RouterView({
                   记住密码（加密保存，下次启动自动登录）
                 </label>
               </form>
-            )}
-
-            {adminMsg && (
-              <div className="router-msg" data-tone={adminMsg.tone}>
-                {adminMsg.text}
-              </div>
+            ) : (
+              <div className="router-empty-line">ubus 会话已建立。DHCP 租约与无线数据由引擎采集，回填至设备列表。</div>
             )}
 
             {loginMsg && (
@@ -563,211 +368,87 @@ export function RouterView({
                 {status.session.error}
               </div>
             )}
-            {rebootMsg && (
-              <div className="router-msg" data-tone={rebootMsg.tone}>
-                {rebootMsg.text}
-              </div>
-            )}
+          </div>
 
-            {rebootConfirm && (
-              <div
-                className="router-confirm"
-                role="alertdialog"
-                aria-modal="true"
-                aria-label="确认重启路由器"
-                tabIndex={-1}
-                ref={confirmRef}
-                onKeyDown={(e) => {
-                  // Escape 关闭（busy 中不允许半途关闭——指令可能已发出）
-                  if (e.key === 'Escape' && !rebootBusy) setRebootConfirm(false)
-                }}
-              >
-                <div>
-                  <strong>确认重启路由器？</strong>
-                  <span>全网会断网 1-2 分钟，所有设备监控将出现离线告警。</span>
-                </div>
-                <div className="router-confirm__actions">
+          {/* —— 内嵌管理页（task-032）：webview 挂 persist:router-admin 分区，
+              与 Cookie 会话检测/管理页租约实验通道共享登录态；不再弹独立窗口 —— */}
+          {adminOpen && (
+            <div className="card">
+              <div className="card__head">
+                <span className="card__title">路由器管理页（内嵌浏览器）</span>
+                <span className="card__hint mono">{adminCurUrl ?? adminUrl ?? '—'}</span>
+              </div>
+              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 10 }}>
+                <button
+                  type="button"
+                  className="btn btn--ghost btn--sm"
+                  onClick={() => webviewRef.current?.goBack()}
+                  title="后退"
+                >
+                  ← 后退
+                </button>
+                <button
+                  type="button"
+                  className="btn btn--ghost btn--sm"
+                  onClick={() => webviewRef.current?.goForward()}
+                  title="前进"
+                >
+                  → 前进
+                </button>
+                <button
+                  type="button"
+                  className="btn btn--ghost btn--sm"
+                  onClick={() => webviewRef.current?.reload()}
+                  title="刷新"
+                >
+                  刷新
+                </button>
+                {adminUrl && (
                   <button
                     type="button"
-                    className="btn btn--danger"
-                    onClick={() => void onReboot()}
-                    disabled={rebootBusy}
+                    className="btn btn--ghost btn--sm"
+                    onClick={() => {
+                      // 回到管理页落点（登录页）：直接改 src，webview 会整页导航
+                      const el = webviewRef.current
+                      if (el) {
+                        el.setAttribute('src', adminUrl)
+                      }
+                      setAdminCurUrl(adminUrl)
+                    }}
                   >
-                    {rebootBusy ? '正在发送重启指令…' : '确认重启'}
+                    回到登录页
                   </button>
-                  <button
-                    type="button"
-                    className="btn btn--ghost"
-                    onClick={() => setRebootConfirm(false)}
-                    disabled={rebootBusy}
-                    ref={cancelBtnRef}
-                  >
-                    取消
-                  </button>
+                )}
+              </div>
+              {adminUrl ? (
+                <webview
+                  src={adminUrl}
+                  partition="persist:router-admin"
+                  // 管理页偶有 window.open（帮助页等）：允许弹窗，弹出的新窗口沿用同一分区
+                  allowpopups={true}
+                  style={{
+                    width: '100%',
+                    height: 560,
+                    border: '1px solid var(--border)',
+                    borderRadius: 8,
+                    background: '#fff',
+                  }}
+                  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Electron webview 不是标准 DOM 元素
+                  ref={(el: any) => {
+                    webviewRef.current = el
+                  }}
+                />
+              ) : (
+                <div className="router-empty-line">网关地址未知，请先完成一次局域网扫描。</div>
+              )}
+              <div className="router-notes">
+                <div className="router-notes__item">
+                  <Icon name="info" size={13} />
+                  <span>登录成功后（检测到会话 Cookie）上方登录卡会自动变为「管理页会话」；租约数据将回填至设备列表。</span>
                 </div>
               </div>
-            )}
-          </div>
-
-          {/* —— DHCP 租约（OpenWrt 会话）—— */}
-          <div className="card">
-            <div className="card__head">
-              <span className="card__title">DHCP 租约</span>
-              <span className="card__hint">
-                {ubusData ? `${status.dhcpLeases.length} 条` : 'ubus 登录后可见'}
-              </span>
             </div>
-            {ubusData ? (
-              status.dhcpLeases.length === 0 ? (
-                <div className="router-empty-line">当前无 DHCP 租约（或该固件未启用 luci-rpc）。</div>
-              ) : (
-                <table className="conn-table">
-                  <thead>
-                    <tr>
-                      <th>主机名</th>
-                      <th>IP</th>
-                      <th>MAC</th>
-                      <th>到期时间</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {status.dhcpLeases.map((l) => {
-                      // task-024：租约 ↔ 设备联动（IP 匹配扫描设备；匹配不到的行不可点击，不硬凑）
-                      const dev = deviceByIp.get(l.ip) ?? null
-                      return (
-                        <tr
-                          key={`${l.mac}-${l.ip}`}
-                          className={dev ? 'router-row-link' : undefined}
-                          onClick={dev ? () => onOpenDetail(dev.id) : undefined}
-                          title={dev ? `查看设备详情（${dev.hostname ?? dev.ip}）` : undefined}
-                        >
-                          <td>{l.hostname ?? '—'}</td>
-                          <td className="mono">{l.ip}</td>
-                          <td className="mono">{l.mac}</td>
-                          <td>{l.expiresAt === null ? '无限期' : fmtDateTime(l.expiresAt)}</td>
-                        </tr>
-                      )
-                    })}
-                  </tbody>
-                </table>
-              )
-            ) : status.session.kind === 'web' ? (
-              <div className="router-empty-line">管理页会话不提供 ubus 数据；OpenWrt 固件可用账密登录获取。</div>
-            ) : status.session.kind === 'basic' ? (
-              <div className="router-empty-line">Basic 认证会话不提供 ubus 数据；该路由器可能不是 OpenWrt 固件。</div>
-            ) : (
-              <div className="router-empty-line">该路由器不支持（或未登录）。</div>
-            )}
-          </div>
-
-          {/* —— 无线频段状态（OpenWrt iwinfo，task-024）—— */}
-          <div className="card">
-            <div className="card__head">
-              <span className="card__title">无线频段状态</span>
-              <span className="card__hint">
-                {ubusData && status.wirelessStatus !== null
-                  ? `${status.wirelessStatus.length} 个射频`
-                  : 'ubus 登录后可见'}
-              </span>
-            </div>
-            {ubusData ? (
-              status.wirelessStatus === null ? (
-                <div className="router-empty-line">
-                  该固件未提供 iwinfo 无线状态接口（失败原因见上方能力说明）。
-                </div>
-              ) : status.wirelessStatus.length === 0 ? (
-                <div className="router-empty-line">无射频设备（或无线电未启用）。</div>
-              ) : (
-                <table className="conn-table">
-                  <thead>
-                    <tr>
-                      <th>射频设备</th>
-                      <th>SSID</th>
-                      <th>信道</th>
-                      <th>关联客户端</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {status.wirelessStatus.map((b) => (
-                      <tr key={b.device}>
-                        <td className="mono">{b.device}</td>
-                        <td>{b.ssid ?? '—'}</td>
-                        <td className="mono">{b.channel ?? '—'}</td>
-                        <td className="mono">{b.clientCount ?? '—'}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              )
-            ) : status.session.kind === 'web' ? (
-              <div className="router-empty-line">管理页会话不提供 ubus 数据；OpenWrt 固件可用账密登录获取。</div>
-            ) : status.session.kind === 'basic' ? (
-              <div className="router-empty-line">Basic 认证会话不提供 ubus 数据；该路由器可能不是 OpenWrt 固件。</div>
-            ) : (
-              <div className="router-empty-line">该路由器不支持（或未登录）。</div>
-            )}
-          </div>
-
-          {/* —— 无线客户端（OpenWrt 会话）—— */}
-          <div className="card">
-            <div className="card__head">
-              <span className="card__title">无线客户端</span>
-              <span className="card__hint">
-                {ubusData ? `${status.wirelessClients.length} 台在线` : 'ubus 登录后可见'}
-              </span>
-            </div>
-            {ubusData ? (
-              status.wirelessClients.length === 0 ? (
-                <div className="router-empty-line">当前无无线客户端关联（或该固件未提供 iwinfo 数据）。</div>
-              ) : (
-                <table className="conn-table">
-                  <thead>
-                    <tr>
-                      <th>MAC</th>
-                      <th>SSID</th>
-                      <th>信号</th>
-                      <th>速率（收/发）</th>
-                      <th>已连接</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {status.wirelessClients.map((c) => {
-                      // task-024：无线客户端 ↔ 设备联动（MAC 匹配扫描设备；匹配不到的行不可点击）
-                      const dev = deviceByMac.get(c.mac) ?? null
-                      return (
-                        <tr
-                          key={c.mac}
-                          className={dev ? 'router-row-link' : undefined}
-                          onClick={dev ? () => onOpenDetail(dev.id) : undefined}
-                          title={dev ? `查看设备详情（${dev.hostname ?? dev.ip}）` : undefined}
-                        >
-                          <td className="mono">{c.mac}</td>
-                          <td>{c.ssid ?? '—'}</td>
-                          <td className="mono">{c.signalDbm !== null ? `${c.signalDbm} dBm` : '—'}</td>
-                          <td className="mono">
-                            {c.rxRateKbps !== null ? `${(c.rxRateKbps / 1000).toFixed(0)}M` : '—'} /{' '}
-                            {c.txRateKbps !== null ? `${(c.txRateKbps / 1000).toFixed(0)}M` : '—'}
-                          </td>
-                          <td>{secToDuration(c.connectedForSec)}</td>
-                        </tr>
-                      )
-                    })}
-                  </tbody>
-                </table>
-              )
-            ) : status.session.kind === 'web' ? (
-              <div className="router-empty-line">管理页会话不提供 ubus 数据；OpenWrt 固件可用账密登录获取。</div>
-            ) : status.session.kind === 'basic' ? (
-              <div className="router-empty-line">Basic 认证会话不提供 ubus 数据；该路由器可能不是 OpenWrt 固件。</div>
-            ) : (
-              <div className="router-empty-line">该路由器不支持（或未登录）。</div>
-            )}
-          </div>
-
-          <div className="router-footer mono">
-            最近刷新：{fmtDateTime(status.ts)} · 轮询周期 10s
-            {status.lastError && <span className="router-footer__err"> · {status.lastError}</span>}
-          </div>
+          )}
         </>
       )}
     </>

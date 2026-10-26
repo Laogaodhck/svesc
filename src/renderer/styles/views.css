@@ -875,70 +875,7 @@
   width: 58px;
 }
 
-/* ---------- 路由器管理视图 ---------- */
-
-.router-grid {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(180px, 1fr));
-  gap: 14px 20px;
-}
-
-.router-kv__label {
-  font-size: 10.5px;
-  color: var(--text-dim);
-  margin-bottom: 3px;
-}
-
-.router-kv__value {
-  font-size: 13px;
-  color: var(--text);
-}
-
-.router-kv__hint {
-  color: var(--text-dim);
-  font-size: 11px;
-}
-
-.router-caps {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  gap: 10px;
-}
-
-.router-cap {
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-  padding: 10px 12px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--bg-raise, #0b1016);
-}
-
-.router-cap__icon {
-  flex: none;
-  margin-top: 2px;
-  color: var(--ok, #34d399);
-}
-
-.router-cap[data-supported='false'] .router-cap__icon {
-  color: var(--text-dim);
-}
-
-.router-cap[data-supported='false'] {
-  opacity: 0.62;
-}
-
-.router-cap__label {
-  font-size: 12.5px;
-  font-weight: 600;
-}
-
-.router-cap__note {
-  font-size: 11px;
-  color: var(--text-dim);
-  margin-top: 2px;
-}
+/* ---------- 路由器登录视图（task-035 重构：仅保留登录相关样式） ---------- */
 
 .router-notes {
   margin-top: 12px;
@@ -1149,82 +1086,10 @@
   border-color: var(--warn-a30, #fbbf2450);
 }
 
-.router-confirm {
-  margin-top: 12px;
-  padding: 12px 14px;
-  border: 1px solid var(--crit-a40, #f8717160);
-  border-radius: 9px;
-  background: var(--crit-a10, #f8717112);
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 14px;
-  flex-wrap: wrap;
-}
-
-.router-confirm > div:first-child {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-  font-size: 12px;
-}
-
-.router-confirm span {
-  color: var(--text-dim);
-  font-size: 11.5px;
-}
-
-.router-confirm__actions {
-  display: flex;
-  gap: 8px;
-}
-
 .router-empty-line {
   font-size: 12px;
   color: var(--text-dim);
   padding: 10px 2px;
-}
-
-.router-footer {
-  font-size: 10.5px;
-  color: var(--text-dim);
-  padding: 2px 4px 18px;
-}
-
-.router-footer__err {
-  color: var(--crit);
-}
-
-/* task-024：WAN 流量趋势 */
-.router-wan-chart {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  padding: 2px 4px;
-}
-
-.router-wan-chart__row {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-
-.router-wan-chart__label {
-  width: 30px;
-  flex: none;
-  font-size: 11px;
-  color: var(--text-dim);
-}
-
-.router-wan-chart__now {
-  min-width: 96px;
-  text-align: right;
-  font-size: 12px;
-}
-
-/* task-024：租约/无线客户端行 → 设备抽屉联动 */
-tr.router-row-link {
-  cursor: pointer;
 }
 
 .spin {

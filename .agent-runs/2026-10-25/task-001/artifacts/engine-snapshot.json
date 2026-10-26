@@ -1,5 +1,5 @@
 {
-  "ts": 1793026748324,
+  "ts": 1793031080724,
   "subnet": "192.168.0.0/24",
   "dataSource": "live",
   "devices": [
@@ -13,7 +13,7 @@
       "kind": "workstation",
       "state": "online",
       "firstSeen": 1792950160584,
-      "lastSeen": 1793026744689,
+      "lastSeen": 1793031077184,
       "openPorts": [
         445,
         3389
@@ -50,7 +50,7 @@
       "kind": "router",
       "state": "online",
       "firstSeen": 1792950160627,
-      "lastSeen": 1793026744689,
+      "lastSeen": 1793031077184,
       "openPorts": [
         80
       ],
@@ -86,7 +86,7 @@
       "kind": "router",
       "state": "online",
       "firstSeen": 1792950160627,
-      "lastSeen": 1793026744689,
+      "lastSeen": 1793031077184,
       "openPorts": [
         80
       ],
@@ -122,7 +122,7 @@
       "kind": "camera",
       "state": "online",
       "firstSeen": 1792950160627,
-      "lastSeen": 1793026744689,
+      "lastSeen": 1793031077184,
       "openPorts": [
         8000
       ],
@@ -158,7 +158,7 @@
       "kind": "iot",
       "state": "online",
       "firstSeen": 1792950160627,
-      "lastSeen": 1793026744689,
+      "lastSeen": 1793031077184,
       "openPorts": [],
       "quality": {
         "latencyMs": null,
@@ -192,7 +192,7 @@
       "kind": "unknown",
       "state": "online",
       "firstSeen": 1792950160627,
-      "lastSeen": 1793026744689,
+      "lastSeen": 1793031077184,
       "openPorts": [],
       "quality": {
         "latencyMs": null,
@@ -226,7 +226,41 @@
       "kind": "mobile",
       "state": "online",
       "firstSeen": 1792950160627,
-      "lastSeen": 1793026744689,
+      "lastSeen": 1793031077184,
+      "openPorts": [],
+      "quality": {
+        "latencyMs": null,
+        "jitterMs": null,
+        "packetLossPct": 0,
+        "score": 0,
+        "grade": "unknown",
+        "samples": 0
+      },
+      "bandwidth": {
+        "rxBps": 0,
+        "txBps": 0,
+        "share": 0,
+        "connections": 0,
+        "attributable": false,
+        "estimated": true
+      },
+      "rttHistory": [],
+      "isGateway": false,
+      "isSelf": false,
+      "displayName": null,
+      "ipConflict": false
+    },
+    {
+      "id": "dev-192.168.0.107",
+      "ip": "192.168.0.107",
+      "mac": "cc-73-14-7b-7c-f2",
+      "hostname": null,
+      "vendor": "HONG KONG WHEATEK TECHNOLOGY",
+      "osHint": "监控摄像固件",
+      "kind": "camera",
+      "state": "online",
+      "firstSeen": 1793016967732,
+      "lastSeen": 1793031071272,
       "openPorts": [],
       "quality": {
         "latencyMs": null,
@@ -260,7 +294,7 @@
       "kind": "unknown",
       "state": "online",
       "firstSeen": 1792950160627,
-      "lastSeen": 1793026744689,
+      "lastSeen": 1793031077184,
       "openPorts": [],
       "quality": {
         "latencyMs": null,
@@ -294,7 +328,7 @@
       "kind": "iot",
       "state": "online",
       "firstSeen": 1792950160627,
-      "lastSeen": 1793026744689,
+      "lastSeen": 1793031077184,
       "openPorts": [],
       "quality": {
         "latencyMs": null,
@@ -328,7 +362,7 @@
       "kind": "mobile",
       "state": "online",
       "firstSeen": 1792950160627,
-      "lastSeen": 1793026744689,
+      "lastSeen": 1793031077184,
       "openPorts": [],
       "quality": {
         "latencyMs": null,
@@ -362,7 +396,7 @@
       "kind": "unknown",
       "state": "online",
       "firstSeen": 1792950392591,
-      "lastSeen": 1793026744689,
+      "lastSeen": 1793031077184,
       "openPorts": [],
       "quality": {
         "latencyMs": null,
@@ -396,44 +430,8 @@
       "kind": "unknown",
       "state": "online",
       "firstSeen": 1792950160627,
-      "lastSeen": 1793026744689,
+      "lastSeen": 1793031077184,
       "openPorts": [],
-      "quality": {
-        "latencyMs": null,
-        "jitterMs": null,
-        "packetLossPct": 0,
-        "score": 0,
-        "grade": "unknown",
-        "samples": 0
-      },
-      "bandwidth": {
-        "rxBps": 0,
-        "txBps": 0,
-        "share": 0,
-        "connections": 0,
-        "attributable": false,
-        "estimated": true
-      },
-      "rttHistory": [],
-      "isGateway": false,
-      "isSelf": false,
-      "displayName": null,
-      "ipConflict": false
-    },
-    {
-      "id": "dev-192.168.0.119",
-      "ip": "192.168.0.119",
-      "mac": "d4-5d-64-a9-8a-f1",
-      "hostname": null,
-      "vendor": "ASUSTek COMPUTER",
-      "osHint": "Windows (SMB) · 华硕主板（OUI ASUSTek COMPUTER）",
-      "kind": "workstation",
-      "state": "online",
-      "firstSeen": 1793015209484,
-      "lastSeen": 1793026744689,
-      "openPorts": [
-        445
-      ],
       "quality": {
         "latencyMs": null,
         "jitterMs": null,
@@ -466,7 +464,7 @@
       "kind": "unknown",
       "state": "online",
       "firstSeen": 1792950160627,
-      "lastSeen": 1793026744689,
+      "lastSeen": 1793031077184,
       "openPorts": [],
       "quality": {
         "latencyMs": null,
@@ -509,7 +507,7 @@
       "consumables": [],
       "jobs": [],
       "source": "spooler",
-      "lastSeen": 1793026748323
+      "lastSeen": 1793031080723
     },
     {
       "id": "prn-fax",
@@ -528,7 +526,7 @@
       "consumables": [],
       "jobs": [],
       "source": "spooler",
-      "lastSeen": 1793026748323
+      "lastSeen": 1793031080723
     },
     {
       "id": "prn-microsoft-xps-document-writer",
@@ -547,7 +545,7 @@
       "consumables": [],
       "jobs": [],
       "source": "spooler",
-      "lastSeen": 1793026748323
+      "lastSeen": 1793031080723
     },
     {
       "id": "prn-onenote-desktop-",
@@ -566,7 +564,7 @@
       "consumables": [],
       "jobs": [],
       "source": "spooler",
-      "lastSeen": 1793026748323
+      "lastSeen": 1793031080723
     },
     {
       "id": "prn-onenote-for-windows-10",
@@ -585,7 +583,7 @@
       "consumables": [],
       "jobs": [],
       "source": "spooler",
-      "lastSeen": 1793026748323
+      "lastSeen": 1793031080723
     }
   ],
   "system": {
@@ -595,13 +593,13 @@
     "degraded": 0,
     "printers": 5,
     "printersWithFault": 0,
-    "rxBps": 3048101,
-    "txBps": 272608,
+    "rxBps": 80203,
+    "txBps": 71291,
     "bandwidthHistory": [
       {
-        "ts": 1793026738944,
-        "rxBps": 3048101,
-        "txBps": 272608
+        "ts": 1793031071147,
+        "rxBps": 80203,
+        "txBps": 71291
       }
     ],
     "scan": {
@@ -612,7 +610,7 @@
       "total": 0,
       "startedAt": null
     },
-    "lastScanAt": 1793026744689,
+    "lastScanAt": 1793031077184,
     "nextScanInMs": null,
     "autoScan": false,
     "autoScanIntervalSec": 0

@@ -265,19 +265,3 @@ function isPlausibleIp(s: string): boolean {
   if (parts.length !== 4) return false;
   return parts.every((p) => /^\d{1,3}$/.test(p) && Number(p) <= 255);
 }
-
-/** UPnP 重启（部分固件不实现该 action）。 */
-export async function upnpReboot(controlUrl: string, timeoutMs = ROUTER.upnpHttpTimeoutMs): Promise<{ ok: boolean; error: string | null }> {
-  const u = new URL(controlUrl);
-  const res = await httpRequest(controlUrl, {
-    port: Number(u.port) || 80,
-    path: u.pathname,
-    method: 'POST',
-    headers: soapActionHeader('Reboot'),
-    body: buildSoap('Reboot'),
-    timeoutMs,
-  });
-  if (res.error) return { ok: false, error: res.error };
-  if (res.status !== 200) return { ok: false, error: `设备拒绝 Reboot action（HTTP ${res.status}）` };
-  return { ok: true, error: null };
-}

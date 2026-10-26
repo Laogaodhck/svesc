@@ -416,3 +416,63 @@ describe('B-2 会话失效自动重登状态机（task-022）', () => {
     expect(mgr.getStatus().session.loggedIn, '复活后的重登必须成功').toBe(true);
   });
 });
+
+// —— 审查修复回归（R-1/R-2/R-3/R-5 语义锁定） ——
+
+describe('审查修复：会话生命周期与实验通道恢复', () => {
+  it('logout 清空 wirelessStatus（ubus 会话数据不得跨登出残留，导出报告不得带走旧无线状态）', async () => {
+    scriptAllOk();
+    const mgr = newManager();
+    await mgr.login('root', 'secret');
+    expect(mgr.getStatus().wirelessStatus).toEqual([]);
+    mgr.logout();
+    expect(mgr.getStatus().wirelessStatus).toBeNull();
+  });
+
+  it('ubus 会话在时 markWebSession(true) 不降级 kind（数据通道优先级 ubus > web）', async () => {
+    scriptAllOk();
+    const mgr = newManager();
+    await mgr.login('root', 'secret');
+    mgr.markWebSession(true);
+    expect(mgr.getStatus().session.kind).toBe('ubus');
+    const s = await mgr.refresh();
+    expect(s.session.kind).toBe('ubus');
+    expect(s.session.loggedIn).toBe(true);
+  });
+
+  it('实验通道连续失败 10 次停用（停用可感知）；重新建立管理页会话即复活（新会话重置预算）', async () => {
+    const mgr = newManager();
+    mgr.markWebSession(true);
+    const provider = vi.fn(async () => 'sid=1');
+    mgr.setWebLeaseProvider(provider);
+
+    // 品牌被 mock 成 tplink：6 个候选（3 专属 + 3 通用）全部失败 → 每轮 failures+1
+    for (let i = 0; i < 10; i += 1) await mgr.refresh();
+    expect(provider).toHaveBeenCalledTimes(10);
+    await mgr.refresh();
+    expect(provider, '连续 10 次失败后停用：不再读 Cookie 空打').toHaveBeenCalledTimes(10);
+    expect(
+      mgr.getStatus().capabilityNotes.some((n) => n.includes('已停用')),
+      '停用状态必须在能力说明中可感知，不得静默跳过',
+    ).toBe(true);
+
+    // 重新建立管理页会话（用户在内嵌管理页重新登录）→ 失败计数重置，通道复活
+    mgr.markWebSession(true);
+    await mgr.refresh();
+    expect(provider, '新会话必须重置失败计数，否则重登无法复活通道').toHaveBeenCalledTimes(11);
+  });
+
+  it('logout 重置实验通道失败计数（登出即清账，下次登录从满预算开始）', async () => {
+    const mgr = newManager();
+    mgr.markWebSession(true);
+    const provider = vi.fn(async () => 'sid=1');
+    mgr.setWebLeaseProvider(provider);
+    for (let i = 0; i < 10; i += 1) await mgr.refresh();
+    expect(provider).toHaveBeenCalledTimes(10);
+
+    mgr.logout();
+    mgr.markWebSession(true);
+    await mgr.refresh();
+    expect(provider, 'logout 清账后重新登录：通道必须恢复（而不是沿用旧失败计数停在停用态）').toHaveBeenCalledTimes(11);
+  });
+});

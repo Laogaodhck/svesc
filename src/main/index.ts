@@ -8,7 +8,7 @@ import { app, BrowserWindow, Menu } from 'electron';
 import path from 'node:path';
 import { createEngine, type Engine } from './engine';
 import { RouterManager } from './engine/router';
-import { pushRouterStatus, pushScanProgress, pushSnapshot, registerIpc } from './ipc';
+import { clearPushTarget, pushRouterStatus, pushScanProgress, pushSnapshot, registerIpc, setPushTarget } from './ipc';
 import { loadCredentials, saveCredentials, clearCredentials } from './router-store';
 import { getRouterAdminCookieHeader } from './router-browser';
 import { createTray, destroyTray, isQuitRequested, refreshTray } from './tray';
@@ -65,6 +65,9 @@ async function createWindow(): Promise<BrowserWindow> {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false,
+      // task-032：路由器管理页以 <webview> 内嵌在页面（不再弹独立窗口），
+      // webview 挂 persist:router-admin 分区，与 Cookie 检测/租约通道共享会话
+      webviewTag: true,
       // 监控台需要 2s 级推送：窗口最小化/隐藏时不能被 Chromium 节流，否则快照停更
       backgroundThrottling: false,
     },
@@ -82,6 +85,11 @@ async function createWindow(): Promise<BrowserWindow> {
       win.hide();
     }
   });
+
+  // 审查 R-6：窗口销毁后解绑推送目标；重建窗口（activate）时 createWindow 重跑
+  // 会重新换绑，推送不丢。registerIpc 的 handle 注册不在此重复（重复注册会抛错）。
+  win.on('closed', () => clearPushTarget(win));
+  setPushTarget(win);
 
   await win.loadFile(rendererEntry());
   return win;

@@ -198,7 +198,7 @@ export function App() {
           />
         )
       case 'router':
-        return <RouterView devices={devices} onOpenDetail={openDetail} />
+        return <RouterView />
       case 'watches':
         return (
           <WatchesView

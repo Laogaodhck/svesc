@@ -19,8 +19,22 @@ export const WEB_LEASE_CANDIDATES: readonly { brand: RouterBrand | null; path: s
   { brand: 'tplink', path: '/userRpm/DhcpSeartListRpm.htm', label: 'TP-LINK DHCP 客户端列表' },
   { brand: 'tplink', path: '/userRpm/DhcpClientsListRpm.htm', label: 'TP-LINK DHCP 客户端列表(新)' },
   { brand: 'tplink', path: '/userRpm/WlanStationRpm.htm', label: 'TP-LINK 无线客户端列表' },
-  { brand: null, path: '/dhcp.htm', label: 'DHCP 列表(通用猜测)' },
+  // task-032：市面常见品牌候选（路径为公开固件结构，未逐台真机验证——失败会在 note 如实列出）
+  { brand: 'asus', path: '/dhcpLeaseList.asp', label: '华硕 DHCP 租约表' },
+  { brand: 'asus', path: '/Main_DHCP_LEASES.asp', label: '华硕 DHCP 租约表(旧)' },
+  { brand: 'netgear', path: '/DHCPTable.htm', label: 'NETGEAR DHCP 表' },
+  { brand: 'netgear', path: '/dhcp_table.htm', label: 'NETGEAR DHCP 表(小写)' },
+  { brand: 'xiaomi', path: '/cgi-bin/luci/admin/status/overview', label: '小米 luci 概览页' },
+  { brand: 'huawei', path: '/html/ssmp/userinfo/lan_user_tree.asp', label: '华为/荣耀 LAN 用户表' },
+  { brand: 'dlink', path: '/dhcp_table.htm', label: 'D-Link DHCP 表' },
+  { brand: 'mercury', path: '/userRpm/DhcpSeartListRpm.htm', label: '水星 DHCP 客户端列表' },
+  { brand: null, path: '/dhcp.htm', label: 'DHCP 列表(通用)' },
+  { brand: null, path: '/dhcp_table.htm', label: 'DHCP 表(通用)' },
+  { brand: null, path: '/DHCPTable.htm', label: 'DHCP 表(通用大写)' },
 ] as const;
+
+/** 单次抓取的候选上限：超时 1s × 6 ≈ 6s 最坏路径，落在路由器 10s 轮询内不叠加。 */
+export const WEB_LEASE_MAX_CANDIDATES = 6;
 
 /** 单候选请求超时。4 候选最坏 ≈5s，发生在路由器 10s 轮询里，不进扫描预算。 */
 export const WEB_LEASE_TIMEOUT_MS = 1200;
@@ -166,7 +180,10 @@ export async function fetchWebLeases(options: {
       return res.body;
     });
 
-  const candidates = WEB_LEASE_CANDIDATES.filter((c) => c.brand === null || c.brand === (brand ?? null));
+  const candidates = WEB_LEASE_CANDIDATES.filter((c) => c.brand === null || c.brand === (brand ?? null)).slice(
+    0,
+    WEB_LEASE_MAX_CANDIDATES,
+  );
   const tried: string[] = [];
   for (const c of candidates) {
     const url = `http://${gateway}${c.path}`;
@@ -186,9 +203,12 @@ export async function fetchWebLeases(options: {
     }
     tried.push(`${c.label}(200 但无可解析租约)`);
   }
+  // note 截断（task-032）：候选多了以后失败清单会淹没能力说明——只列前 3 条
+  const shown = tried.slice(0, 3);
+  const suffix = tried.length > shown.length ? ` 等 ${tried.length} 个候选页` : '';
   return {
     ok: false,
     leases: [],
-    note: tried.length > 0 ? `管理页租约（实验通道）：未获取（${tried.join('；')}）` : null,
+    note: tried.length > 0 ? `管理页租约（实验通道）：未获取（${shown.join('；')}${suffix}）` : null,
   };
 }

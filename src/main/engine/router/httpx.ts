@@ -27,6 +27,9 @@ export interface HttpOptions {
   rejectUnauthorized?: boolean;
 }
 
+/** 响应体上限（审查 R-8）：异常页面/错误代理可能回超大正文，截断防内存膨胀。 */
+const MAX_BODY_BYTES = 2 * 1024 * 1024;
+
 /** 发起一次 HTTP(S) 请求；任何失败都以 error 文本返回，绝不抛异常拖垮调用方。 */
 export function httpRequest(url: URL | string, opts: HttpOptions): Promise<HttpResult> {
   const started = Date.now();
@@ -35,6 +38,7 @@ export function httpRequest(url: URL | string, opts: HttpOptions): Promise<HttpR
     const finish = (result: Omit<HttpResult, 'ms'>): void => {
       if (settled) return;
       settled = true;
+      clearTimeout(wallClock);
       resolve({ ...result, ms: Date.now() - started });
     };
 
@@ -54,12 +58,18 @@ export function httpRequest(url: URL | string, opts: HttpOptions): Promise<HttpR
         },
         (res) => {
           const chunks: Buffer[] = [];
-          res.on('data', (chunk: Buffer) => chunks.push(chunk));
+          let total = 0;
+          res.on('data', (chunk: Buffer) => {
+            if (total > MAX_BODY_BYTES) return; // 超限后丢弃后续块（end 时统一截断返回）
+            chunks.push(chunk);
+            total += chunk.length;
+          });
           res.on('end', () => {
+            const body = Buffer.concat(chunks).subarray(0, MAX_BODY_BYTES).toString('utf8');
             finish({
               status: res.statusCode ?? null,
               headers: res.headers,
-              body: Buffer.concat(chunks).toString('utf8'),
+              body,
               error: null,
             });
           });
@@ -77,6 +87,14 @@ export function httpRequest(url: URL | string, opts: HttpOptions): Promise<HttpR
       finish({ status: null, headers: {}, body: '', error: `timeout after ${opts.timeoutMs}ms` });
     });
     req.on('error', (err: Error) => finish({ status: null, headers: {}, body: '', error: err.message }));
+
+    // 审查 R-8：socket 空闲超时会被慢滴响应不断复位（每收一块就重置）——
+    // 另设硬性墙钟上限（2×timeoutMs），保证请求在最坏情况下也必然终结
+    const wallClock = setTimeout(() => {
+      req.destroy();
+      finish({ status: null, headers: {}, body: '', error: `wall-clock timeout after ${opts.timeoutMs * 2}ms` });
+    }, opts.timeoutMs * 2);
+    wallClock.unref?.();
 
     if (opts.body !== undefined) req.write(opts.body);
     req.end();
