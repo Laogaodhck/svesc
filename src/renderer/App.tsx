@@ -49,6 +49,7 @@ export function App() {
 
   const autoScan = localAuto ?? system?.autoScan ?? false
   const scanning = system?.scan?.active ?? feed.progress?.active ?? false
+  // 下一次深度扫描（端口/指纹采集轮）的绝对时间戳；实时探测由 5s 心跳负责，与此无关
   const nextScanAt =
     snapshot && system && system.nextScanInMs !== null && system.autoScan
       ? snapshot.ts + system.nextScanInMs
@@ -93,7 +94,7 @@ export function App() {
     return () => window.clearTimeout(id)
   }, [snapshot])
 
-  /* -------- 自动扫描：乐观更新，快照回来后对齐 -------- */
+  /* -------- 实时监控开关：乐观更新，快照回来后对齐 -------- */
   useEffect(() => {
     if (localAuto !== null && system && system.autoScan === localAuto) setLocalAuto(null)
   }, [system, localAuto])
@@ -342,10 +343,10 @@ export function App() {
         topbar={{
           subnet: snapshot?.subnet ?? null,
           dataSource: snapshot?.dataSource ?? 'unknown',
+          updatedAt: snapshot?.ts ?? null,
           lastScanAt: system?.lastScanAt ?? null,
           autoScan,
           autoScanIntervalSec: system?.autoScanIntervalSec ?? 30,
-          nextScanAt,
           scanning,
           warnings: snapshot?.warnings ?? [],
           onRefresh: feed.refresh,

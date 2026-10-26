@@ -61,6 +61,19 @@ export const SCHEDULE = {
   fullScan: 60000,
 } as const;
 
+/**
+ * 心跳探测预算（task-026 实时化）：5s 心跳从「轮转 ping 32 台」升级为三集合合并探测，
+ * 单次 pingSweep 调用（@64 并发，最坏 208 目标 ≈ 2.4s < 5s 周期）。
+ *   - absentProbeCap：缺席确认（无 ARP 条目的在册记录，按缺席轮数降序优先重探）
+ *   - onlineCap：在线全量探测上限（arpPresent||pingAlive，超出用游标轮转，靠 ARP 在位兜底不误判）
+ *   - unknownPerRound：未知 IP 滚动探测（cfg.hosts − 在册记录），254 ÷ 64 ≈ 4 轮 ≈ 20s 全网覆盖
+ */
+export const HEARTBEAT_PROBE = {
+  absentProbeCap: 32,
+  onlineCap: 112,
+  unknownPerRound: 64,
+} as const;
+
 /** 持续 Ping 监控（task-025）：独立 5s 轮询，60 点环形窗口（≈5 分钟）。 */
 export const WATCH = {
   intervalMs: 5000,
@@ -109,7 +122,12 @@ export const ALARM_THRESHOLDS = {
   supplyLowPct: 10,
   supplyCriticalPct: 5,
   poorGradeRounds: 2,
-  offlineArpMisses: 3,
+  /**
+   * 连续缺席观测轮数（task-026 加速判定）：心跳（5s）与扫描轮**统一推进**，
+   * 连续 4 轮「无 ARP 条目且 ping 失败」→ offline（≈20s，此前为 3 个扫描轮 ≈ 3min）。
+   * ARP 在位的设备不计缺席（ARP 是比 ICMP 更强的在位证据）；10 分钟告警抑制窗口兜底网络抖动。
+   */
+  offlineArpMisses: 4,
   /**
    * 告警抑制窗口（毫秒，task-017）：同因告警清除后 10 分钟内再次触发 → 合并回
    * 原记录（occurrences+1 / trace 记 re-raised），不新建、不重复推送，

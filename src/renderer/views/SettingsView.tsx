@@ -5,7 +5,7 @@ import { Icon } from '../components/Icon'
 import type { Tone } from '../lib/semantics'
 
 /**
- * 设置页：自动扫描、打印机采集源、数据导出、关于。
+ * 设置页：实时监控、打印机采集源、数据导出、关于。
  * 所有开关落盘即生效（autoScan 重挂定时器；打印机源下一轮刷新生效，≤15s）。
  *
  * 关于卡片是作者署名的唯一权威展示位（需求方指定：浩玥工作室 · 老高 QQ 846193）。
@@ -325,14 +325,14 @@ export function SettingsView({
       <div className="card">
         <div className="card__head">
           <span className="card__title">通用</span>
-          <span className="card__hint">扫描调度</span>
+          <span className="card__hint">实时监控</span>
         </div>
         <div className="settings-stack">
           <Switch
             on={settings.autoScan}
-            onToggle={() => void update({ autoScan: !settings.autoScan }, settings.autoScan ? '已关闭自动扫描' : '已开启自动扫描')}
-            label="自动扫描"
-            hint="按固定周期做全量扫描（ping + ARP + 端口）"
+            onToggle={() => void update({ autoScan: !settings.autoScan }, settings.autoScan ? '已暂停实时监控（设备状态将冻结）' : '已开启实时监控')}
+            label="实时监控"
+            hint="5s 心跳实时探测设备上下线并滚动发现新设备；关闭后设备状态冻结，带宽/打印机观测继续"
             disabled={busy}
           />
           <Switch
@@ -357,7 +357,7 @@ export function SettingsView({
             onMsg={setMsg}
           />
           <div className="settings-row">
-            <span className="u-115">扫描间隔（秒）</span>
+            <span className="u-115">深度扫描间隔（秒）</span>
             <div className="alias-edit">
               <input
                 className="input alias-edit__input"
@@ -378,7 +378,7 @@ export function SettingsView({
                     setMsg({ tone: 'crit', text: '间隔需为 30-3600 之间的整数秒' })
                     return
                   }
-                  void update({ autoScanIntervalSec: sec }, `扫描间隔已更新为 ${sec}s`)
+                  void update({ autoScanIntervalSec: sec }, `深度扫描间隔已更新为 ${sec}s`)
                 }}
               >
                 保存

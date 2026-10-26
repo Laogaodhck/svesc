@@ -6,7 +6,7 @@ import { useTick } from '../../hooks/useTick'
 export interface StatusBarProps {
   /** 最近一次收到快照的时间；null = 尚未收到 */
   snapshotTs: number | null
-  /** 下一次扫描的绝对时间戳 */
+  /** 下一次深度扫描（端口/指纹采集轮）的绝对时间戳 */
   nextScanAt: number | null
   autoScan: boolean
   scanning: boolean
@@ -43,13 +43,13 @@ export function StatusBar({
 
       <span className="statusbar__seg">
         {scanning ? (
-          <span className="statusbar__scanning">正在扫描…</span>
+          <span className="statusbar__scanning">正在深度扫描…</span>
         ) : autoScan ? (
           <>
-            下次扫描 <span className="mono">{fmtCountdown(remaining)}</span>
+            下次深度扫描 <span className="mono">{fmtCountdown(remaining)}</span>
           </>
         ) : (
-          '自动扫描已关闭 · 仍持续监控'
+          '实时监控已暂停 · 设备状态冻结'
         )}
       </span>
 

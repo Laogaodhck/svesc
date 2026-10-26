@@ -3,8 +3,8 @@
  *
  * 行为约定：
  *  - 托盘单击：窗口可见且有焦点 → 隐藏；否则显示并聚焦（Windows 习惯）
- *  - 右键菜单：显示主窗口 / 立即扫描 / 自动扫描开关 / 开机自启（仅打包版）/ 退出
- *  - 菜单随快照心跳（5s）重建，自动扫描勾选态与告警计数保持新鲜
+ *  - 右键菜单：显示主窗口 / 立即扫描 / 实时监控开关 / 开机自启（仅打包版）/ 退出
+ *  - 菜单随快照心跳（5s）重建，实时监控勾选态与告警计数保持新鲜
  *  - "退出"是唯一真退出路径：markQuitting() 置位后窗口 close 不再拦
  *  - SMOKE 模式下主进程不创建托盘（秒退场景不留无常驻）
  */
@@ -69,7 +69,7 @@ export function refreshTray(): void {
     { label: '显示主窗口', click: () => showWindow() },
     { label: '立即扫描', click: () => void engine.refresh() },
     {
-      label: '自动扫描',
+      label: '实时监控',
       type: 'checkbox',
       checked: settings.autoScan,
       click: () => toggleAutoScan(),

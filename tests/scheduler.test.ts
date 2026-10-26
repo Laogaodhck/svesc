@@ -2,10 +2,12 @@
  * §5.1 状态判定语义（`src/main/engine/scheduler.ts` · `resolveLinkState`）
  *
  * 这是本任务最关键的一组断言：本网段大量主机禁 ICMP，"ping 不通"绝不等于离线；
- * 唯一判离线路径是 **ARP 连续 3 轮缺席**。纯函数，无需扫描。
+ * 唯一判离线路径是 **连续缺席观测轮**（task-026：心跳 5s 与扫描轮统一推进，4 轮 ≈ 20s）。
+ * 纯函数，无需扫描。
  */
 import { describe, expect, it } from 'vitest';
 import { resolveLinkState } from '../src/main/engine/scheduler';
+import { ALARM_THRESHOLDS } from '../src/shared/constants';
 import { quality } from './fixtures';
 
 const idle = {
@@ -36,13 +38,13 @@ describe('§5.1 在线判定优先级', () => {
   });
 });
 
-describe('§5.1 离线判定（唯一路径）', () => {
-  it('ARP 连续缺席 3 轮且 ping 不通时应判 offline', () => {
-    expect(resolveLinkState({ ...idle, arpMissStreak: 3 })).toBe('offline');
+describe('§5.1 离线判定（唯一路径，task-026 加速）', () => {
+  it(`连续缺席 ${ALARM_THRESHOLDS.offlineArpMisses} 个观测轮且 ping 不通时应判 offline`, () => {
+    expect(resolveLinkState({ ...idle, arpMissStreak: ALARM_THRESHOLDS.offlineArpMisses })).toBe('offline');
   });
 
-  it('ARP 只缺席 2 轮时不得提前判 offline（ARP 老化有延迟）', () => {
-    expect(resolveLinkState({ ...idle, arpMissStreak: 2 })).toBe('online');
+  it('缺席不足阈值时不得提前判 offline（确认窗口防抖）', () => {
+    expect(resolveLinkState({ ...idle, arpMissStreak: ALARM_THRESHOLDS.offlineArpMisses - 1 })).toBe('online');
   });
 });
 

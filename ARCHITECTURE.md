@@ -118,10 +118,12 @@
 | 2 | 本轮 ARP 存在有效 MAC | online（**主信号**） |
 | 3 | 任一被探测端口有响应 | online |
 | 4 | ARP 在位但 ICMP 全超时 | online + `quality.grade='unknown'`（质量未采样） |
-| 5 | ARP **连续 3 轮**缺席且 ICMP 无响应 | offline（**唯一**判离线路径） |
+| 5 | ARP **连续 4 个观测轮**缺席且 ICMP 无响应（task-026：心跳 5s 与扫描轮**统一推进**缺席计数，≈20s 判离） | offline（**唯一**判离线路径） |
 | 6 | 有 ≥8 个质量样本（2 个 `ping -n 4` 批次）且（丢包 ≥20% 或延迟 >150ms） | degraded（覆盖 1-4） |
 
 本机实测：ARP 表 20-50 条，其中仅少数回 ICMP。若按"ping 不通即离线"，一次扫描会产出 20-30 条假离线 + 同样数量的噪音告警。这就是第 5 条存在的原因。
+
+task-026 实时化补充：心跳每 5s 对**本轮真实观测**记账——ICMP 存活先全量归零、只有本轮回包才置 true（防陈旧证据粘滞）；缺席设备的陈旧端口响应证据同步失效（TCP 回包前提是 ARP 在位）；ARP 读失败的一轮不算观测、不推进缺席（缺席必须基于真实账本）。
 
 ---
 
@@ -211,7 +213,7 @@ oidStartsWith / compareOid        walk 子树终止与前进判定
 | 任务 | 周期 | 实测耗时 | 说明 |
 |---|---|---|---|
 | 带宽 | 2s | ~190ms（netstat -e + -ano） | 首次采样只建基线，返回 null（≠ 0 流量：R-02 语义）且 `attributable:false` |
-| 设备心跳 | 5s | ~1.5s（`arp -a` + 轮转 ping ≤32 台） | 轮转保证每台都能被采样，又不会每 5s 打 254 个地址 |
+| 设备心跳（实时探测） | 5s | 最坏 ~2.4s（`arp -a` + ping：缺席确认 ≤32 ∪ 在线全量 ≤112 ∪ 未知 IP 滚动 ≤64，@64 并发） | task-026：上下线秒级感知；新设备 ARP 冒头 / 未知 IP ping 中 → 即时建册**早推帧**（不必等扫描结束）；缺席计数在此统一推进 |
 | 质量采样 | 15s | ~6-10s（≤12 台 × `ping -n 4`，并发 8） | **质量窗口的唯一数据源**；扫描/心跳的单次存活 ping 不计入 |
 | 打印机 | 15s | ~3-5s（3 次 PowerShell + TCP 探活 + SNMP；IPP 有负缓存且命中 SNMP 即短路） | PowerShell 单飞；SNMP 正/负缓存（负 5min） |
 | 全量扫描 | 60s | **~8-10s**（预算 10s 内每个阶段都受 deadline 约束） | 超预算即跳过后续阶段，用已得结果出快照 |
@@ -233,6 +235,11 @@ printers 采集 4520ms（独立任务，不在扫描预算内；SNMP 命中即�
 - **强杀不做进程树清剿，除非 PowerShell**：`exec.ts` 的 `sweepTree` 开关只对 `runPowerShell` 打开。Vera 受控实验证明给 `ping/arp/netstat` 这些无子进程的叶进程也 `taskkill /T /F`，会让一次扫描从 5.5s 恶化到 10s（进程创建拥塞正反馈）；而 PowerShell 确实会派生 conhost 进程树，孙进程持有管道时 `close` 不派发，必须清剿。
 - **超时立即 settle**：强杀后不押注 `close` 一定派发（Windows 上被强杀的进程、句柄卡住的 powershell 都可能静默），Promise 当场 resolve（`timedOut:true`），令牌闸门随之释放；`close` 迟到会被 `settled` 标志忽略，幂等。
 - 引擎侧的"命令失败"一律写入 `snapshot.warnings`（`discovery`/`printers`/`bandwidth`/`system` 四源，同源同文案去重、上限 20 条、条件恢复即消失），绝不把失败静默成 0 或空列表。
+
+**实时监控开关（autoScan，task-026 语义）**
+
+- 开（默认）：5s 心跳实时探测 + 60s 深度扫描全量运行，设备上下线与新设备秒级感知。
+- 关：心跳早退 + 全量扫描停 → 设备状态**冻结**（UI 明示"实时监控已暂停 · 设备状态冻结"）；带宽/打印机/质量采样/持续 Ping 属于本机观测，继续运行（R-04 语义）。
 
 **错峰**：2s 带宽采样与 60s 全量扫描可能同 tick。两者都是短命子进程，全局子进程闸门 64 兜底；实测无争抢（扫描期间带宽采样仍稳定在 200ms 内）。
 
@@ -352,3 +359,12 @@ printers 采集 4520ms（独立任务，不在扫描预算内；SNMP 命中即�
 - **配置导入/导出**：`configExport`（schemaVersion:1：设置/别名/备注/标签/监控目标/打印机管理/首次发现）与 `configImport`（JSON.parse → schemaVersion 校验 → 逐键合并，非法键计入 skipped 绝不整包失败；运行时生效 setAutoScan/setPrinterSources/hydrateWatches/refreshPrinters）。设置页操作，导入后回读设置对齐 UI。
 - **契约层**：`shared/channels.ts` +10 通道；`shared/types.ts` 新增 TracertHop/PortScanResult/BandwidthPoint/WatchTarget/WatchSample/WatchStatus，Device 加 `note/tags`，AppSettings 加 `notifyWebhookUrl`，Snapshot 加 `watches`；preload 全量暴露。
 - **验证**：新增 `tests/task025-lan-ops.test.ts` 26 用例（WOL 字节级/WatchManager 窗口与变迁/端口扫描真监听/HTML 转义/Webhook 真 server/tracert 解析/ingestExternal 语义/JsonStore 往返）；全量 636 用例通过；node+web 双 typecheck 通过；`src/main/engine` electron 引用恒 0。
+
+### 10.5 task-026 实时动态监控（自动刷新/自动扫描 → 实时化）
+
+- **心跳真实时化（`scheduler.ts` heartbeat 重写）**：每 5s 一次"准实时"观测轮——① `arp -a` 建立在位视图；② 三集合去重合并单次 pingSweep：缺席确认（streak 降序 ≤32）∪ 在线全量（轮转 ≤112）∪ 未知 IP 滚动发现（`unknownCursor` 在 254 地址上轮转 ≤64/轮，新设备 ≈4 轮 ≈20s 内必被探到）；③ 未知 IP ping 中即时 `ensureRecord` 建册（进入快照与 DEVICE_NEW 告警）。最坏 208 目标 @64 并发 ≈2.4s < 5s 周期（`HEARTBEAT_PROBE` 常量约束）。
+- **早推帧**：`mergeArp` 返回新建记录数，>0 时调用方**立即 emitSnapshot**——新设备从"ARP 冒头/被 ping 中"到 UI 可见 <100ms，不必等扫描/下一周期结束（心跳、扫描 phaseInitialArp 两处均生效）。
+- **离线判定加速**：`ALARM_THRESHOLDS.offlineArpMisses` 3→4，语义升级为"连续 4 个**缺席观测轮**"——心跳（5s）与扫描轮**统一推进**同一账本，≈20s 判离（原最快 3×15s=45s，实际依赖扫描轮更慢）。配套防误判三件套：心跳开头 ICMP 存活全量归零（防陈旧 pingAlive 粘滞）；缺席设备的陈旧 `portResponded` 同步失效（TCP 回包前提是 ARP 在位，否则打印机被旧端口证据钉死在线）；ARP 读失败的一轮不算观测、不推进缺席（沿用上一轮视图，与扫描 phaseInitialArp 同语义）。10 分钟告警抑制窗口兜底防抖。
+- **autoScan 语义变更（UI 命名）**：「自动扫描」→「实时监控」：开 = 心跳 + 深度扫描全量运行；关 = 心跳早退 + 扫描停 → 设备状态冻结（TopBar/StatusBar/设置页/托盘菜单全链路文案更新，TopBar 新增脉冲 live-dot 与"实时监控中/已暂停"状态）。带宽/打印机/质量/持续 Ping 不受影响（R-04）。
+- **数据诚实边界不变**：状态判定仍以 ARP 在位为主信号，ICMP 超时绝不判离线；缺席计数只由真实观测推进；暂停即冻结、如实呈现"暂停"而非装作在线。
+- **验证**：全量 643 用例通过（R-06 离线判定改 4 轮口径 + 新增实时化用例：未知滚动发现/新设备早推帧/扫描早推帧/暂停冻结语义）；顺带修复测试基建两处真实网络泄漏——`netbios`（nbtstat spawn）与 IPP 耗材查询（`http.request`）此前未被 mock，其 `setTimeout` 超时守卫在 fake timers 下永不触发，设备一旦持有 9100/631 端口即真实连网挂死（scheduler-resilience 定向耗时 223s → 1.7s）；node+web 双 typecheck 通过；`src/main/engine` electron 引用恒 0。

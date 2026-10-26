@@ -1,5 +1,5 @@
 {
-  "ts": 1792950524835,
+  "ts": 1792974216608,
   "subnet": "192.168.0.0/24",
   "dataSource": "live",
   "devices": [
@@ -13,7 +13,7 @@
       "kind": "workstation",
       "state": "online",
       "firstSeen": 1792950160584,
-      "lastSeen": 1792950521438,
+      "lastSeen": 1792974212623,
       "openPorts": [
         445,
         3389
@@ -50,7 +50,7 @@
       "kind": "router",
       "state": "online",
       "firstSeen": 1792950160627,
-      "lastSeen": 1792950521438,
+      "lastSeen": 1792974212623,
       "openPorts": [
         80
       ],
@@ -86,7 +86,7 @@
       "kind": "unknown",
       "state": "online",
       "firstSeen": 1792950160627,
-      "lastSeen": 1792950521438,
+      "lastSeen": 1792974212623,
       "openPorts": [
         80
       ],
@@ -122,7 +122,7 @@
       "kind": "camera",
       "state": "online",
       "firstSeen": 1792950160627,
-      "lastSeen": 1792950521438,
+      "lastSeen": 1792974212623,
       "openPorts": [
         8000
       ],
@@ -158,7 +158,7 @@
       "kind": "unknown",
       "state": "online",
       "firstSeen": 1792950160627,
-      "lastSeen": 1792950521438,
+      "lastSeen": 1792974212623,
       "openPorts": [],
       "quality": {
         "latencyMs": null,
@@ -192,7 +192,7 @@
       "kind": "unknown",
       "state": "online",
       "firstSeen": 1792950160627,
-      "lastSeen": 1792950521438,
+      "lastSeen": 1792974212623,
       "openPorts": [],
       "quality": {
         "latencyMs": null,
@@ -217,16 +217,16 @@
       "ipConflict": false
     },
     {
-      "id": "dev-192.168.0.106",
-      "ip": "192.168.0.106",
-      "mac": "b0-81-01-70-50-ae",
+      "id": "dev-192.168.0.109",
+      "ip": "192.168.0.109",
+      "mac": "54-ea-e1-37-c7-d4",
       "hostname": null,
       "vendor": null,
       "osHint": null,
       "kind": "unknown",
       "state": "online",
-      "firstSeen": 1792950160627,
-      "lastSeen": 1792950521438,
+      "firstSeen": 1792974176269,
+      "lastSeen": 1792974212623,
       "openPorts": [],
       "quality": {
         "latencyMs": null,
@@ -260,7 +260,7 @@
       "kind": "unknown",
       "state": "online",
       "firstSeen": 1792950160627,
-      "lastSeen": 1792950521438,
+      "lastSeen": 1792974212623,
       "openPorts": [],
       "quality": {
         "latencyMs": null,
@@ -294,7 +294,7 @@
       "kind": "unknown",
       "state": "online",
       "firstSeen": 1792950160627,
-      "lastSeen": 1792950521438,
+      "lastSeen": 1792974212623,
       "openPorts": [],
       "quality": {
         "latencyMs": null,
@@ -328,41 +328,7 @@
       "kind": "unknown",
       "state": "online",
       "firstSeen": 1792950160627,
-      "lastSeen": 1792950521438,
-      "openPorts": [],
-      "quality": {
-        "latencyMs": null,
-        "jitterMs": null,
-        "packetLossPct": 0,
-        "score": 0,
-        "grade": "unknown",
-        "samples": 0
-      },
-      "bandwidth": {
-        "rxBps": 0,
-        "txBps": 0,
-        "share": 0,
-        "connections": 0,
-        "attributable": false,
-        "estimated": true
-      },
-      "rttHistory": [],
-      "isGateway": false,
-      "isSelf": false,
-      "displayName": null,
-      "ipConflict": false
-    },
-    {
-      "id": "dev-192.168.0.115",
-      "ip": "192.168.0.115",
-      "mac": "2a-37-63-e1-80-4f",
-      "hostname": null,
-      "vendor": "随机 MAC（厂商不可判）",
-      "osHint": null,
-      "kind": "unknown",
-      "state": "online",
-      "firstSeen": 1792950392591,
-      "lastSeen": 1792950521438,
+      "lastSeen": 1792974212623,
       "openPorts": [],
       "quality": {
         "latencyMs": null,
@@ -396,7 +362,7 @@
       "kind": "unknown",
       "state": "online",
       "firstSeen": 1792950160627,
-      "lastSeen": 1792950521438,
+      "lastSeen": 1792974212623,
       "openPorts": [],
       "quality": {
         "latencyMs": null,
@@ -430,7 +396,7 @@
       "kind": "unknown",
       "state": "online",
       "firstSeen": 1792950160627,
-      "lastSeen": 1792950521438,
+      "lastSeen": 1792974212623,
       "openPorts": [],
       "quality": {
         "latencyMs": null,
@@ -464,8 +430,44 @@
       "kind": "unknown",
       "state": "online",
       "firstSeen": 1792950160627,
-      "lastSeen": 1792950521438,
+      "lastSeen": 1792974212623,
       "openPorts": [],
+      "quality": {
+        "latencyMs": null,
+        "jitterMs": null,
+        "packetLossPct": 0,
+        "score": 0,
+        "grade": "unknown",
+        "samples": 0
+      },
+      "bandwidth": {
+        "rxBps": 0,
+        "txBps": 0,
+        "share": 0,
+        "connections": 0,
+        "attributable": false,
+        "estimated": true
+      },
+      "rttHistory": [],
+      "isGateway": false,
+      "isSelf": false,
+      "displayName": null,
+      "ipConflict": false
+    },
+    {
+      "id": "dev-192.168.0.128",
+      "ip": "192.168.0.128",
+      "mac": "3c-7c-3f-51-83-f1",
+      "hostname": null,
+      "vendor": null,
+      "osHint": "Windows (SMB)",
+      "kind": "workstation",
+      "state": "online",
+      "firstSeen": 1792974176269,
+      "lastSeen": 1792974212623,
+      "openPorts": [
+        445
+      ],
       "quality": {
         "latencyMs": null,
         "jitterMs": null,
@@ -507,7 +509,7 @@
       "consumables": [],
       "jobs": [],
       "source": "spooler",
-      "lastSeen": 1792950524834
+      "lastSeen": 1792974216608
     },
     {
       "id": "prn-fax",
@@ -526,7 +528,7 @@
       "consumables": [],
       "jobs": [],
       "source": "spooler",
-      "lastSeen": 1792950524834
+      "lastSeen": 1792974216608
     },
     {
       "id": "prn-microsoft-xps-document-writer",
@@ -545,7 +547,7 @@
       "consumables": [],
       "jobs": [],
       "source": "spooler",
-      "lastSeen": 1792950524834
+      "lastSeen": 1792974216608
     },
     {
       "id": "prn-onenote-desktop-",
@@ -564,7 +566,7 @@
       "consumables": [],
       "jobs": [],
       "source": "spooler",
-      "lastSeen": 1792950524834
+      "lastSeen": 1792974216608
     },
     {
       "id": "prn-onenote-for-windows-10",
@@ -583,10 +585,56 @@
       "consumables": [],
       "jobs": [],
       "source": "spooler",
-      "lastSeen": 1792950524834
+      "lastSeen": 1792974216608
     }
   ],
   "alarms": [
+    {
+      "id": "alm-mvoij4lp-1",
+      "severity": "info",
+      "code": "DEVICE_NEW",
+      "targetType": "device",
+      "targetId": "dev-192.168.0.109",
+      "targetName": "192.168.0.109",
+      "message": "新设备接入：192.168.0.109",
+      "detail": "IP 192.168.0.109 · MAC 54-ea-e1-37-c7-d4 · 厂商 未知",
+      "raisedAt": 1792974176269,
+      "ackAt": null,
+      "ackBy": null,
+      "resolvedAt": null,
+      "lastRaisedAt": 1792974176269,
+      "occurrences": 1,
+      "trace": [
+        {
+          "at": 1792974176269,
+          "type": "raised",
+          "by": null
+        }
+      ]
+    },
+    {
+      "id": "alm-mvoij4lp-2",
+      "severity": "info",
+      "code": "DEVICE_NEW",
+      "targetType": "device",
+      "targetId": "dev-192.168.0.128",
+      "targetName": "192.168.0.128",
+      "message": "新设备接入：192.168.0.128",
+      "detail": "IP 192.168.0.128 · MAC 3c-7c-3f-51-83-f1 · 厂商 未知",
+      "raisedAt": 1792974176269,
+      "ackAt": null,
+      "ackBy": null,
+      "resolvedAt": null,
+      "lastRaisedAt": 1792974176269,
+      "occurrences": 1,
+      "trace": [
+        {
+          "at": 1792974176269,
+          "type": "raised",
+          "by": null
+        }
+      ]
+    },
     {
       "id": "alm-mvo4dgfe-1",
       "severity": "info",
@@ -599,7 +647,7 @@
       "raisedAt": 1792950397034,
       "ackAt": null,
       "ackBy": null,
-      "resolvedAt": null,
+      "resolvedAt": 1792950997034,
       "lastRaisedAt": 1792950397034,
       "occurrences": 1,
       "trace": [
@@ -618,12 +666,19 @@
     "degraded": 0,
     "printers": 5,
     "printersWithFault": 0,
-    "rxBps": 108620,
-    "txBps": 73915,
+    "rxBps": 18757895,
+    "txBps": 33415579,
+    "bandwidthHistory": [
+      {
+        "ts": 1792974202406,
+        "rxBps": 18757895,
+        "txBps": 33415579
+      }
+    ],
     "alarmCounts": {
       "critical": 0,
       "warning": 0,
-      "info": 1
+      "info": 2
     },
     "scan": {
       "active": false,
@@ -633,10 +688,11 @@
       "total": 0,
       "startedAt": null
     },
-    "lastScanAt": 1792950521438,
+    "lastScanAt": 1792974212623,
     "nextScanInMs": null,
     "autoScan": false,
     "autoScanIntervalSec": 0
   },
+  "watches": [],
   "warnings": []
 }

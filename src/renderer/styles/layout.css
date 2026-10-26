@@ -89,8 +89,32 @@
   white-space: nowrap;
 }
 
+/* 实时监控中：脉冲呼吸点（task-026） */
+.topbar__live-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-right: 6px;
+  border-radius: 50%;
+  background: var(--ok);
+  box-shadow: 0 0 0 0 rgb(52 211 153 / 45%);
+  animation: topbar-live-pulse 2s ease-out infinite;
+}
 
-/* 自动扫描开关 */
+@keyframes topbar-live-pulse {
+  0% {
+    box-shadow: 0 0 0 0 rgb(52 211 153 / 45%);
+  }
+  70% {
+    box-shadow: 0 0 0 6px rgb(52 211 153 / 0%);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgb(52 211 153 / 0%);
+  }
+}
+
+
+/* 实时监控开关（task-026 前 UI 语义为"自动扫描"） */
 .switch-field {
   display: inline-flex;
   align-items: center;

@@ -1,18 +1,18 @@
 import { useEffect, useRef, useState } from 'react'
 import type { WarningEntry } from '../../../shared/types'
 import { Icon } from '../Icon'
-import { fmtClock, fmtCountdown, relTime } from '../../lib/format'
+import { fmtClock, relTime } from '../../lib/format'
 import { useTick } from '../../hooks/useTick'
 import logoUrl from '../../assets/logo.png'
 
 export interface TopBarProps {
   subnet: string | null
   dataSource: string
+  /** 最近一帧快照的推送时间（最近更新的数据源） */
+  updatedAt: number | null
   lastScanAt: number | null
   autoScan: boolean
   autoScanIntervalSec: number
-  /** 下一次扫描的绝对时间戳；由 App 用 snapshot.ts + nextScanInMs 算出 */
-  nextScanAt: number | null
   scanning: boolean
   /** 引擎侧"某些数据源没采到"的提示（不是故障，不进告警中心计数） */
   warnings: WarningEntry[]
@@ -37,10 +37,10 @@ const SOURCE_HINT: Record<string, string> = {
 export function TopBar({
   subnet,
   dataSource,
+  updatedAt,
   lastScanAt,
   autoScan,
   autoScanIntervalSec,
-  nextScanAt,
   scanning,
   warnings,
   onRefresh,
@@ -49,7 +49,6 @@ export function TopBar({
 }: TopBarProps) {
   const now = useTick(1000)
   const isDemo = dataSource !== 'live'
-  const remaining = nextScanAt === null ? null : Math.max(0, nextScanAt - now)
 
   // 导出成功反馈：按钮旁短暂显示目标路径，5s 后自动消失；失败走全局错误条（useLiveFeed 已 setError）
   const [exportMsg, setExportMsg] = useState<string | null>(null)
@@ -133,8 +132,8 @@ export function TopBar({
 
       <div className="topbar__meta">
         <Icon name="clock" size={13} />
-        <span>
-          最后扫描 <span className="mono">{fmtClock(lastScanAt)}</span>
+        <span title={lastScanAt === null ? undefined : `最近深度扫描 ${fmtClock(lastScanAt)}`}>
+          最近更新 <span className="mono">{fmtClock(updatedAt)}</span>
         </span>
       </div>
 
@@ -144,13 +143,13 @@ export function TopBar({
           className="switch-field"
           onClick={onToggleAutoScan}
           aria-pressed={autoScan}
-          title={autoScan ? '关闭自动扫描' : '开启自动扫描'}
+          title={autoScan ? '暂停实时监控' : '开启实时监控'}
         >
           <span className="switch" data-on={autoScan} aria-hidden="true">
             <span className="switch__knob" />
           </span>
-          <span>自动扫描</span>
-          <span className="mono switch-field__interval">{autoScanIntervalSec}s</span>
+          <span>实时监控</span>
+          <span className="mono switch-field__interval">深度扫描 {autoScanIntervalSec}s</span>
         </button>
 
         <span
@@ -158,11 +157,18 @@ export function TopBar({
           data-off={autoScan ? undefined : 'true'}
           title={
             autoScan
-              ? '距离下一次自动扫描'
-              : '自动扫描已关闭，但心跳 / 带宽 / 打印机采集仍在运行'
+              ? '5s 心跳实时探测：全量在线设备 + 未知地址滚动发现（新设备秒级上屏，离线 ≈20s 确认）'
+              : '实时监控已暂停：设备状态冻结；带宽 / 打印机等本机观测仍在运行'
           }
         >
-          {autoScan ? fmtCountdown(remaining) : '自动扫描已关闭 · 仍持续监控'}
+          {autoScan ? (
+            <>
+              <span className="topbar__live-dot" aria-hidden="true" />
+              实时监控中
+            </>
+          ) : (
+            '实时监控已暂停'
+          )}
         </span>
 
         <button
@@ -170,7 +176,7 @@ export function TopBar({
           className="btn btn--primary"
           onClick={onRefresh}
           disabled={scanning}
-          title="立即执行一轮完整扫描"
+          title="立即执行一轮深度扫描（端口 / 指纹 / 主机名采集）"
         >
           <Icon name="refresh" size={13} className={scanning ? 'is-spinning' : undefined} />
           {scanning ? '扫描中' : '立即刷新'}

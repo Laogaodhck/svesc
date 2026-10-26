@@ -147,12 +147,13 @@ export interface PrinterManageConfig {
 
 /**
  * 应用设置（设置页读写；持久化于 JsonStore.settings）。
- * autoScan / autoScanIntervalSec 供顶栏与扫描调度共用；
- * snmpEnabled / useMdns 是打印机采集的运行时开关（下一轮打印机刷新即生效）。
+ * autoScan / autoScanIntervalSec：task-026 后语义为「实时监控开关 / 深度扫描间隔」
+ * （字段名保持不变以兼容已持久化设置）；snmpEnabled / useMdns 是打印机采集的
+ * 运行时开关（下一轮打印机刷新即生效）。
  */
 export interface AppSettings {
   autoScan: boolean;
-  /** 自动扫描间隔（秒），30-3600 */
+  /** 深度扫描间隔（秒，task-026 前 UI 语义为"自动扫描间隔"），30-3600 */
   autoScanIntervalSec: number;
   /** 打印机页是否显示本机虚拟打印机（旧值在会话态，现持久化） */
   showVirtualPrinters: boolean;
@@ -343,6 +344,11 @@ export interface SystemStat {
   bandwidthHistory: BandwidthPoint[];
   alarmCounts: { critical: number; warning: number; info: number };
   scan: ScanProgress;
+  /**
+   * task-026 语义：lastScanAt / nextScanInMs / autoScanIntervalSec 均指"深度扫描"
+   * （端口/指纹/主机名采集轮）；设备活性判定由 5s 心跳实时覆盖，不再依赖它。
+   * autoScan = 实时监控开关（off = 暂停心跳探测与深度扫描，设备状态冻结）。
+   */
   lastScanAt: number | null;
   nextScanInMs: number | null;
   autoScan: boolean;

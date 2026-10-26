@@ -3,8 +3,9 @@
  *
  * R-02 采样失败必须是 null 而不是 0（"不知道" ≠ "零流量"）
  * R-03 warnings 去重 / 上限 / 自愈
- * R-04 关闭自动扫描只停"全量扫描"，不得停掉采集（心跳 / 带宽 / 打印机）
- * R-06 静默主机必须撑过 3 个**扫描轮**才判离线，5s 心跳不得推进缺席计数
+ * R-04 关闭实时监控只停"主动探测"（心跳 / 全量扫描），本机观测（带宽 / 打印机）继续
+ * R-06 连续缺席观测轮判离线（task-026：心跳 5s 与扫描轮统一推进，4 轮 ≈ 20s；
+ *      ARP 在位的设备不计缺席——禁 ping 主机永远不因沉默被判离线）
  *
  * 注入方式：`vi.mock` 替换四个 IO 出口（arp / ping / ports / spooler）+ 结构注入 meter。
  * 全部 fake timers + 注入时钟，不 spawn 进程、不碰网络、不依赖真实 180s。
@@ -107,6 +108,16 @@ vi.mock('../src/main/engine/printers/mdns', () => ({
   discoverMdnsPrinters: async () => [],
 }));
 
+// IPP 耗材查询发真实 http.request：其 setTimeout 超时守卫在 fake timers 下永不触发，
+// 设备一旦持有 9100/631 端口（looksLikePrinter 命中）collectPrinters 就会真实连网挂死
+vi.mock('../src/main/engine/printers/ipp', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/main/engine/printers/ipp')>();
+  return {
+    ...actual,
+    ippGetAttributes: async () => null,
+  };
+});
+
 // task-023：WS-Discovery / SSDP 是新的网络 IO 出口，测试里同样必须替掉（不碰网络）
 vi.mock('../src/main/engine/discovery/wsdiscovery', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/main/engine/discovery/wsdiscovery')>();
@@ -121,6 +132,16 @@ vi.mock('../src/main/engine/discovery/ssdp-devices', async (importOriginal) => {
   return {
     ...actual,
     discoverSsdpDevices: async () => [],
+  };
+});
+
+// NetBIOS 采集会 spawn nbtstat：替掉（其内部 setTimeout 超时守卫在 fake timers 下
+// 永不触发，进程一旦挂起 queryNetbiosNames 就永久 pending，扫描轮被拖死）
+vi.mock('../src/main/engine/discovery/netbios', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/main/engine/discovery/netbios')>();
+  return {
+    ...actual,
+    queryNetbiosNames: async () => new Map<string, string>(),
   };
 });
 
@@ -494,7 +515,7 @@ describe('R-03. WarningLog 纯函数（已导出，at 可注入）', () => {
   });
 });
 
-describe('R-04. 关闭自动扫描只停全量扫描，不得停掉采集', () => {
+describe('R-04. 关闭实时监控只停主动探测（心跳/全量扫描），本机观测继续', () => {
   function countingScheduler() {
     const s = makeScheduler({ autoScanIntervalSec: 60 });
     const counts = { full: 0, heartbeat: 0, bandwidth: 0, printers: 0 };
@@ -527,12 +548,17 @@ describe('R-04. 关闭自动扫描只停全量扫描，不得停掉采集', () =
     expect(counts.full, `关闭前 ${before} 次，关闭后又跑了 ${counts.full} 次`).toBe(before);
   });
 
-  it('同一 90s 内心跳计数必须继续增长（设备在线状态不能停止刷新）', async () => {
-    const { s, counts } = countingScheduler();
+  it('关闭实时监控后真实心跳必须早退：定时器仍触发但零探测（无 ARP 读取）', async () => {
+    const s = makeScheduler({ autoScanIntervalSec: 60 });
+    s.start();
+    await vi.advanceTimersByTimeAsync(SCHEDULE.devices);
+    const arpBefore = io.calls.arp;
     s.setAutoScan(false);
-    const before = counts.heartbeat;
     await vi.advanceTimersByTimeAsync(90_000);
-    expect(counts.heartbeat, `每 ${SCHEDULE.devices}ms 一次，90s 应约 18 次，实际新增 ${counts.heartbeat - before}`).toBeGreaterThan(before);
+    expect(
+      io.calls.arp,
+      '暂停实时监控 = 暂停主动探测：90s 内不得再读 ARP（设备状态冻结是诚实呈现）',
+    ).toBe(arpBefore);
   });
 
   it('同一 90s 内带宽采样计数必须继续增长（流量曲线不能断）', async () => {
@@ -584,7 +610,7 @@ describe('R-04. 关闭自动扫描只停全量扫描，不得停掉采集', () =
   });
 });
 
-describe('R-06. 静默主机必须撑过 3 个扫描轮才离线（心跳不得推进缺席计数）', () => {
+describe('R-06. 连续缺席观测轮判离线（心跳与扫描统一推进，ARP 在位不计缺席）', () => {
   /** 扫描 1：ARP 在位 + ICMP 通；之后彻底静默。 */
   async function scanOnceThenSilent() {
     const s = makeScheduler();
@@ -601,61 +627,105 @@ describe('R-06. 静默主机必须撑过 3 个扫描轮才离线（心跳不得�
     expect(deviceOf(s, HAWK.ip)?.state).toBe('online');
   });
 
-  it('36 次心跳（180s）不得把设备推进 offline —— 心跳不是扫描轮', async () => {
+  it('缺席 1-3 个心跳轮（15s）仍不得 offline（确认窗口防抖）', async () => {
     const s = await scanOnceThenSilent();
-    for (let i = 0; i < 36; i += 1) {
+    for (let i = 0; i < ALARM_THRESHOLDS.offlineArpMisses - 1; i += 1) {
       vi.advanceTimersByTime(SCHEDULE.devices);
       await s.heartbeat();
     }
     expect(
       deviceOf(s, HAWK.ip)?.state,
-      '心跳推进了 arpMissStreak：3 次心跳（15s）就判离线，这正是线上"设备突然离线"的形态',
-    ).not.toBe('offline');
+      '确认窗口未满就下离线结论，网络抖动会变成误报',
+    ).toBe('online');
   });
 
-  it('缺席 1 次、2 次扫描仍不得 offline（ARP 老化有延迟，不得提前下结论）', async () => {
-    const s = await scanOnceThenSilent();
-    await s.runFullScan();
-    await s.runFullScan();
-    expect(deviceOf(s, HAWK.ip)?.state).toBe('online');
-  });
-
-  it(`缺席 ${ALARM_THRESHOLDS.offlineArpMisses} 次扫描后才必须判 offline`, async () => {
+  it(`连续缺席 ${ALARM_THRESHOLDS.offlineArpMisses} 个心跳轮（≈20s）后必须判 offline`, async () => {
     const s = await scanOnceThenSilent();
     for (let i = 0; i < ALARM_THRESHOLDS.offlineArpMisses; i += 1) {
-      await s.runFullScan();
+      vi.advanceTimersByTime(SCHEDULE.devices);
+      await s.heartbeat();
     }
     expect(deviceOf(s, HAWK.ip)?.state).toBe('offline');
   });
 
   it('真正 offline 之前 DEVICE_OFFLINE 告警条数必须为 0', async () => {
     const s = await scanOnceThenSilent();
-    for (let i = 0; i < 36; i += 1) {
+    for (let i = 0; i < ALARM_THRESHOLDS.offlineArpMisses - 1; i += 1) {
+      vi.advanceTimersByTime(SCHEDULE.devices);
+      await s.heartbeat();
+    }
+    expect(offlineAlarms(s), `提前告警会把网络抖动变成误报（10 分钟抑制只是兜底）`).toHaveLength(0);
+  });
+
+  it(`连续缺席 ${ALARM_THRESHOLDS.offlineArpMisses} 轮后 DEVICE_OFFLINE 应为 1 条`, async () => {
+    const s = await scanOnceThenSilent();
+    for (let i = 0; i < ALARM_THRESHOLDS.offlineArpMisses; i += 1) {
+      vi.advanceTimersByTime(SCHEDULE.devices);
+      await s.heartbeat();
+    }
+    expect(offlineAlarms(s).map((a) => `${a.code}/${a.targetId}`)).toEqual([`DEVICE_OFFLINE/dev-${HAWK.ip}`]);
+  });
+
+  it('ARP 在位但 ping 永远不通：任意轮数都不得 offline（禁 ping 主机，沉默 ≠ 消失）', async () => {
+    const s = await scanOnceThenSilent();
+    io.arpEntries = [HAWK];
+    for (let i = 0; i < 20; i += 1) {
+      vi.advanceTimersByTime(SCHEDULE.devices);
+      await s.heartbeat();
+    }
+    expect(deviceOf(s, HAWK.ip)?.state).toBe('online');
+  });
+
+  it('缺席设备心跳回包必须复活：缺席计数归零、回到 online', async () => {
+    const s = await scanOnceThenSilent();
+    for (let i = 0; i < ALARM_THRESHOLDS.offlineArpMisses - 1; i += 1) {
+      vi.advanceTimersByTime(SCHEDULE.devices);
+      await s.heartbeat();
+    }
+    io.pingAlive = new Set([HAWK.ip]);
+    vi.advanceTimersByTime(SCHEDULE.devices);
+    await s.heartbeat();
+    expect(deviceOf(s, HAWK.ip)?.state).toBe('online');
+  });
+
+  it('pingAlive 心跳轮也要归零：首轮通、之后全无，仍必须在阈值轮后 offline（粘住会永远在线）', async () => {
+    const s = await scanOnceThenSilent();
+    for (let i = 0; i < ALARM_THRESHOLDS.offlineArpMisses; i += 1) {
+      vi.advanceTimersByTime(SCHEDULE.devices);
+      await s.heartbeat();
+    }
+    expect(
+      deviceOf(s, HAWK.ip)?.state,
+      'pingAlive 粘住 => 缺席计数永远归零 => 设备永远 online',
+    ).toBe('offline');
+  });
+
+  it('扫描轮与心跳统一账本：3 次心跳缺席 + 1 次扫描缺席 = offline', async () => {
+    const s = await scanOnceThenSilent();
+    for (let i = 0; i < ALARM_THRESHOLDS.offlineArpMisses - 1; i += 1) {
       vi.advanceTimersByTime(SCHEDULE.devices);
       await s.heartbeat();
     }
     await s.runFullScan();
-    await s.runFullScan();
-    expect(offlineAlarms(s), `提前告警会直接违反产品立身规则（ICMP 不通 ≠ 离线）`).toHaveLength(0);
+    expect(deviceOf(s, HAWK.ip)?.state).toBe('offline');
   });
 
-  it(`真正缺席 ${ALARM_THRESHOLDS.offlineArpMisses} 次扫描后 DEVICE_OFFLINE 应为 1 条`, async () => {
+  it('有端口史的静默设备同样必须按阈值 offline（心跳缺席必须失效陈旧端口证据）', async () => {
     const s = await scanOnceThenSilent();
+    io.arpEntries = [HAWK];
+    io.pingAlive = new Set([HAWK.ip]);
+    io.openPorts = new Map([[HAWK.ip, [9100]]]);
+    await s.runFullScan(); // 建立端口史：portResponded = true
+    io.arpEntries = [];
+    io.pingAlive = new Set();
+    io.openPorts = new Map();
     for (let i = 0; i < ALARM_THRESHOLDS.offlineArpMisses; i += 1) {
-      await s.runFullScan();
-    }
-    expect(offlineAlarms(s).map((a) => `${a.code}/${a.targetId}`)).toEqual([`DEVICE_OFFLINE/${`dev-${HAWK.ip}`}`]);
-  });
-
-  it('pingAlive 每轮扫描重置：首轮 ICMP 通、之后全无，仍必须在第 3 次缺席后 offline（粘住会永远在线）', async () => {
-    const s = await scanOnceThenSilent();
-    // 首轮 ICMP 通会让 rec.pingAlive=true；若后续轮次不清零，applyArpPresence 每轮都把 streak 归零
-    for (let i = 0; i < ALARM_THRESHOLDS.offlineArpMisses; i += 1) {
-      await s.runFullScan();
+      vi.advanceTimersByTime(SCHEDULE.devices);
+      await s.heartbeat();
     }
     expect(
       deviceOf(s, HAWK.ip)?.state,
-      'pingAlive 粘住 => arpMissStreak 永远归零 => 设备永远 online',
+      'portResponded 不失效 => 有端口史的设备被旧证据钉住永远 online',
     ).toBe('offline');
   });
 
@@ -672,5 +742,79 @@ describe('R-06. 静默主机必须撑过 3 个扫描轮才离线（心跳不得�
       { lastSeen: deviceOf(s, HAWK.ip)?.lastSeen, frozen },
       '离线设备仍被刷新 lastSeen，会让"最后在线时间"永远显示刚刚',
     ).toEqual({ lastSeen: frozen, frozen });
+  });
+});
+
+describe('task-026. 实时化：未知滚动发现 + 早推帧 + 暂停语义', () => {
+  /** 带 hooks 的调度器：onSnapshot 计数（早推帧断言用）。 */
+  function makeHookedScheduler(hosts: string[]) {
+    const snapTimes: number[] = [];
+    const s = new SchedulerClass(
+      {
+        prefix: '192.168.2.',
+        hosts,
+        selfIp: null,
+        gateway: null,
+        subnetLabel: '192.168.2.0/24',
+        autoScanIntervalSec: 60,
+        forceDemo: false,
+        snmpEnabled: false,
+        useMdns: false,
+      },
+      { onSnapshot: () => snapTimes.push(Date.now()) },
+    );
+    return { s, snapTimes };
+  }
+
+  it('未知 IP 滚动探测：心跳 1 轮内发现新上线的陌生地址并建册', async () => {
+    const stranger = '192.168.2.77';
+    const { s } = makeHookedScheduler([HAWK.ip, stranger]);
+    io.pingAlive = new Set([stranger]); // 陌生地址只回 ping，ARP 里没有
+    vi.advanceTimersByTime(SCHEDULE.devices);
+    await s.heartbeat();
+    const rec = deviceOf(s, stranger);
+    expect(rec, '滚动探测 ping 中的未知地址必须立即建册（这就是"新设备 ~10-20s 发现"的机制）').not.toBeNull();
+    expect(rec?.state).toBe('online');
+    expect(rec?.lastSeen).toBeGreaterThan(0);
+  });
+
+  it('心跳发现 ARP 新设备时必须早推一帧（早推 + 常规 = 2 帧；下一轮无新设备只 1 帧）', async () => {
+    const { s, snapTimes } = makeHookedScheduler([HAWK.ip]);
+    io.arpEntries = [HAWK];
+    vi.advanceTimersByTime(SCHEDULE.devices);
+    await s.heartbeat();
+    expect(
+      snapTimes.length,
+      '新设备必须立刻可见：ARP 建册后不等本轮 ping 完成就推帧',
+    ).toBe(2);
+    vi.advanceTimersByTime(SCHEDULE.devices);
+    await s.heartbeat();
+    expect(snapTimes.length, '无新设备的一轮只推常规 1 帧').toBe(3);
+  });
+
+  it('扫描 phaseInitialArp 发现新设备同样早推帧（扫描 10s 期间新设备不必等扫完）', async () => {
+    const { s, snapTimes } = makeHookedScheduler([HAWK.ip]);
+    io.arpEntries = [HAWK];
+    await s.runFullScan();
+    expect(snapTimes.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('暂停实时监控后设备状态冻结：快照仍推送（带宽帧），但设备不再被探测改写', async () => {
+    const { s } = makeHookedScheduler([HAWK.ip]);
+    io.arpEntries = [HAWK];
+    io.pingAlive = new Set([HAWK.ip]);
+    await s.runFullScan();
+    expect(deviceOf(s, HAWK.ip)?.state).toBe('online');
+    io.arpEntries = [];
+    io.pingAlive = new Set();
+    s.setAutoScan(false);
+    for (let i = 0; i < 10; i += 1) {
+      vi.advanceTimersByTime(SCHEDULE.devices);
+      await s.heartbeat();
+    }
+    expect(
+      deviceOf(s, HAWK.ip)?.state,
+      '暂停期间缺席计数不得推进（探测停止 = 观测停止，不许用旧观测继续判离线）',
+    ).toBe('online');
   });
 });

@@ -30,6 +30,7 @@ import {
   ALARM_THRESHOLDS,
   CONCURRENCY,
   DEMO_DEVICE_THRESHOLD,
+  HEARTBEAT_PROBE,
   PROBE_PORTS,
   PORT_SERVICE,
   QUALITY_SAMPLE,
@@ -231,7 +232,7 @@ export class Scheduler {
   private printerReachable = new Map<string, boolean | null>();
   private progress: ScanProgress = idleProgress();
   private timers: NodeJS.Timeout[] = [];
-  /** 全量扫描定时器单独持有：关闭自动扫描时只停它，观测类定时器必须继续 */
+  /** 全量扫描定时器单独持有：关闭实时监控时只停它；心跳定时器继续挂着（heartbeat 按开关早退） */
   private scanTimer: NodeJS.Timeout | null = null;
   /** 引擎侧降级信息：key = `${source}:${message}`，同源同文案只保留 1 条 */
   private warningLog = new WarningLog();
@@ -247,6 +248,8 @@ export class Scheduler {
   private bandwidthInFlight = false;
   private autoScan: boolean;
   private heartbeatCursor = 0;
+  /** 未知 IP 滚动探测游标（task-026）：在 cfg.hosts 上轮转，254 个地址 ≈ 4 轮心跳覆盖完 */
+  private unknownCursor = 0;
   private running = false;
   /** 持续 Ping 监控（task-025）：独立 5s 轮询，变迁直接进告警引擎 */
   private watches: WatchManager;
@@ -363,7 +366,8 @@ export class Scheduler {
   setAutoScan(enabled: boolean, intervalSec?: number): { autoScan: boolean; intervalSec: number } {
     this.autoScan = enabled;
     if (intervalSec !== undefined && intervalSec > 0) this.cfg.autoScanIntervalSec = intervalSec;
-    // 只重挂扫描定时器：观测类定时器（心跳/带宽/打印机/质量）不受 autoScan 影响
+    // 只重挂扫描定时器：心跳定时器继续挂着（heartbeat 首行按 autoScan 早退），
+    // 带宽/打印机/质量采样等本机观测不受开关影响
     if (this.running) this.installScanTimer();
     this.emitSnapshot();
     return { autoScan: this.autoScan, intervalSec: this.cfg.autoScanIntervalSec };
@@ -409,8 +413,9 @@ export class Scheduler {
   }
 
   /**
-   * `autoScan` 只控制 60s 全量扫描；心跳/带宽/打印机/质量采样属于"观测"，
-   * 关闭自动扫描不等于停止观测（否则快照会冻结，用户看到的是过期数据）。
+   * `autoScan`（实时监控开关，task-026 改语义）控制两类**主动探测**：5s 心跳（heartbeat 首行早退）
+   * 与定时全量扫描；带宽 / 打印机 / 质量采样 / 持续 Ping 属于本机观测，关闭后仍继续
+   * （快照不冻结，但设备列表与状态停留在暂停时刻——诚实呈现"暂停"而非伪造活性）。
    */
   private installTimers(): void {
     this.timers.push(setInterval(() => void this.sampleBandwidth(), SCHEDULE.bandwidth));
@@ -459,20 +464,39 @@ export class Scheduler {
     if (this.bandwidthHistory.length > 60) this.bandwidthHistory.splice(0, this.bandwidthHistory.length - 60);
   }
 
-  /** 5s 心跳：只重读 ARP（85ms）+ 轮转 ping 最多 32 台，避免每 5s 打 254 个地址。 */
+  /**
+   * 5s 心跳（task-026 实时化）：重读 ARP（85ms）+ 三集合合并探测——
+   * 缺席确认（无 ARP 的在册记录优先重探）∪ 在线全量（不再轮转 32）∪ 未知 IP 滚动（≈20s 覆盖全网）。
+   * ARP 里冒出新设备时早推一帧（<100ms 可见，不必等本轮 ping 完成）。
+   * 离线判定在此加速：连续 `ALARM_THRESHOLDS.offlineArpMisses` 轮「无 ARP 且 ping 失败」→ offline（≈20s）。
+   */
   async heartbeat(): Promise<void> {
+    // 实时监控关闭 = 暂停实时探测：心跳完全不跑（设备状态冻结，诚实呈现"暂停"）；
+    // 带宽 / 质量 / 打印机 / 持续 Ping 属于本机观测，不受影响
+    if (!this.autoScan) return;
     if (this.heartbeatInFlight || this.scanInFlight) return;
     this.heartbeatInFlight = true;
     try {
       const arpResult = await readArp(this.cfg.prefix);
       this.replaceWarnings('discovery', this.arpWarnings(arpResult));
-      this.mergeArp(arpResult.entries);
-      if (this.arpReadUsable(arpResult)) this.lastArpConflicts = arpResult.conflicts ?? [];
-      const targets = this.pickHeartbeatTargets(32);
+      if (!this.arpReadUsable(arpResult)) {
+        // 读失败沿用上一轮视图（一次解析失败 ≠ 全网消失，与扫描 phaseInitialArp 同语义）：
+        // 本轮没有有效观测，缺席计数不推进、pingAlive 不清零，只如实推一帧
+        this.emitSnapshot();
+        return;
+      }
+      this.lastArpConflicts = arpResult.conflicts ?? [];
+      // R-06① 同语义：本轮"ICMP 存活"先全量归零，只有本轮真的回包才置 true。
+      // 心跳现在每轮探测全部在线设备 + 缺席设备，不清零则陈旧 pingAlive 会把静默设备永远粘成在线。
+      for (const rec of this.records.values()) rec.pingAlive = false;
+      // 早推帧：ARP 里冒出的新设备立刻可见（本轮 ping 完成后还有常规推帧）
+      if (this.mergeArp(arpResult.entries) > 0) this.emitSnapshot();
+      const targets = this.pickHeartbeatTargets();
       if (targets.length > 0) {
         const sweep = await pingSweep(targets, { concurrency: CONCURRENCY.pingSweep, timeoutMs: TIMEOUTS.ping });
         for (const [ip, result] of sweep.results) {
-          const rec = this.records.get(ip);
+          // 未知 IP 被滚动探测 ping 中：立即建册（新设备由此进入快照与 DEVICE_NEW 告警）
+          const rec = result.alive ? this.ensureRecord(ip, Date.now()) : this.records.get(ip);
           if (!rec) continue;
           rec.pingAlive = result.alive;
           rec.ttl = result.ttl ?? rec.ttl;
@@ -481,7 +505,13 @@ export class Scheduler {
           this.pushHistory(rec, result.alive ? result.rttMs : null);
         }
       }
-      this.applyArpPresence(undefined, false);
+      this.applyArpPresence();
+      // 缺席设备（本轮无 ARP 且 ping 失败）：陈旧的端口响应证据同步失效——
+      // TCP 回包的前提是 ARP 在位，缺席即旧证据作废；否则打印机等"有端口史"的
+      // 设备会被 portResponded 钉住，加速判定对它们永远不生效
+      for (const rec of this.records.values()) {
+        if (!rec.arpPresent && !rec.pingAlive) rec.portResponded = false;
+      }
       this.emitSnapshot();
     } catch (err) {
       // 审计修复：pingSweep worker 的 spawn 失败等异常此前会打掉整轮心跳且无人感知
@@ -494,17 +524,38 @@ export class Scheduler {
     }
   }
 
-  private pickHeartbeatTargets(limit: number): string[] {
-    const present = Array.from(this.records.values()).filter((r) => r.arpPresent || r.pingAlive);
-    if (present.length === 0) return [];
-    const slice: string[] = [];
-    const n = Math.min(limit, present.length);
-    for (let i = 0; i < n; i += 1) {
-      const rec = present[(this.heartbeatCursor + i) % present.length];
-      if (rec) slice.push(rec.ip);
+  /**
+   * 心跳探测目标（task-026）：三集合去重合并，单次 pingSweep（最坏 208 目标 @64 并发 ≈ 2.4s）。
+   *   1) 缺席确认：无 ARP 条目的在册记录——缺席第 1 轮就进确认队列（按缺席轮数降序，≤absentProbeCap）
+   *   2) 在线全量：arpPresent||pingAlive，超 onlineCap 用游标轮转（未探到的靠 ARP 在位兜底不误判）
+   *   3) 未知滚动：cfg.hosts − 在册记录，unknownCursor 轮转 ≤unknownPerRound（254 ÷ 64 ≈ 4 轮 ≈ 20s 全覆盖）
+   */
+  private pickHeartbeatTargets(): string[] {
+    const targets = new Set<string>();
+    for (const rec of Array.from(this.records.values())
+      .filter((r) => !r.arpPresent)
+      .sort((a, b) => b.arpMissStreak - a.arpMissStreak)
+      .slice(0, HEARTBEAT_PROBE.absentProbeCap)) {
+      targets.add(rec.ip);
     }
-    this.heartbeatCursor = (this.heartbeatCursor + n) % present.length;
-    return slice;
+    const present = Array.from(this.records.values()).filter((r) => r.arpPresent || r.pingAlive);
+    const onlineN = Math.min(HEARTBEAT_PROBE.onlineCap, present.length);
+    for (let i = 0; i < onlineN; i += 1) {
+      const rec = present[(this.heartbeatCursor + i) % present.length];
+      if (rec) targets.add(rec.ip);
+    }
+    if (present.length > 0) {
+      this.heartbeatCursor = (this.heartbeatCursor + onlineN) % present.length;
+    }
+    if (this.cfg.hosts.length > 0) {
+      const unknownN = Math.min(HEARTBEAT_PROBE.unknownPerRound, this.cfg.hosts.length);
+      for (let i = 0; i < unknownN; i += 1) {
+        const ip = this.cfg.hosts[(this.unknownCursor + i) % this.cfg.hosts.length];
+        if (ip && !this.records.has(ip)) targets.add(ip);
+      }
+      this.unknownCursor = (this.unknownCursor + unknownN) % this.cfg.hosts.length;
+    }
+    return Array.from(targets);
   }
 
   /**
@@ -650,7 +701,7 @@ export class Scheduler {
       this.phaseComputeTargets(ctx);
       await this.phasePorts(ctx);
       await this.phaseFingerprint(ctx);
-      this.applyArpPresence(ctx.arp2Entries, true);
+      this.applyArpPresence(ctx.arp2Entries);
       this.updatePortResponders();
     } catch (err) {
       // 单轮扫描失败不得抛到主进程；R-03：但也不许静默，至少让快照带一条 discovery 告警
@@ -675,7 +726,8 @@ export class Scheduler {
     const arp1Entries: Map<string, ArpEntry> =
       arp1 && this.arpReadUsable(arp1) ? arp1.entries : this.arp;
     if (arp1 && this.arpReadUsable(arp1)) this.lastArpConflicts = arp1.conflicts ?? [];
-    this.mergeArp(arp1Entries);
+    // task-026：ARP 里冒出新设备 → 早推一帧（扫描还要 10s，新设备不必等）
+    if (this.mergeArp(arp1Entries) > 0) this.emitSnapshot();
     ctx.timings.arpEntries = arp1Entries.size;
   }
 
@@ -862,25 +914,31 @@ export class Scheduler {
     }
   }
 
-  private mergeArp(entries: Map<string, ArpEntry>): void {
+  /** mergeArp：覆盖在位视图 + 建册，返回**新建记录数**（task-026：>0 时调用方早推一帧）。 */
+  private mergeArp(entries: Map<string, ArpEntry>): number {
     // 最新一轮 ARP 快照即"当前在位视图"（覆盖而非累加，否则设备永远无法判离线）
     this.arp = new Map(entries);
+    let created = 0;
     for (const [ip, entry] of entries) {
+      const existed = this.records.has(ip);
       const rec = this.ensureRecord(ip, Date.now());
       rec.mac = entry.mac;
       rec.arpPresent = true;
+      if (!existed) created += 1;
     }
+    return created;
   }
 
   /**
-   * 依据本轮观测刷新 `arpPresent` 与缺席计数。
+   * 依据本轮观测刷新 `arpPresent` 与缺席计数（task-026：心跳与扫描轮**统一推进**缺席）。
    *
-   * - `advanceMisses` 只在**扫描轮**（60s）为 true：5s 心跳也推进的话，"连续 3 轮"会被压成 15s，
-   *   与 plan.md §5.1 的语义（3 个扫描轮 ≈ 180s）不符。
+   * - 缺席计数两处调用均推进：心跳（5s）与扫描轮各计 1 轮，连续
+   *   `ALARM_THRESHOLDS.offlineArpMisses`（4）轮「无 ARP 且 ping 失败」→ offline ≈ 20s。
+   *   心跳只在 ARP 读取可用时调用本方法——缺席必须基于真实观测，读失败沿用上一轮视图不推进。
    * - `lastSeen` 只在本轮真的观测到（ARP 在位 / 本轮 ping 回包）时推进：
-   *   陈旧的 `portResponded` 不得给设备续命。
+   *   陈旧的 `portResponded` 不得给设备续命（心跳侧对缺席设备另有显式失效逻辑）。
    */
-  private applyArpPresence(latest: Map<string, ArpEntry> | undefined, advanceMisses: boolean): void {
+  private applyArpPresence(latest?: Map<string, ArpEntry>): void {
     const now = Date.now();
     for (const rec of this.records.values()) {
       const present = latest ? latest.has(rec.ip) : this.arpPresentIn(rec.ip);
@@ -888,7 +946,7 @@ export class Scheduler {
       if (present || rec.pingAlive) {
         rec.arpMissStreak = 0;
         rec.lastSeen = now;
-      } else if (advanceMisses) {
+      } else {
         rec.arpMissStreak += 1;
       }
     }
@@ -1118,6 +1176,8 @@ export class Scheduler {
       bandwidthHistory: this.bandwidthHistory.map((p) => ({ ...p })),
       alarmCounts: this.alarms.counts(),
       scan: this.progress,
+      // lastScanAt / nextScanInMs / autoScanIntervalSec 在 task-026 后语义为"深度扫描"：
+      // 端口/指纹/主机名采集仍靠全量扫描，活性判定已由 5s 心跳实时覆盖
       lastScanAt: this.lastScanAt,
       nextScanInMs: this.nextScanInMs(now),
       autoScan: this.autoScan,
