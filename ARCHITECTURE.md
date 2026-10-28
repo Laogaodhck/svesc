@@ -1,46 +1,33 @@
 # SVESC 局域网监控台 · 架构设计
 
-> 面向技术负责人。本文只描述**已经落地并实测跑通**的设计，不含未来畅想（未来项集中在第 9 节）。
-> 所有耗时数字均来自本机（Windows 10 Pro 19045 / 中文 locale / 192.168.2.0/24）实测。
+> 当前实现说明更新于 2026-10-29，应用内部版本为 0.4.0。第 9.7 节与第 10.3～10.8 节保留历史演进记录，不代表所有旧功能仍存在。
+> 历史真机耗时来自当时的 Windows 10 Pro 19045 环境，不是当前版本的性能承诺。本轮设备发现与双通道租约增强的自动化验证、未验证范围见第 11 节；管理页候选固件尚未逐台验证。
 
 ---
 
 ## 1. 分层架构
 
-```
-┌──────────────────────────────────────────────────────────────────────────┐
-│ 渲染层 Renderer（React 19 + Vite 7）                      src/renderer/**  │
-│  Overview / Devices / Printers / Watches / DeviceDetail 抽屉               │
-│  ▲ 只读 Snapshot，不发任何探测请求；订阅推送，2s/5s 增量重绘                 │
-└───────────────────────────────────┬──────────────────────────────────────┘
-                                    │ contextBridge（src/main/preload.ts）
-                                    │ window.lanApi：6 个 invoke + 3 个订阅
-┌───────────────────────────────────┴──────────────────────────────────────┐
-│ 编排层 Main（唯一允许 import electron 的层）                                │
-│  index.ts   生命周期 / 窗口 / 菜单隐藏 / SMOKE 分支                          │
-│  ipc.ts     6 个 invoke 路由 + 3 个推送出口                                 │
-│  smoke.ts   仅 SMOKE=1 时加载的截图例程（生产路径不引用）                     │
-└───────────────────────────────────┬──────────────────────────────────────┘
-                                    │ 纯函数 / 服务调用（无 electron）
-┌───────────────────────────────────┴──────────────────────────────────────┐
-│ 探测引擎 Engine（src/main/engine/**，可被 Vitest 在纯 Node 下直接导入）       │
-│  discovery : subnet → arp → ping sweep → ports → oui → fingerprint        │
-│  network   : quality（冻结公式） / monitor（滑窗） / bandwidth（估算）        │
-│  printers  : snmp-ber → snmp-client → printer-mib / spooler → 三源合并       │
-│  orchestration : scheduler（分频+相位） / watch（持续监控） / store / simulator│
-└───────────────────────────────────┬──────────────────────────────────────┘
-                                    │ child_process / net.Socket / dgram
-┌───────────────────────────────────┴──────────────────────────────────────┐
-│ 系统层 Windows                                                            │
-│  ping.exe · arp.exe · netstat.exe · route.exe（GBK 解码）                  │
-│  powershell.exe + Get-Printer / Win32_Printer / Get-PrintJob（UTF-8 JSON） │
-│  UDP 161 (SNMPv2c) · TCP connect（9100/631/515/445/…）· UDP 5353 (mDNS)    │
-└──────────────────────────────────────────────────────────────────────────┘
+```text
+Renderer（React 19 + Vite 7，src/renderer/**）
+  总览 / 设备 / 打印 / 持续监控 / 诊断 / 设置 / 路由器登录
+  展示快照、发起用户操作；不直接执行局域网探测
+       ↕ contextBridge：src/main/preload.ts → window.lanApi
+Main（src/main/** 中的 Electron 适配层）
+  index.ts：生命周期、窗口、托盘、依赖注入
+  ipc.ts：白名单操作与快照 / 路由器状态推送
+  router-browser.ts：管理页 Cookie 分区、网关绑定与会话检测
+  router-store.ts：safeStorage 异步加密与凭据操作修订
+       ↕ 纯 Node 服务、注入的 Cookie / 凭据提供者和回调
+Engine（src/main/engine/**）
+  discovery：ARP / ICMP / TCP + mDNS / SSDP / WS-Discovery / 指纹
+  router：UPnP / ubus / 管理页租约 → 规范化与合并
+  scheduler / network / printers / watch / db / simulator
+       ↕ child_process / net / dgram / http / node:sqlite
+Windows 自带命令、局域网协议与本地 SQLite
 ```
 
-**分层铁律**：`src/main/engine/**` 内 `grep "from 'electron'"` 恒为 0。
-需要 Electron 能力的两处（userData 目录、下载目录）由 `index.ts` 注入字符串路径，引擎不认识 Electron。
-收益：Tess 的单元测试不需要启动 Electron；`scripts/engine-check.mjs` 能在纯 Node 下一轮跑完真实扫描。
+**分层铁律**：`src/main/engine/**` 不导入 Electron。目录、Cookie 与凭据读取能力由主进程注入，引擎不直接访问 Electron 会话或密钥库。
+纯 Node 引擎可在 Vitest 中测试；`scripts/engine-check.mjs` 会执行真实扫描。IPC 通道与接口以 [channels.ts](src/shared/channels.ts)、[preload.ts](src/main/preload.ts) 为准，不在文档中维护易过时的接口数量。
 
 ---
 
@@ -52,13 +39,14 @@
 | `discovery/subnet.ts` | 从 `os.networkInterfaces()` 推导 /24 网段 + 默认路由（`route print -4`） | 排除 `vEthernet/WSL/Loopback/169.254.*`；网关读不到就是 `null`，不猜 |
 | `discovery/arp.ts` | `arp -a`（GBK）主路径 + `Get-NetNeighbor` 回退 | 双 locale 正则；过滤组播/广播/全零 MAC；解析空 → `[]` + `parseWarning`，不抛错 |
 | `discovery/ping.ts` | `ping -n 1 -w 800` 存活与 RTT；`ping -n 4` 质量采样 | 解析失败不抛错；`<1ms` 记 0；**禁止 `ping -a`** |
-| `discovery/ports.ts` | `net.connect` 探活（700ms/端口），只对候选主机 | 禁止 254×10 全打 |
-| `discovery/oui.ts` | OUI 前缀表（手写主表 + `oui-extended.ts` IEEE 官方数据生成表），未命中返回 `null` | 不按概率猜厂商；`isRandomizedMac` 识别本地管理位 MAC（随机化 Wi-Fi MAC 查不到厂商属预期） |
-| `discovery/oui-extended.ts` | `scripts/build-oui.mjs` 从 IEEE oui.txt 过滤白名单厂商生成（802 条/41 厂商，task-023） | 生成结果入库，原始 10MB 数据不入库；主表优先于扩充表 |
-| `discovery/wsdiscovery.ts` | ONVIF WS-Discovery（UDP 3702）摄像头自报发现：Probe → ProbeMatches Types → ipc/nvr（task-023） | 只认 Types 明确写摄像头类别的响应（Windows WSD/打印不猜）；异常静默 `[]` |
-| `discovery/ssdp-devices.ts` | SSDP `ssdp:all` M-SEARCH + 描述页 deviceType → router/ap/camera/printer/iot 自报发现（task-023/027）；friendlyName → displayName 候补（task-027） | MediaServer 等拿不准的不定 kind 只给 osHint；异常静默 `[]` |
-| `discovery/http-fingerprint.ts` | HTTP 管理页指纹（task-027）：对已探明 80/8080 开放的候选（≤6 台/轮轮转）GET `/`，title/Server 头厂商型号关键词分类 → printer/router/camera/server/iot | **恰好命中 1 类才定 kind**（≥2 类或 0 类不猜）；title 原文兜底 osHint；传输层注入；失败静默跳过 |
-| `discovery/fingerprint.ts` | 端口优先的 `kind`/`osHint` 推断：打印机端口 → Windows 管理端口 → 网关（硬事实）→ 自报层（WS-D/SSDP/mDNS/HTTP 管理页）→ 端口（含 8009 Chromecast/8554 RTSP/32400 Plex）→ 主机名（平板/电视/机顶盒/手机/PC 词根）→ OUI（手机/打印机/摄像头/NAS/IoT/电视/网络设备/PC 类别表）→ TTL 弱提示 | TTL 只作弱提示，绝不单独判 workstation/server；手机厂商 OUI 需"非网关+无管理端口"，PC 厂商 OUI 需"无管理端口"；电视厂商/PC 厂商 OUI 与 HTTP 自报的 osHint 均明示推断来源 |
+| `discovery/ports.ts` | `net.connect` 探活（700ms/端口），只对候选主机 | 端口集合以 `shared/constants.ts` 的 `PROBE_PORTS` 为准，受扫描剩余预算约束 |
+| `discovery/oui.ts` | 手写主表 + IEEE 数据生成表，未命中返回 `null` | 主表优先；`isRandomizedMac` 识别本地管理位 MAC，不按概率猜厂商 |
+| `discovery/oui-extended.ts` | `scripts/build-oui.mjs` 从 IEEE 注册库生成全量 24-bit MA-L 表；当前快照为 2026-10-26 的 40394 条 | 不再按厂商白名单截断；不收录无法仅凭前三字节区分的 MA-M / MA-S 细分块 |
+| `discovery/mdns-devices.ts` | 服务类型与 TXT 型号转换为设备身份提示 | AirPlay 等共享生态服务不单独判手机；明确型号才细分；同类优先保留型号证据 |
+| `discovery/wsdiscovery.ts` | ONVIF WS-Discovery（UDP 3702）组播与定向探测，解析明确的摄像头自报类型 | 地址由调度层限定在扫描范围内；失败不伪造身份 |
+| `discovery/ssdp-devices.ts` | SSDP `ssdp:all` 查询与描述页，提取 deviceType / friendlyName | 不明确的设备类只给提示，不强行定类 |
+| `discovery/http-fingerprint.ts` | 对已探明 80/8080 开放的候选（≤6 台/轮轮转）查询 title / Server | 恰好命中一类才定 kind；原文作提示，失败不拖垮扫描 |
+| `discovery/fingerprint.ts` | 将网关事实、协议自报、端口、主机名、OUI 与 TTL 分层转换为 `kind` / `osHint` | TTL 只作弱提示；跨品类厂商结合管理端口等反证，主板品牌推断不冒充整机型号 |
 | `network/quality.ts` | **纯函数**质量评分（公式冻结） | 系数、取整时机不允许改；`samples < QUALITY_MIN_SAMPLES(8)` → `grade='unknown'`（score 保留），`>=8` 才出 85/70/50 分级 |
 | `network/monitor.ts` | 每设备滑窗（20 采样）+ RTT 历史（60 点） | 未响应只算丢包，不产生离线结论；数据源只有 `ping -n 4` 批量采样 |
 | `network/bandwidth.ts` | `netstat -e` 差分 + `netstat -ano` 连接归集 | 不与网卡计数器混算；无归集时 `attributable:false` |
@@ -69,12 +57,15 @@
 | `printers/ipp.ts` | IPP 2.0 `Get-Printer-Attributes`（opt-in 耗材通路，148 行 / 仅 `node:http`） | 只试 `/ipp/print`、`/ipp`；statusCode≠0x0000 立即放弃；`marker-levels<0` → `levelPct:null` |
 | `printers/print-ops.ts` | 打印操作（task-024）：任务取消/暂停/恢复（PrintJob cmdlet）、测试页（rundll32 printui.dll）、设默认（CIM SetDefaultPrinter） | 打印机名 `'`→`''` 转义 + 拒绝换行/反引号/双引号（≤220 字符）；jobId 强制正整数；printui 走 args 数组分离（MUI 铁律）；失败如实 `{ok:false,error}` 不吞错 |
 | `printers/printer-service.ts` | 三源合并 + **TCP 探活覆盖 state** + 耗材 provider 链（`snmp → ipp → unknown`，命中即短路） | `.213` 假在线必须被覆盖为 `offline`；网络不可达的打印机不查耗材（不为离线设备"猜"数据） |
-| `printers/mdns.ts` | `_ipp/_pdl-datastream` 组播发现（可选） | 任何异常静默返回 `[]` |
-| `scheduler.ts` | 分频调度、4 相位扫描、质量采样、快照组装、状态判定 | `resolveLinkState` 是纯函数；**质量窗口只由 15s `ping -n 4` 填充**，扫描/心跳的存活 ping 不写入；带宽历史环（60 点，失败轮入 null 点）与 WatchManager 挂载于此（task-025） |
-| `soak.ts` | 长跑取证（真实 95s 采样，质量/降级率稳定性统计） | 纯 Node，`npm run soak` 驱动 |
-| `store.ts` | JSON 持久化（别名/设置/备注/标签/监控目标/首次接入） | 目录注入；300ms debounce；损坏文件自动重建；`normalizeTags` 归一化（≤8 个/单个 ≤24 字符） |
-| `db/` | SqliteStore（better-sqlite3）与 JsonStore 同构；migrations 版本管理 | v2：`device_notes/device_tags/watch_targets`（task-025）；v3：DROP `alarms`/`known_device_keys`（告警功能移除） |
-| `watch.ts` | 持续 Ping 监控（task-025）：`WatchManager` 每 5s ICMP 探测目标，环形窗口 60 点 | 目标存 store（Json+Sqlite 同构）；`tickInFlight` 闸门防重入；宕机/恢复变迁经 `onTransition` 交 scheduler 即时重推快照；无样本诚实 `unknown` |
+| `printers/mdns.ts` | 打印机与全设备发现共用的 DNS 查询/解析层；压缩 PTR / SRV 与跨包 A / TXT 关联 | 缓存限于单次查询窗口；不以 UDP 来源地址冒充 SRV 目标；打印机 mDNS 来源开关与设备身份查询用途分开 |
+| `scheduler.ts` | 分频调度、预算内扫描、质量采样、设备快照与租约名称投影 | `resolveLinkState` 为纯函数；质量窗口只由 15s `ping -n 4` 填充，租约补名不修改存活证据 |
+| `router/index.ts` | 路由器能力探测、独立会话、并行刷新与双通道租约合并 | 同核心会话合并刷新；会话/网关改变后拒绝旧结果；租约先于 WAN 完成推送 |
+| `router/leases.ts` | 两路租约与设备回填共用的规范化入口 | MAC + IP 去重、冲突名称置空、到期过滤、最多 512 条；不修改调用方数据 |
+| `router/web-leases.ts` | 管理页表格 / 纯字符串数组的实验性租约解析与候选请求 | 不执行页面脚本；逐 URL 取 Cookie；总预算和取消守卫约束所有候选与重试 |
+| `soak.ts` | 长跑取证（真实采样，质量/降级率稳定性统计） | 纯 Node，`npm run soak` 驱动 |
+| `store.ts` | JsonStore，保留与主存储同构的设置与设备元数据接口 | 目录注入；300ms debounce；`normalizeTags` 归一化（≤8 个/单个 ≤24 字符） |
+| `db/` | 当前主存储 SqliteStore，使用内置 `node:sqlite`，无需原生模块编译 | `svesc-state.db`；初始化失败降级内存模式并记录日志；v3 移除旧告警表 |
+| `watch.ts` | 持续 Ping 监控：每 5s 探测目标，60 点窗口 | `tickInFlight` 防重入；变迁经 `onTransition` 即时推送快照，无样本为 `unknown`；不再接告警引擎 |
 | `wol.ts` | WOL 网络唤醒（task-025）：Magic Packet（6×0xFF+16×MAC，102 字节）UDP 广播 9/7 端口 | 只承诺"包已发出"；本机/网关/跨网段/未知 MAC/演示设备诚实拒绝 |
 | `diag/portscan.ts` | 自定义 TCP 端口扫描（task-025）：worker pool 并发 64，单次 ≤1024 端口 | `validateDiagTarget` 白名单校验；结果 `{ports,openPorts,durationMs}` |
 | `report-html.ts` | HTML 巡检报告（task-025）：自包含单文件（内联 CSS），设备/打印机/降级三节 | `escapeHtml` 转义五字符；空数据占位「暂无」，不伪造内容 |
@@ -84,40 +75,38 @@
 
 ## 3. 数据流
 
-```
-分频触发（2s 带宽 / 5s 心跳 / 15s 质量采样 / 15s 打印机 / 60s 全量）
-        │
-        ├─ 全量扫描 4 相位 ─────────────────────────────────────────────┐
-        │   ① arp -a（~120ms）→ 在位集合                                │
-        │   ② 254 × ping -n 1 -w 800 @并发 64（~6-8s）                   │
-        │   ③ 再读 arp -a（~150ms）→ 新条目也算在线                       │
-        │   ④ 端口探测（仅候选主机，~1.5s）→ 9100/631/515→printer 等       │
-        │   ⑤ 反向 DNS（800ms 超时/并发 8，只等 1.5s，其余后台补齐）        │
-        └───────────────────────────────────────────────────────────────┘
-        │
-归一化：DeviceRecord（mac/ttl/ports/hostname/miss 计数）
-        │  ├─ quality = QualityTracker.quality(ip)      ← 冻结公式
-        │  ├─ bandwidth = BandwidthMeter.statFor(ip)    ← 估算 + attributable
-        │  └─ state = resolveLinkState(6 级优先级)      ← ARP 主信号
-        ▼
-快照 Snapshot（+ 演示数据合并 + 别名覆盖）
-        │  onSnapshot → ipc.pushSnapshot → webContents.send('lan:snapshot')
-        ▼
-渲染层重绘（无轮询、无请求风暴；扫描进度单独走 lan:scanProgress）
+```text
+全量扫描：单轮 10s 预算
+  初读 ARP → ping 扫描 → 复读 ARP → 候选计算 → TCP → 主机名/定向指纹
+       └→ mDNS / SSDP / WS-Discovery 并行 ─→ 范围校验 → 设备建册/早推帧
+
+独立路由器轮询：默认 10s
+  ubus 租约 ────────┐
+  管理页租约 ──────┴→ 规范化/合并 → RouterManager.publish
+                                      ├→ router:status
+                                      └→ Engine.applyRouterHints
+                                            └→ Scheduler.setRouterHints
+                                                 有效名称变化则立即出帧
+
+DeviceRecord + 协议身份 + 有效租约主机名投影
+  → 质量/带宽/在线状态组装 → 别名覆盖/演示标识 → Snapshot
+  → onSnapshot → ipc.pushSnapshot → lan:snapshot → 渲染层重绘
 ```
 
-**状态判定（plan.md §5.1，自上而下命中即定论）**
+设备列表订阅快照，扫描进度单独推送；设备详情等页面可通过受控 IPC 定时取数，并非所有页面都完全无轮询。租约名称投影既供展示也供指纹分类，不更改原始设备记录中的存活证据。
+
+**状态判定（以 `scheduler.resolveLinkState` 为准，按顺序匹配）**
 
 | 序 | 条件 | 结果 |
 |---|---|---|
-| 1 | `isSelf` / `isGateway` | online |
-| 2 | 本轮 ARP 存在有效 MAC | online（**主信号**） |
-| 3 | 任一被探测端口有响应 | online |
-| 4 | ARP 在位但 ICMP 全超时 | online + `quality.grade='unknown'`（质量未采样） |
-| 5 | ARP **连续 4 个观测轮**缺席且 ICMP 无响应（task-026：心跳 5s 与扫描轮**统一推进**缺席计数，≈20s 判离） | offline（**唯一**判离线路径） |
-| 6 | 有 ≥8 个质量样本（2 个 `ping -n 4` 批次）且（丢包 ≥20% 或延迟 >150ms） | degraded（覆盖 1-4） |
+| 1 | `isSelf` / `isGateway` | online；质量达到退化阈值时为 degraded |
+| 2 | `arpPresent` / `portResponded` / `pingAlive` 任一为真 | online；质量达到退化阈值时为 degraded |
+| 3 | 前两项不成立，且 ARP 连续缺席计数 ≥4 | offline（唯一判离线路径） |
+| 4 | 前两项不成立，且 ARP 连续缺席计数 <4 | online，暂不下离线结论 |
 
-本机实测：ARP 表 20-50 条，其中仅少数回 ICMP。若按"ping 不通即离线"，一次扫描会产出 20-30 条假离线。这就是第 5 条存在的原因。
+质量退化要求 ≥8 个质量样本且丢包 ≥20% 或延迟 >150ms。质量采样与单次存活探测独立：禁 ping 不直接判离线，质量未采样或样本不足时为 `unknown`，不能把所有 ICMP 超时都等同于“未采样”。
+
+历史本机观测中，ARP 表有 20-50 条而只有少数回 ICMP；按“ping 不通即离线”会产生大量假离线。心跳与扫描共用缺席账本，默认约 20 秒的判离耗时是正常观测下的量级，不是固定时限。
 
 task-026 实时化补充：心跳每 5s 对**本轮真实观测**记账——ICMP 存活先全量归零、只有本轮回包才置 true（防陈旧证据粘滞）；缺席设备的陈旧端口响应证据同步失效（TCP 回包前提是 ARP 在位）；ARP 读失败的一轮不算观测、不推进缺席（缺席必须基于真实账本）。
 
@@ -126,8 +115,8 @@ task-026 实时化补充：心跳每 5s 对**本轮真实观测**记账——ICM
 ## 4. 为什么手写 SNMP BER
 
 **动机**
-1. `net-snmp` 等库需要 node-gyp 编译原生模块，在中文本地化 Windows + 企业网络环境下安装失败率高（本任务明确要求零原生依赖）。
-2. SNMPv2c GET/GETNEXT 只需要 BER 的一个极小子集：`INTEGER / OCTET STRING / NULL / OID / SEQUENCE / 上下文标签 PDU`。完整实现约 300 行，可控。
+1. 项目选择用 Node 内置 UDP 与自有 BER 编解码实现有限协议能力，不额外引入 SNMP 运行时依赖或本地编译步骤。
+2. SNMPv2c GET/GETNEXT 只需要 BER 的一个极小子集：`INTEGER / OCTET STRING / NULL / OID / SEQUENCE / 上下文标签 PDU`。
 3. 纯函数 → 可以用构造字节在 Vitest 里精确断言编解码，不需要真实设备。
 
 **结构**
@@ -212,7 +201,8 @@ oidStartsWith / compareOid        walk 子树终止与前进判定
 | 设备心跳（实时探测） | 5s | 最坏 ~2.4s（`arp -a` + ping：缺席确认 ≤32 ∪ 在线全量 ≤112 ∪ 未知 IP 滚动 ≤64，@64 并发） | task-026：上下线秒级感知；新设备 ARP 冒头 / 未知 IP ping 中 → 即时建册**早推帧**（不必等扫描结束）；缺席计数在此统一推进 |
 | 质量采样 | 15s | ~6-10s（≤12 台 × `ping -n 4`，并发 8） | **质量窗口的唯一数据源**；扫描/心跳的单次存活 ping 不计入 |
 | 打印机 | 15s | ~3-5s（3 次 PowerShell + TCP 探活 + SNMP；IPP 有负缓存且命中 SNMP 即短路） | PowerShell 单飞；SNMP 正/负缓存（负 5min） |
-| 全量扫描 | 60s | **~8-10s**（预算 10s 内每个阶段都受 deadline 约束） | 超预算即跳过后续阶段，用已得结果出快照 |
+| 全量扫描 | 默认 60s | 历史约 8-10s；当前扫描预算 10s | 组播与 ping 并行，截止后停止接纳该轮协议身份，用已有结果出帧 |
+| 路由器 | 10s | 与设备扫描独立；不承诺整轮固定耗时 | 管理页候选共用 6s 预算，失败退避；租约帧不等待 WAN |
 
 **实测分解（engine-check，本机 192.168.2.0/24）**
 
@@ -227,7 +217,7 @@ printers 采集 4520ms（独立任务，不在扫描预算内；SNMP 命中即�
 - 手动刷新（`lan:refresh`）：先 `emitSnapshot()` 再启动扫描 → UI 在 **1 个 IPC 往返内**看到进度条与既有数据，不等扫描结束。
 - 首屏：不阻塞。首轮扫描完成前 `dataSource` 保持 `live`，设备列表为空由 UI 呈现骨架/空态（**不用演示数据填**，避免真实网段上启动即"演示数据 12 台"的观感）。
 - 扫描期间不阻塞主线程：`ping` 走 `spawn` + 64 并发池，端口探测走 `net.connect` 异步，进度按批推送。
-- **10s 预算对每个阶段都生效**（`SCAN_BUDGET_MS`）：`ping` 到点即把剩余主机判死；`ports` 用 `AbortController` 在剩余预算为 0 时中止；`hostnames` 只等"剩余预算"（下限 300ms）；**已过预算则整个 `arp2` 阶段跳过**（`arp1` 的在位集合已够出快照）——否则一次 `arp -a` 撞上 2s 超时线后回退的 `Get-NetNeighbor` 能把该阶段拖到 ~10s。
+- **10s 扫描预算**（`SCAN_BUDGET_MS`）：ping 到点停止继续等待，不把未探测地址直接判离线；端口阶段用 `AbortController` 中止。主机名与定向身份阶段只等待剩余预算，协议身份写回另有截止/轮次守卫；它不等于强制取消所有已发出的 DNS 或系统调用。已过预算时跳过后续复读 ARP 等阶段，用已取得的证据组装快照。
 - **强杀不做进程树清剿，除非 PowerShell**：`exec.ts` 的 `sweepTree` 开关只对 `runPowerShell` 打开。Vera 受控实验证明给 `ping/arp/netstat` 这些无子进程的叶进程也 `taskkill /T /F`，会让一次扫描从 5.5s 恶化到 10s（进程创建拥塞正反馈）；而 PowerShell 确实会派生 conhost 进程树，孙进程持有管道时 `close` 不派发，必须清剿。
 - **超时立即 settle**：强杀后不押注 `close` 一定派发（Windows 上被强杀的进程、句柄卡住的 powershell 都可能静默），Promise 当场 resolve（`timedOut:true`），令牌闸门随之释放；`close` 迟到会被 `settled` 标志忽略，幂等。
 - 引擎侧的"命令失败"一律写入 `snapshot.warnings`（`discovery`/`printers`/`bandwidth`/`system` 四源，同源同文案去重、上限 20 条、条件恢复即消失），绝不把失败静默成 0 或空列表。
@@ -254,7 +244,7 @@ printers 采集 4520ms（独立任务，不在扫描预算内；SNMP 命中即�
 | 设备未启用 SNMP | `levelPct:null` | UI「设备不报告耗材」（`null ≠ 耗尽`） |
 | 反向 DNS 全失败 | `hostname:null` | 展示 IP；失败结果也缓存，不反复超时 |
 | GPU 进程崩溃（远程桌面/虚拟机） | Electron FATAL 退出 | 启动即 `disableHardwareAcceleration()` + `disable-gpu`（本机实测必须，否则应用起不来） |
-| 状态文件损坏 | JSON 解析异常 | 自动重建默认状态，不阻塞启动 |
+| SQLite 打开或初始化失败 | 记录错误并报告存储降级 | 以默认内存状态继续运行，本次修改不落盘；不宣称已修复原数据库 |
 | 真实设备 < 3 台 | — | 叠加 `Simulator`，`dataSource='mixed'/'demo'` + 角标 |
 
 ---
@@ -272,9 +262,9 @@ printers 采集 4520ms（独立任务，不在扫描预算内；SNMP 命中即�
 4. **Prometheus 导出**：`Snapshot` 即指标快照，加一个 30s 周期把 `system/devices/printers` 映射成 `/metrics` 文本即可；`engine-check` 的 phase 计时可直接映射成扫描耗时指标。
 5. **历史时序**：目前每设备 60 点 RTT 在内存。若要长期留存，`store.ts` 可扩展为 append-only NDJSON（仍是零原生依赖）。
 
-## 9.5 打印管理页（新增需求）
+## 9.5 打印管理页
 
-**导航**：独立"打印管理"视图（`PrinterManageView`），三项能力：手动添加打印机、别名、忽略。配置持久化于 `JsonStore.printers`（与别名同一份 `svesc-state.json`）。
+**导航**：独立“打印管理”视图（`PrinterManageView`），支持手动添加打印机、别名、忽略。配置通过 `PersistStore` 接口持久化，当前默认后端为 SqliteStore；JsonStore 保留同构接口。
 
 - **手动添加**：IPv4 严格校验（`isValidIpv4`）+ 可选备注；同 IP 幂等更新备注。`collectPrinters` 按 IP 去重合并——自动发现已覆盖的 IP 不产生重复条目；**探活失败也保留并如实 offline**（`stateDetail` 标注"手动添加"），`reachable` 表同口径登记（保证状态口径与自动发现一致）。
 - **忽略**：被忽略的自动发现条目在 `collectPrinters` 输出层过滤（不显示）；手动条目不受忽略影响（删除走 removeManualPrinter）。
@@ -292,7 +282,9 @@ printers 采集 4520ms（独立任务，不在扫描预算内；SNMP 命中即�
 - **安全边界**（打印机名是不可信字符串）：PowerShell 单引号转义（`escapePsSingleQuoted`：`'`→`''`）+ `isSafePrinterName` 拒绝换行/反引号/双引号；jobId 强制正整数（非数字不进命令）；IPC 层先做 action 白名单与 IPv4 格式校验。
 - **管理页监控增强（PrinterManageView）**：耗材摘要（仅 `levelPct` 非 null 条目，缺失显示"—"）、队列长度列、默认打印机标识 + 测试页/设默认/管理页操作按钮，全部 busy 单飞 + 失败如实反馈。
 
-## 9.7 全面审计修复（2026-10-25，两路并行调查 → 10 项落地）
+## 9.7 历史审计修复（2026-10-25）
+
+本节保留当时的改动背景；告警相关功能现已移除，存储与路由器会话的当前实现分别见第 2、10 节。
 
 - **世代号（L4）**：`RouterManager.generation` 在 logout 时自增；`doRefresh` 入口捕获、写回前比对，不一致整体丢弃——堵住"logout 后在飞一轮把旧会话数据写回 status"的竞态。
 - **告警收尾**：`AlarmEngine.evaluate` 对"从监控集消失的打印机"（忽略/删除/拔除）统一 resolve 活跃告警；`printersCollected` 入参区分"启动早期空列表 tick"（绝不收尾）与"真实采集结果"。
@@ -303,31 +295,36 @@ printers 采集 4520ms（独立任务，不在扫描预算内；SNMP 命中即�
 - **健壮性**：heartbeat 补 catch → warnings（此前 spawn 失败会让快照静默停更）；手动刷新在扫描进行中如实返 `started:false`；`exportReport` 附 routerStatus + printerManage。
 - **M3**：`runFullScan` 抽为 5 个 phase 方法（ScanCtx 共享上下文），预算语义逐行保留，engine-check 回归 PASS。
 
-## 10. 路由器管理模块（新增需求）**目标**：登录路由器账号密码，自动获取路由信息并进行管理——但严格遵守"能力探测 + 诚实降级"。
+## 10. 路由器管理模块
 
-### 10.1 三条通道（每条独立探测，能力互不假设）
+当前 `RouterView` 只保留账号登录、退出、状态反馈和内嵌管理页。WAN、租约、无线状态、重启操作卡片已从该页移除；底层可用数据继续采集，租约名称供设备列表使用。引擎协议能力不等于当前页面提供对应操作入口。
 
-| 通道 | 协议 | 拿到什么 | 不支持时 |
-|------|------|----------|----------|
-| UPnP IGD | SSDP M-SEARCH → 描述 XML → SOAP（WANIPConnection） | WAN IP、累计流量计数器、**连接状态/连接时长（GetStatusInfo，task-024）**、Reboot | 标注"该路由器不提供 UPnP IGD"；不支持 GetStatusInfo 的固件两字段为 null |
-| OpenWrt ubus | HTTP POST /ubus（JSON-RPC，session.login） | system board、DHCP 租约、无线客户端、**无线频段状态（iwinfo，task-024）**、reboot | 登录表单 + "登录后可查看"（404 时文案指引改用内置浏览器）；未装 rpcd-mod-iwinfo → `wirelessStatus:null` |
-| HTTP 管理页 | GET :80/:8080/:443，跟随 30x（≤2 跳），品牌指纹 | 品牌/型号提示（OpenWrt/TP-Link/小米/华硕/华为/NETGEAR）+ 落点 URL（`identity.adminUrl`）；**401 Basic 质询 → `auth:'basic'`（reachable 但 brand=null，task-024）** | "品牌未识别"，绝不猜 |
-| 内置浏览器登录（推荐） | 主进程 BrowserWindow（`router-browser.ts`）加载 `adminUrl`，用户在真实管理页登录 | 管理页会话（`session.kind='web'`，Cookie 关键词检测：sysauth/session/token/stok/auth…） | 无 Cookie → 不标记会话，绝不猜 |
-| Basic-Auth 通用登录（task-024） | ubus 登录失败且管理页给出 `WWW-Authenticate: Basic` 质询 → 账密经 `Authorization` 头 GET 验证（HTTP 200 即通过） | 会话 `kind='basic'`（登录态展示；**不提供任何 ubus 数据**） | 无质询不降级、不发凭据 GET，沿用 ubus 错误文案 |
+### 10.1 能力与登录路径（彼此独立）
+
+| 通道 | 实现 | 数据或状态 | 不支持时 |
+|---|---|---|---|
+| UPnP IGD | SSDP → 描述 XML → SOAP | WAN 地址、累计流量、连接状态/时长等底层能力 | 在能力说明中标注不可用；未返回的字段为 null |
+| OpenWrt ubus | HTTP POST `/ubus`，JSON-RPC `session.login` | DHCP 租约、系统与无线数据，受 RPC 权限限制 | 返回登录或采集错误；无对应对象时不编造数据 |
+| HTTP 管理页探测 | 80 / 8080 / 443 探测、重定向与品牌指纹 | `identity.adminUrl`、品牌提示、Basic 质询 | 未识别不猜品牌；同网关内已观测能力保留，换网关重置 |
+| 内嵌管理页登录 | `RouterView` 的 `<webview>` 使用 `persist:router-admin` 分区 | 主进程检测会话 Cookie，维护独立 web 会话 | 启发式检测可能无法识别固件登录态；不等同于 ubus 认证 |
+| 管理页租约（实验） | 已有 web 会话后，以逐 URL Cookie 请求候选页 | HTML 表格或纯字符串数组中的 MAC / IP / hostname | 失败或不可解析则返回原因并退避，不伪造成功空表 |
+| Basic 认证 | ubus 登录失败且收到明确 Basic 质询后验证 | 仅建立 `kind='basic'` 登录状态 | 不解锁 ubus，也不凭 Basic 状态生成租约 |
 
 ### 10.2 关键实现决策
 
-- **零依赖**：node:http / node:dgram 直用，不引 xml2js/soap 库；描述 XML 与 SOAP 用正则解析（`upnp.ts` 纯函数，30 条单测覆盖）。
-- **transport 注入**：`UbusClient` 的网络出口是构造参数，测试直接喂真实抓包形状的响应，不 mock 网络。
+- **零依赖**：node:http / node:dgram 直用，不引 xml2js/soap 库；描述 XML 与 SOAP 用正则解析（`upnp.ts` 纯函数）。
+- **transport 注入**：`UbusClient` 的网络出口是构造参数，测试通过注入 transport 提供协议形状的响应，不连接真实路由器。
 - **ubus 登录 sid**：`session.login` 必须用 32 位零 null-session（`UBUS_NULL_SESSION`）——uhttpd 的 `uh_ubus_allowed` 只接受这种 sid 调登录，发字面量 `'session'` 会被当成不存在的会话，一律 -32002（真机必然登录失败，且文案与"密码错误"无法区分）。错误码文案按路径分流：`-32002` 在登录路径是"用户名或密码错误"，在调用路径是"会话已过期或无权限，请重新登录"。
 - **会话失效当场作废**：调用路径上的 -32002 是唯一"证据确凿的会话死亡"信号（同一个 sid 重试永远不会成功），且与网络超时/HTTP 错误走完全不同的分支——所以 `UbusClient.call()` 见到它即清掉缓存会话，下次调用直接 `auth-required` 短路，不再拿死 sid 发请求；网络/HTTP/权限拒绝（`result:[6]`）**不**作废会话（`sessionInvalid` 为 falsy），瞬时故障不会把用户登掉。
-- **凭据安全**：明文只存在内存；落盘必须经 Electron `safeStorage.encryptStringAsync` / 读取用 `decryptStringAsync`（Windows DPAPI，与旧同步 API 同一套平台密钥库，密文跨版本兼容）。密钥环不可用 → **拒绝落盘**并如实告知，绝不降级明文（`src/main/router-store.ts`）。同步 API（`isEncryptionAvailable`/`encryptString`/`decryptString`）自 Electron 45 弃用、46 移除，故主进程只走异步路径；`decryptStringAsync` 返回 `{shouldReEncrypt, result}`，平台密钥轮换时用新密文重存。
+- **凭据安全**：明文密码只存在内存；密码落盘必须经 Electron `safeStorage.encryptStringAsync` / 读取用 `decryptStringAsync`（Windows DPAPI，与旧同步 API 同一套平台密钥库，密文跨版本兼容）。密钥环不可用 → **拒绝落盘**并如实告知，绝不降级明文（`src/main/router-store.ts`）。同步 API（`isEncryptionAvailable`/`encryptString`/`decryptString`）自 Electron 45 弃用、46 移除，故主进程只走异步路径；`decryptStringAsync` 返回 `{shouldReEncrypt, result}`，平台密钥轮换时用新密文重存。
 - **WAN 速率**：UPnP 计数器 ≥2 个样本才出 bps；计数器回绕（路由器重启）→ 丢弃样本返回 null。
-- **独立 IPC**：路由器状态走 `router:*` 通道 + `router:status` 推送，不污染 Snapshot 冻结契约。
-- **会话正交性（404 修复的架构结论）**：ubus 会话（kind='ubus'）与管理页会话（kind='web'，Cookie 检测）是两个独立事实，合成规则"ubus 优先、web 独立存续"——ubus 登录失败不得清 web 会话，反之亦然；web 会话**不**点亮 `caps.openwrt`（Cookie 证明不了 ubus 可用，点亮就是撒谎）。DHCP/无线数据卡只在 kind='ubus' 下展示。非 OpenWrt 固件登录 ubus 拿到 HTTP 404 时，登录语境文案明确指引"改用内置浏览器登录"。
-- **实测结果（本机网关 192.168.2.1）**：管理页可达（302 落点 `/view/admin_login/tologin.html` 已被 `adminUrl` 捕获）、无 UPnP IGD、非 OpenWrt（generic）——界面如实展示"该路由器不支持"，内置浏览器登录直达登录页。
+- **统一发布链路**：`RouterManager.publish()` 递增状态时间戳，通过主进程回调同时推送 `router:status` 并调用 `engine.applyRouterHints`；有效名称变化立即生成设备快照，不另存一份主进程名称缓存。
+- **会话正交性**：ubus、web 与 Basic 是独立事实；展示优先级为 ubus > web > basic，web 会话不点亮 OpenWrt 能力。一个通道登录失败不清掉另一个仍有效的会话；退出操作清全部通道。web 的独立修订不会取消在飞的 ubus 登录，也不会吞掉 ubus 的失效结果。
+- **历史真机记录（本机网关 192.168.2.1）**：曾观测到管理页 302 落点 `/view/admin_login/tologin.html`、无 UPnP IGD、非 OpenWrt。该记录仅说明当时环境的探测结果，不代表本轮租约解析已在该固件验证成功。
 
-### 10.3 task-024 增补（打印与路由器页面功能增强）
+以下第 10.3～10.8 节为历史变更记录，测试数量是当时快照；其中告警已移除（第 10.6 节），旧路由器数据卡和联动界面不再保留。当前租约、安全与验证规则见第 10.9～11 节。
+
+### 10.3 task-024 增补（历史：打印与路由器页面功能增强）
 
 - **UPnP GetStatusInfo**：`upnpQuery` 在流量计数器之后追加 GetStatusInfo——`NewConnectionStatus`/`NewUptime` 进 `wan.connectionStatus`/`wan.uptimeSec`；固件不支持该 action（HTTP 501 等）→ 两字段保持 null（不填 0）。
 - **iwinfo 无线频段状态**：登录成功后第 4 个 ubus 调用 `iwinfo devices` → 逐设备（**最多 4 个**，防超时膨胀）`iwinfo info` → `wirelessStatus: WirelessBandStatus[]`（设备名/SSID/信道/关联客户端数）。语义三分：列表成功但空 = `[]`（无射频）；列表失败/未装 `rpcd-mod-iwinfo`（-32000）= `null` + capabilityNotes 说明——两种"空"不混用。解析器（`parseIwinfoDevices`/`parseIwinfoInfo`）为纯函数。
@@ -368,7 +365,7 @@ printers 采集 4520ms（独立任务，不在扫描预算内；SNMP 命中即�
 
 - **移除范围**：告警引擎（`engine/alarms.ts`，7 规则/去重/恢复/抑制）与全部下游——告警视图（AlarmsView）与侧边栏入口、总览活跃告警 KPI 与 timeline、桌面通知、托盘角标、Webhook 推送（`engine/notify/webhook.ts`）、告警持久化（JsonStore `alarms`/`knownDeviceKeys` 字段）、`ackAlarm/alarmsClear/webhookTest/alarm` 四条 IPC 通道、设置项 `notifyDesktop`/`notifyWebhookUrl`、HTML 报告告警节。
 - **保留并独立**：① 持续 Ping 监控（`watch.ts` 变迁改为 `onTransition → emitSnapshotNow` 即时重推快照，宕机在监控页以状态标示）；② 设备离线判定（缺席阈值迁至 `HEARTBEAT_PROBE.offlineArpMisses=4`，`resolveLinkState` 语义不变）；③ IP 冲突检测（`arp.ts` `collectArpConflicts` 纯函数 + `ipConflict` 徽标，独立于告警引擎）；④ warnings 降级信息；⑤ `firstSeen` 持久化；⑥ 打印机 `state='error'` 如实展示。
-- **迁移**：Sqlite `user_version` 追加 v3——DROP `alarms`/`known_device_keys` 及两个索引；旧版本回滚时按 v1 `CREATE TABLE IF NOT EXISTS` 重建空表，无数据损失。旧版 `svesc-state.json` 中的遗留告警字段导入时整体忽略。
+- **迁移**：Sqlite `user_version` 追加 v3——DROP `alarms`/`known_device_keys` 及两个索引；v3 会删除旧告警及已知设备键数据；重建空表不等于恢复历史记录，也不保证旧版本可直接回滚。旧版 `svesc-state.json` 中的遗留告警字段导入时整体忽略。
 - **验证**：全量 557 用例通过；node+web 双 typecheck 通过；`src/main/engine` electron 引用恒 0；engine-check 全量断言 PASS；`src/` 仅 `db/migrations.ts` 保留 5 处告警字样（v1 建表供回滚 + v3 DROP 说明，有意保留）。
 
 ### 10.7 task-027 设备识别引擎增强（2026-10-26）
@@ -393,3 +390,74 @@ printers 采集 4520ms（独立任务，不在扫描预算内；SNMP 命中即�
 - **电脑主板生态**：PC 整机系列词根入主机名通道（ideapad/thinkbook/legion/latitude/vostro/inspiron/alienware/elitebook/probook/pavilion/spectre/vivobook/zenbook/clevo + \bomen|tuf|yoga\b + \bnuc(?:[-_ ]?\d+)?\b）。顺带修复：server 词根 `dc\d|ad\d` 改 `\bdc[-_]?\d|\bad[-_]?\d`（'IDEAPAD5' 原会误中 `ad5` 判 server）。
 - **路由器生态**：主机名补 miwifi/hiwifi/newifi/gl-inet/cudy/linksys/asuswrt/padavan + `\brt-(?:ax|ac|n|be)\d`（华硕 RT-AX88U 式命名）；HTTP 指纹补 asuswrt/padavan/gl-inet/cudy/linksys，IoT 补 tuya。
 - **验证**：全量 615 用例通过（+16）；node+web 双 typecheck 通过；engine-check 全 PASS。
+
+### 10.9 协议独立发现与身份关联（当前实现）
+
+- `runFullScan` 初读 ARP 后立即启动 mDNS / SSDP / WS-Discovery，与 ping 扫描并行；没有 ARP 或 ICMP 候选也不跳过协议发现。
+- `mergeDiscoveryHints` 只接收 `cfg.hosts` 内地址，复核扫描截止与 `acceptingIdentity`。合法协议回包可以建册、更新该次观测时间并提前推帧，但不设置 `pingAlive` / `portResponded`，也不注入质量采样。
+- 协议发现地址参加后续候选探测；已读 ARP 地址可进行 WS-Discovery 定向补探，整轮预算仍为 10 秒。扫描结束后的协议结果不得写回已关闭的轮次。
+- `printers/mdns.ts` 在完整 DNS 报文中解引用压缩 PTR / SRV，单次查询窗口内按实例关联 PTR、SRV、A、TXT。A 可早于 SRV，型号可后到；地址来自 SRV target 对应的 A 记录，不使用 UDP 来源地址冒充设备地址。
+- TXT 型号读取优先级为 `model` > `md` > `ty`。设备类型由服务或明确型号提供；同类提示优先保留型号，Apple 共享服务只作为生态佐证。
+- 服务与端口集合分别由 `MDNS_QUERY_SERVICES` / `PROBE_PORTS` 定义；新增的 135 / 139 端口作为 Windows 身份证据，不代表所有回应设备都可确定操作系统版本。
+
+### 10.10 双通道租约与实时名称投影（当前实现）
+
+**规范化入口：`router/leases.ts`**
+
+- `normalizeLeaseMac` 接受完整连续、冒号、连字符、Cisco 点分格式，统一为小写连字符格式；拒绝不完整或分隔符混杂的输入。
+- `normalizeLeaseHostname` 拒绝控制字符、空值、超过 253 字符及 `unknown` / `*` / `n/a` 等占位值，不生成名称。
+- `normalizeDhcpLeases` 校验 IPv4、租期，复制输入，以 MAC + IP 去重；同来源重复项中两个不同非空名称冲突时置空，排序后最多保留 512 条。
+- `expiresAt: null` 表示未知或无限，不等同于已过期。ubus 的 `expires=-1`、缺失或 null 保持此语义；零剩余时间视为已到期，其他非法租期不采纳。
+
+**合并与回填**
+
+- `RouterManager` 独立维护 `ubusLeases` / `webLeases`，只合并当前有效会话的数据。ubus 租约优先；同 MAC + IP 且 ubus 缺名时可用 web 补名，web 仅补入 ubus 未出现的 MAC。
+- `Scheduler.setRouterHints` 每轮更新复制后的租期，但只在当下有效的名称投影变化时返回 true，避免排序变化、格式差异或仅续租制造额外推送。
+- `leaseHostnameFor` 在每次快照组装时复查租期，并要求 MAC + 当前 IP 一致。`rec.hostname ?? leaseHostname` 供显示与指纹使用；最终用户别名仍覆盖显示名。
+- 租约只作名称提示，不创建设备、不修改原始 hostname、lastSeen、ping/TCP 证据或在线判断。名称到期后在后续投影中消失，不靠历史租约给离线设备续命。
+
+**刷新与失败语义**
+
+- 默认 10 秒轮询，管理页探测限频 60 秒。UPnP、ubus 调用与管理页租约尽量并行；租约/会话先推帧，不等待 WAN 完成。提前帧保留上轮 UPnP 能力证据，最终帧重新过滤到期租约。
+- 相同核心会话与 web 修订共享在飞 refresh；仅 web 修订改变时等待旧轮后补刷。新认证或网关改变可立即新开一轮，不被旧 WAN 等待阻塞；旧 Promise 的清理不得清除新一轮引用。
+- `generation`、`webGeneration` 与 `loginAttempt` 分别约束核心会话、管理页会话和并发登录。每个异步边界复核有效性，防止退出、换网关或新登录后恢复旧数据。
+- ubus 调用路径 `-32002` 才作废会话；网络错误、HTTP 错误或单对象 ACL 拒绝不当作登出。失效后清 ubus 租约和无线/系统数据，web 通道可独立保留。
+- 管理页失败清掉本通道旧租约，并按 10 / 20 / 40 / 60 秒退避；成功或新 web 会话重置，不永久禁用。Cookie 活跃会话在轮询前复查；退出后不靠残留 Cookie 在后台自动复活。
+
+**管理页实验通道**
+
+- 总预算 6000ms，覆盖 Cookie 获取、候选页与 Host 重试；单个外部操作最多 1200ms，最多 6 个按品牌过滤且按路径去重的候选。
+- 只借用同网关管理地址的 HTTP / HTTPS 协议与端口。仅识别为 TP-LINK 时允许 `tplogin.cn` Host 重试，Cookie 也必须重新按该 URL 获取，不复用网关 Cookie。
+- Cookie provider 超时后停止该轮，迟到结果不启动传输；实际发送前再次检查取消条件。
+- HTML 表头只作用于当前表；无列定义时保守取名。JS 仅解析纯字符串数组，禁止执行脚本、表达式或模板插值；登录页和无法识别的空表返回失败说明，不能视为成功的空租约集。
+
+### 10.11 Cookie 与异步凭据边界（当前实现）
+
+- `router-browser.ts` 将管理页放在 `persist:router-admin` 分区，与应用默认会话及打印机分区分离。`router-admin-gateway.json` 只记录网关地址；缺失、损坏或地址改变时先清旧 Cookie，首次升级可能要求重新登录。
+- `getRouterAdminCookieHeader(url)` 委托 Electron 按 URL 的 domain / path / secure 规则筛选 Cookie。清理开始同步推进 `cookieRevision`；在飞读取完成后修订不一致则丢弃。
+- 清理中或清理失败时，既禁止后台获取 Cookie，也通过分区 `webRequest.onBeforeRequest` 阻止原生 webview 请求，避免仅保护程序调用而漏掉 Chromium 自动携带 Cookie 的路径。
+- 网关绑定只针对管理页 Cookie 的地址关联，不是硬件身份认证，也不代表 ubus 保存账号已按网关分库存储。只应在可信、已授权的管理网络使用保存登录功能。
+- `router-store.ts` 使用异步 `safeStorage` 加密密码，存储结构仍为用户名与 base64 密文。`operationRevision` 在保存/清理时同步变更；每个 await 后与写盘前复核修订，IPC 另校验会话修订及“记住密码”开关。
+- 密钥轮换沿用原 load 修订，不抢占新保存；退出或新保存后迟到的解密结果不能覆盖状态。底层异常返回通用错误，不把可能包含凭据的异常直接交给 UI。
+- 已启用记住密码时，ubus 失效可按退避自动重登；提供者每次现读密文，连续三次失败停止自动重试，手动登录可重置。退出、停止轮询或会话变化时丢弃在飞的旧操作。
+
+## 11. 开发、打包与验证范围
+
+命令来源为 [package.json](package.json)，使用方法见 [README.md](README.md)：
+
+| 目的 | 命令 | 边界 |
+|---|---|---|
+| 安装 | `npm ci` | 使用锁文件；需下载 Electron 二进制 |
+| 启动 | `npm start` | 先构建再启动，不是热更新；当前无 dev 脚本 |
+| 自动化测试 | `npm test` | Vitest 单元与本地集成测试；包含回环 TCP/HTTP 服务，不代表真机兼容认证 |
+| 类型检查 | `npm run typecheck` 和 `npx tsc --noEmit -p tsconfig.web.json` | 分别检查主进程/Node 与渲染器 |
+| 真实采集 | `npm run engine-check` / `npm run soak` / `npm run smoke` | 会执行真实采集或启动 Electron，须确认网络授权 |
+| 打包 | `npm run dist -- --config.directories.output=<全新目录>` | 构建 NSIS + portable Windows x64，`--publish never` 不上传 |
+
+`electron-builder.yml` 将 dist 与 package.json 放入 ASAR，额外复制运行时图标；NSIS 单独使用 `build/setup-icon.ico`，应用/便携版/卸载器仍使用应用图标。重打包使用全新输出目录，避免旧 ASAR 清理限制；当前未配置代码签名证书。
+
+**租约增强验证基线（代码提交 `7e0cf25`）**：38 个测试文件、892 项测试通过；主进程、渲染器与修改测试的类型检查通过，production build 通过。安装版/便携版包内的 6 个 dist 文件及 3 个额外资源已与本地构建校验一致，包内版本为 0.4.0。
+
+**未验证项**：该轮没有登录真实路由器，也没有安装发行包后测试 UI。不得将自动化测试或旧真机记录写成所有管理页固件均兼容。
+
+**发布边界**：源码同步到 GitHub/Gitee 不会自动发布安装包。Release 应指向明确提交，先上传草稿并核验附件大小与 SHA256，再公开；同内部版本的增强构建应使用不冲突的标签，不能移动旧标签或覆盖旧附件。下载是否可用以公开 Release 状态为准。
