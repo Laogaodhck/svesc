@@ -18,7 +18,8 @@ import {
 
 export interface PrintersViewProps {
   printers: Printer[]
-  scanning: boolean
+  refreshing: boolean
+  refreshError: string | null
   now: number
   /** 是否显示本机虚拟打印机（状态提升到 App，切视图/刷新都不丢） */
   showVirtual: boolean
@@ -29,73 +30,50 @@ export interface PrintersViewProps {
   onFocusConsumed?: () => void
 }
 
-/** source 含 snmp：'snmp' 与 'both' 都算（前者纯 SNMP，后者 SNMP + 队列） */
-function hasSnmpSource(p: Printer): boolean {
-  return p.source === 'snmp' || p.source === 'both'
-}
-
 interface SuppliesNote {
-  /** 主行（≤14 字），只在真的取不到余量时出现 */
   title: string
-  /** 副行：一句具体原因 */
   sub: string
-  /** 完整解释，放 title 属性 */
   explain: string
 }
 
-/**
- * 耗材空态的分支依据「数据实际从哪来」，绝不写死一句话——
- * 否则会出现「徽标写着 SNMP 通了、文案却说 SNMP 没响应」的自相矛盾。
- *
- * 判定顺序（顺序本身即语义，不要调换）：
- *   1. 有真实余量 → 不出现空态
- *   2. 无 IP（WSD 端口等）→ 从未探测过，绝不能写"无响应"
- *   3. 有耗材条目但容量全空 → 按 source 分「SNMP 未报告容量」/「条目无余量字段」
- *   4. 空耗材表 → 按 source 分「设备不报告耗材」/「未启用 SNMP」
- * 只有走到第 4 支的 else 分支，才意味着"确实探测过 UDP 161 且失败"。
- */
 function suppliesNote(p: Printer): SuppliesNote | null {
   const cons = p.consumables
-  const anyLevel = cons.some((c) => c.levelPct !== null)
-  if (cons.length > 0 && anyLevel) return null
+  if (cons.some((c) => c.levelPct !== null)) return null
 
-  // 优先于一切 SNMP 文案：没有 IP 就没有探测，任何"无响应"都是虚假陈述
-  if (p.ip === null && p.connection !== 'virtual') {
+  if (p.source === 'simulated') {
     return {
-      title: '无 IP 地址，无法探测耗材',
-      sub: 'WSD 端口未解析出 IP',
-      explain: '该打印机通过 WSD 端口接入且系统未解析出 IP，SNMP/IPP 均无法探测。',
+      title: '未获取耗材',
+      sub: '演示数据未提供耗材余量',
+      explain: '该条目为模拟数据，不代表真实设备的耗材状态。',
     }
   }
-
-  const snmp = hasSnmpSource(p)
-
-  if (cons.length > 0 && !anyLevel) {
-    return snmp
-      ? {
-          title: 'SNMP 未报告耗材容量',
-          sub: 'maxCapacity 为 -2/-3，视为未知',
-          explain:
-            '设备已响应 SNMP，但未报告耗材容量：maxCapacity 返回 -2/-3，按 RFC 8010 语义为未知/无限，因此没有百分比余量。',
-        }
-      : {
-          title: '耗材条目无余量字段',
-          sub: '设备返回了条目但容量为空',
-          explain: '设备返回了耗材条目，但所有容量字段为空，无法换算百分比。',
-        }
+  if (p.state === 'offline') {
+    return {
+      title: '未获取耗材',
+      sub: '设备离线，暂无法更新余量',
+      explain: '当前设备离线且没有可用的耗材余量，请恢复连接后刷新。',
+    }
   }
-
-  return snmp
-    ? {
-        title: '设备不报告耗材',
-        sub: 'SNMP 返回了空耗材表',
-        explain: '设备已响应 SNMP，但 Printer MIB 未返回任何耗材条目。',
-      }
-    : {
-        title: '未启用 SNMP',
-        sub: 'UDP 161 无响应，队列无墨量',
-        explain: '未启用 SNMP（UDP 161 无响应），系统打印队列接口不提供耗材属性。',
-      }
+  if (cons.length > 0) {
+    const sources = Array.from(new Set(cons.map((c) => CONSUMABLE_SOURCE_LABEL[c.source] ?? c.source)))
+    return {
+      title: '耗材条目未提供余量',
+      sub: `耗材来源 ${sources.join(' · ')}`,
+      explain: '已获取耗材条目，但没有可用的百分比余量；不能据此判断具体容量或协议设置。',
+    }
+  }
+  if (p.ip === null) {
+    return {
+      title: '未获取耗材',
+      sub: '无 IP，无法进行网络耗材查询',
+      explain: '当前未获得打印机 IP 地址，也没有可用的耗材读数；不能据此判断设备是否支持耗材查询。',
+    }
+  }
+  return {
+    title: '未获取耗材',
+    sub: '可能不支持或关闭耗材查询',
+    explain: '本轮未获得耗材数据，可能不支持或关闭了耗材查询，也可能暂时不可达；无法据此判断 SNMP 是否启用。',
+  }
 }
 
 function Supplies({ printer }: { printer: Printer }) {
@@ -129,7 +107,7 @@ function Supplies({ printer }: { printer: Printer }) {
               color={consumableColor(c.kind)}
               title={
                 c.levelPct === null
-                  ? `${name}：设备不报告余量（来源 ${from}）`
+                  ? `${name}：未获取余量（来源 ${from}）`
                   : `${name}：剩余 ${Math.round(c.levelPct)}%（来源 ${from}）`
               }
             />
@@ -162,7 +140,9 @@ function jobActions(job: PrintJob): PrintJobAction[] {
 function PrinterCard({ printer, now, focus }: { printer: Printer; now: number; focus: boolean }) {
   const tone = printerStateTone(printer.state)
   const isFault = printer.state === 'error' || printer.state === 'warning'
-  const jobs = printer.jobs
+  const hasQueue = printer.queueName != null
+  const canOperate = hasQueue && printer.source !== 'simulated' && typeof window.lanApi !== 'undefined'
+  const jobs = hasQueue ? printer.jobs : []
   const [expanded, setExpanded] = useState(false)
   const [confirmJobId, setConfirmJobId] = useState<string | null>(null)
   const [busyJobId, setBusyJobId] = useState<string | null>(null)
@@ -173,12 +153,12 @@ function PrinterCard({ printer, now, focus }: { printer: Printer; now: number; f
 
   /** 任务操作（task-024）：取消带内联确认（破坏性），暂停/恢复直接执行；失败原因如实透出。 */
   const runJobAction = async (action: PrintJobAction, job: PrintJob): Promise<void> => {
-    if (busyJobId !== null) return
+    if (busyJobId !== null || !canOperate || printer.queueName == null) return
     setBusyJobId(job.id)
     setOpError(null)
     setConfirmJobId(null)
     try {
-      const res = await window.lanApi.printerJobAction(action, printer.name, job.id)
+      const res = await window.lanApi.printerJobAction(action, printer.queueName, job.id)
       if (!res.ok) setOpError(`${JOB_ACTION_LABEL[action]}任务失败：${res.error ?? '未知错误'}`)
     } catch (err) {
       setOpError(`${JOB_ACTION_LABEL[action]}任务失败：${err instanceof Error ? err.message : String(err)}`)
@@ -209,7 +189,7 @@ function PrinterCard({ printer, now, focus }: { printer: Printer; now: number; f
           {printer.alias && <span className="printer-card__origname">{printer.name}</span>}
           <div className="printer-card__tags">
             {printer.manual && <span className="chip chip--plain">手动</span>}
-            {printer.isDefault && <span className="chip chip--accent">默认</span>}
+            {printer.isDefault && hasQueue && <span className="chip chip--accent">默认</span>}
             {printer.shared && <span className="chip chip--plain">共享</span>}
             {printer.connection !== 'network' && (
               <span className="chip chip--plain">{CONNECTION_LABEL[printer.connection]}</span>
@@ -247,9 +227,12 @@ function PrinterCard({ printer, now, focus }: { printer: Printer; now: number; f
         <div className="u-stack u-stack-5">
           <div className="row-between">
             <span className="u-caps">队列</span>
-            <span className="u-105 dim">{jobs.length === 0 ? '空闲' : `${jobs.length} 项`}</span>
+            <span className="u-105 dim">{!hasQueue ? '未安装本机队列' : jobs.length === 0 ? '空闲' : `${jobs.length} 项`}</span>
           </div>
-          {shownJobs.length === 0 ? (
+          {hasQueue && <span className="u-105 dim">本机队列：{printer.queueName}</span>}
+          {!hasQueue ? (
+            <span className="u-11 dim">{printer.source === 'simulated' ? '演示数据不可执行实际打印任务' : '仅监控设备，安装本机队列后方可操作打印任务'}</span>
+          ) : shownJobs.length === 0 ? (
             <span className="u-11 dim">队列为空 · 最后发现 {relTime(printer.lastSeen, now)}</span>
           ) : (
             <div className="jobs">
@@ -273,7 +256,7 @@ function PrinterCard({ printer, now, focus }: { printer: Printer; now: number; f
                           <button
                             type="button"
                             className="btn btn--sm btn--ghost btn--danger job__act"
-                            disabled={busyJobId !== null}
+                            disabled={busyJobId !== null || !canOperate}
                             onClick={() => void runJobAction('cancel', job)}
                             title="确认从打印队列删除该任务"
                           >
@@ -282,7 +265,7 @@ function PrinterCard({ printer, now, focus }: { printer: Printer; now: number; f
                           <button
                             type="button"
                             className="btn btn--sm btn--ghost job__act"
-                            disabled={busyJobId !== null}
+                            disabled={busyJobId !== null || !canOperate}
                             onClick={() => setConfirmJobId(null)}
                           >
                             算了
@@ -294,7 +277,7 @@ function PrinterCard({ printer, now, focus }: { printer: Printer; now: number; f
                             key={a}
                             type="button"
                             className={`btn btn--sm btn--ghost job__act${a === 'cancel' ? ' btn--danger' : ''}`}
-                            disabled={busyJobId !== null}
+                            disabled={busyJobId !== null || !canOperate}
                             title={
                               a === 'cancel'
                                 ? `从打印队列删除「${job.documentName}」`
@@ -341,7 +324,8 @@ function PrinterCard({ printer, now, focus }: { printer: Printer; now: number; f
 
 export function PrintersView({
   printers,
-  scanning,
+  refreshing,
+  refreshError,
   now,
   showVirtual,
   onToggleVirtual,
@@ -383,7 +367,7 @@ export function PrintersView({
         <div>
           <div className="view-title">打印机</div>
           <div className="view-desc">
-            状态叠加网络探活（9100/631/515）；耗材取不到时显示「不报告」，不以 0% 冒充。
+            汇总协议识别、网络探活与本机队列；未获取耗材时如实标注，不以 0% 冒充。
           </div>
         </div>
         <div className="toolbar__meta">
@@ -420,13 +404,15 @@ export function PrintersView({
           type="button"
           className="btn btn--sm"
           onClick={onRefresh}
-          disabled={scanning}
-          title="重新探测打印机状态与队列"
+          disabled={refreshing}
+          aria-busy={refreshing}
+          title="仅刷新打印机状态与队列，不扫描全网"
         >
-          <Icon name="refresh" size={12} className={scanning ? 'is-spinning' : undefined} />
-          {scanning ? '扫描中…' : '重新探测'}
+          <Icon name="refresh" size={12} className={refreshing ? 'is-spinning' : undefined} />
+          {refreshing ? '刷新中…' : '刷新打印机'}
         </button>
       </div>
+      {refreshError && <div className="router-msg" data-tone="crit" role="alert">{refreshError}</div>}
 
       {visible.length === 0 ? (
         <div className="card">
@@ -453,15 +439,15 @@ export function PrintersView({
               title="未发现网络打印机"
               desc={
                 <>
-                  该网络内没有响应 9100/631 的打印设备，系统打印队列也为空。
+                  当前没有可显示的打印机记录，可独立刷新打印机或在打印管理中手动添加。
                   <br />
-                  若打印机使用 WSD 或处于休眠，可先手动唤醒后重新扫描。
+                  若设备处于休眠，可先手动唤醒后刷新。
                 </>
               }
               actions={
-                <button type="button" className="btn btn--primary" onClick={onRefresh} disabled={scanning}>
-                  <Icon name="refresh" size={13} className={scanning ? 'is-spinning' : undefined} />
-                  {scanning ? '扫描中…' : '立即扫描'}
+                <button type="button" className="btn btn--primary" onClick={onRefresh} disabled={refreshing} aria-busy={refreshing}>
+                  <Icon name="refresh" size={13} className={refreshing ? 'is-spinning' : undefined} />
+                  {refreshing ? '刷新中…' : '刷新打印机'}
                 </button>
               }
             />

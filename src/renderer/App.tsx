@@ -34,6 +34,9 @@ export function App() {
   const [diagPresetTarget, setDiagPresetTarget] = useState<string | null>(null)
   // 虚拟打印机开关（审计后持久化到 JsonStore.settings；本地态保证切视图/刷新不丢）
   const [showVirtualPrinters, setShowVirtualPrinters] = useState(false)
+  const [printerRefreshing, setPrinterRefreshing] = useState(false)
+  const [printerRefreshError, setPrinterRefreshError] = useState<string | null>(null)
+  const printerRefreshPending = useRef(false)
   /** 应用版本（settingsGet 注入），侧边栏 footer 展示 */
   const [appVersion, setAppVersion] = useState<string | undefined>(undefined)
   const renderMsRef = useRef<HTMLSpanElement | null>(null)
@@ -134,6 +137,23 @@ export function App() {
     feed.setAutoScan(next)
   }, [autoScan, feed])
 
+  const refreshPrinters = useCallback(async () => {
+    if (printerRefreshPending.current) return
+    printerRefreshPending.current = true
+    setPrinterRefreshing(true)
+    setPrinterRefreshError(null)
+    try {
+      if (!window.lanApi?.printerRefresh) throw new Error('打印机刷新接口不可用，请重启或更新应用')
+      const result = await window.lanApi.printerRefresh()
+      if (!result.ok) setPrinterRefreshError(result.error ?? '打印机刷新失败')
+    } catch (err) {
+      setPrinterRefreshError(err instanceof Error ? err.message : String(err))
+    } finally {
+      printerRefreshPending.current = false
+      setPrinterRefreshing(false)
+    }
+  }, [])
+
   const content = (() => {
     if (!snapshot) {
       return (
@@ -179,17 +199,25 @@ export function App() {
         return (
           <PrintersView
             printers={printers}
-            scanning={scanning}
+            refreshing={printerRefreshing}
+            refreshError={printerRefreshError}
             now={snapshot.ts}
             showVirtual={showVirtualPrinters}
             onToggleVirtual={toggleVirtualPrinters}
-            onRefresh={feed.refresh}
+            onRefresh={refreshPrinters}
             focusId={focusPrinterId}
             onFocusConsumed={consumeFocus}
           />
         )
       case 'printermanage':
-        return <PrinterManageView printers={printers} />
+        return (
+          <PrinterManageView
+            printers={printers}
+            refreshing={printerRefreshing}
+            refreshError={printerRefreshError}
+            onRefresh={refreshPrinters}
+          />
+        )
       case 'settings':
         return (
           <SettingsView

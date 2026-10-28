@@ -35,6 +35,7 @@ export const CH = {
 
   // 打印管理
   printerGetManageConfig: 'printer:getManageConfig',
+  printerRefresh: 'printer:refresh',
   printerAddManual: 'printer:addManual',
   printerRemoveManual: 'printer:removeManual',
   printerSetIgnored: 'printer:setIgnored',

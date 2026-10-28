@@ -129,7 +129,7 @@ describe('collectPrinters 手动打印机合并', () => {
     expect(res.reachable.get(p.id)).toBe(false);
   });
 
-  it('按 IP 去重：手动 IP 已被自动发现时不产生重复条目（manual 不覆盖发现结果）', async () => {
+  it('按 IP 去重：自动发现保留识别信息，手动监控属性继续生效', async () => {
     const res = await collectPrinters({
       spooler: emptySpooler(),
       arp: new Map(),
@@ -150,8 +150,7 @@ describe('collectPrinters 手动打印机合并', () => {
     });
     const ips = res.printers.map((p) => p.ip);
     expect(ips.filter((v) => v === '10.1.1.9')).toHaveLength(1);
-    // 保留的是自动发现条目（manual=false），不是手动替身
-    expect(res.printers.find((p) => p.ip === '10.1.1.9')?.manual).toBe(false);
+    expect(res.printers[0]).toMatchObject({ manual: true, name: 'hp-office', queueName: null });
   });
 
   it('忽略过滤：被忽略的发现条目消失；手动条目不受忽略影响', async () => {
@@ -165,7 +164,7 @@ describe('collectPrinters 手动打印机合并', () => {
       consumableProviders: [noopProvider],
       manage: {
         manual: [{ ip: '10.1.1.30', note: null, addedAt: T0 }],
-        ignored: ['prn-10.1.1.20'],
+        ignored: ['prn-queue-neighbor%20printer'],
       },
       now: T0,
     });
@@ -186,6 +185,7 @@ describe('collectPrinters 手动打印机合并', () => {
     const p = res.printers[0]!;
     expect(p.name).toBe('手动打印机 10.1.1.40');
     expect(p.mac).toBe('aa-bb-cc-11-22-33');
-    expect(p.state).toBe('idle');
+    expect(p.state).toBe('unknown');
+    expect(p.stateDetail).toContain('可达');
   });
 });

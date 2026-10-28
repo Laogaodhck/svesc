@@ -11,14 +11,21 @@
  * 一律全量取回 + 内存通过 PrinterName 关联（plan.md §5.3）。
  * 编码：PowerShell + UTF-8 + ConvertTo-Json，按 UTF-8 解码（双通道路径 2）。
  */
+import { isIP } from 'node:net';
 import type { PrintJob, PrinterState } from '../../../shared/types';
-import { parsePsJson, psJsonCommand, runPowerShell } from '../exec';
+import { parsePsJson, psJsonCommand, runPowerShell, type RunResult } from '../exec';
+import { sanitizeModel } from './printer-mib';
 
 export interface RawPrinter {
   Name?: string;
   DriverName?: string;
   PortName?: string;
   PrinterStatus?: number;
+  /** CIM 回退的 Win32 状态枚举，不可作为 Get-Printer 状态。 */
+  CimStatus?: number;
+  Default?: boolean;
+  WorkOffline?: boolean;
+  DetectedErrorState?: number;
   Shared?: boolean;
   JobCount?: number;
   Type?: number;
@@ -47,11 +54,19 @@ export interface RawPrintJob {
   SubmittedTime?: string | number | null;
 }
 
+/** Win32_TCPIPPrinterPort 提供的端口名与实际目标地址。 */
+export interface RawPrinterPort {
+  Name?: string;
+  HostAddress?: string;
+}
+
 export interface SpoolerSnapshot {
   printers: RawPrinter[];
   cim: RawCimPrinter[];
   jobs: RawPrintJob[];
-  errors: { printers: string | null; cim: string | null; jobs: string | null };
+  /** 可选以兼容旧快照；未采集与成功采集到空列表不同。 */
+  ports?: RawPrinterPort[];
+  errors: { printers: string | null; cim: string | null; jobs: string | null; ports?: string | null };
   ms: number;
   /** 主源失败、改用 Win32_Printer / Win32_PrintJob 的回退标记 */
   fallbackUsed: boolean;
@@ -59,8 +74,9 @@ export interface SpoolerSnapshot {
 
 // —— 纯函数区（Tess 可直接断言）——
 
-const RE_PORT_IS_IP = /^\d{1,3}(?:\.\d{1,3}){3}$/;
-const RE_PORT_IP_PREFIX = /^IP_(\d{1,3}(?:\.\d{1,3}){3})$/i;
+const RE_PORT_IP_PREFIX = /^IP_(\d{1,3}(?:\.\d{1,3}){3})(?:_\d+)?$/i;
+// 先检查原始 authority，避免 URL 将短地址、八进制、十六进制或转义 hostname 规范化为 IPv4。
+const RE_PORT_URL_IP = /^(?:https?|ipps?):\/\/(\d{1,3}(?:\.\d{1,3}){3})(?::\d+)?(?:[/?#]|$)/i;
 const RE_MAC_IN_NAME = /\(([0-9a-f]{2}(?:[:-][0-9a-f]{2}){5})\)/i;
 
 export interface PortInfo {
@@ -73,37 +89,66 @@ export interface PortInfo {
 }
 
 /**
- * 从 PortName 解析 IP 与连接类型。
- *  - `192.168.2.170` → 直取
- *  - `IP_192.168.2.213` → 去前缀
- *  - `WSD-<uuid>` → 无 IP（由名称里的 MAC 反查 ARP）
- *  - `PORTPROMPT:` / `SHRFAX:` / `Documents\...pdf` → virtual
+ * 从 PortName 解析 IPv4 与连接类型；不进行 DNS 查询或网络探测。
+ * 支持裸 IPv4、IP_<IPv4>[_重复端口序号]、http(s)/ipp(s) 的明确 IPv4。
+ * WSD/UNC 只标识连接类型；虚拟输出和 USB 端口不提供网络地址。
  */
 export function parsePortName(portName: string | undefined | null, printerName?: string | null): PortInfo {
   const raw = (portName ?? '').trim();
-  if (RE_PORT_IS_IP.test(raw)) return { ip: raw, macInName: null, connection: 'network', raw };
-  const ipPrefixed = RE_PORT_IP_PREFIX.exec(raw);
-  if (ipPrefixed && ipPrefixed[1]) {
-    return { ip: ipPrefixed[1], macInName: null, connection: 'network', raw };
+  if (isIP(raw) === 4) return { ip: raw, macInName: null, connection: 'network', raw };
+  const ipPrefixed = RE_PORT_IP_PREFIX.exec(raw)?.[1];
+  if (ipPrefixed && isIP(ipPrefixed) === 4) {
+    return { ip: ipPrefixed, macInName: null, connection: 'network', raw };
+  }
+  const urlIp = RE_PORT_URL_IP.exec(raw)?.[1];
+  if (urlIp && isIP(urlIp) === 4) {
+    try {
+      // URL 仅做语法校验（例如端口范围），不解析 hostname 为地址。
+      const url = new URL(raw);
+      if (url.hostname === urlIp) return { ip: urlIp, macInName: null, connection: 'network', raw };
+    } catch {
+      // 非法 URL 不产生地址证据。
+    }
   }
   const macMatch = RE_MAC_IN_NAME.exec(printerName ?? '') ?? RE_MAC_IN_NAME.exec(raw);
   const macInName = macMatch?.[1] ?? null;
-  if (/^wsd-/i.test(raw) || /^\\\\/i.test(raw)) {
-    return { ip: null, macInName, connection: 'network', raw };
-  }
-  if (/^(usb|dot4|lpt|com)/i.test(raw)) return { ip: null, macInName, connection: 'usb', raw };
   if (/^(portprompt|shrfa|xps|file|nul)/i.test(raw) || /\.(pdf|oxps|xps)$/i.test(raw)) {
     return { ip: null, macInName, connection: 'virtual', raw };
+  }
+  if (/^(usb|dot4|lpt|com)/i.test(raw)) return { ip: null, macInName, connection: 'usb', raw };
+  if (/^wsd-/i.test(raw) || /^\\\\/i.test(raw)) {
+    return { ip: null, macInName, connection: 'network', raw };
   }
   return { ip: null, macInName, connection: 'unknown', raw };
 }
 
-/** 驱动名 → 型号。`Microsoft` 通用驱动不是真实型号 → null。 */
+/** 实际端口映射优先于端口名中的地址猜测；USB/虚拟端口不升级为网络打印机。 */
+export function resolvePrinterPort(row: RawPrinter, ports: readonly RawPrinterPort[] = []): PortInfo {
+  const parsed = parsePortName(row.PortName, row.Name);
+  if (parsed.connection === 'virtual' || parsed.connection === 'usb') return parsed;
+  // 已知虚拟驱动即使绑定了自定义端口，也不能据此变成物理网络设备。
+  // 不过滤 Microsoft IPP Class Driver 等可用于真实设备的类驱动。
+  if (/\b(?:Microsoft Print to PDF|Microsoft XPS Document Writer|OneNote|Adobe PDF|PDFCreator|CutePDF Writer)\b/i.test(row.DriverName ?? '')) {
+    return { ...parsed, ip: null, connection: 'virtual' };
+  }
+  const port = ports.find((candidate) =>
+    Boolean(row.PortName) && candidate.Name === row.PortName &&
+    typeof candidate.HostAddress === 'string' && isIP(candidate.HostAddress) === 4,
+  );
+  return port?.HostAddress ? { ...parsed, ip: port.HostAddress, connection: 'network' } : parsed;
+}
+
+/** 驱动名 → 型号。通用驱动及仅打印语言/架构描述不作为具体型号。 */
 export function modelFromDriver(driverName: string | undefined | null): string | null {
   const d = (driverName ?? '').trim();
-  if (!d) return null;
-  if (/microsoft/i.test(d)) return null;
-  return d;
+  if (!d || /microsoft|\b(?:universal|generic|class)\b|通用/i.test(d)) return null;
+  // 先排除打印语言、版本和位数中的数字，避免 PCL6 / PS3 / x64 冒充型号。
+  const identity = d.split(/[\r\n;；]/)[0]?.replace(
+    /\b(?:pcl\s*(?:[56](?:e|c)?(?:\s*[/&+]\s*[56](?:e|c)?)?|xl)?|ps\s*[23]?|postscript(?:\s+level)?\s*[23]?|ufr\s*ii|xps|ipp|x(?:64|86)|(?:32|64)[ -]?bit|(?:v(?:er(?:sion)?)?\.?\s*)\d+(?:\.\d+)*)\b/gi,
+    '',
+  ) ?? '';
+  if (!/\d/.test(identity)) return null;
+  return sanitizeModel(d);
 }
 
 const DETECTED_ERROR_TEXT: Record<number, string> = {
@@ -228,48 +273,59 @@ const PS_GET_JOBS =
 const PS_FALLBACK_PRINTER =
   'Get-CimInstance -ClassName Win32_Printer | Select-Object Name,DriverName,PortName,PrinterStatus,Shared,JobCount,Default,WorkOffline,DetectedErrorState';
 
-export async function readPrinters(): Promise<{ items: RawPrinter[]; error: string | null }> {
-  const res = await runPowerShell(psJsonCommand(PS_GET_PRINTER));
-  if (!res.spawnError && res.stdout.trim()) {
-    const parsed = parsePsJson<RawPrinter>(res.stdout);
-    if (parsed.error === null && parsed.items.length > 0) return { items: parsed.items, error: null };
-    if (parsed.error) {
-      // 主源 JSON 损坏 → 回退
-      const fb = await readPrintersViaCim();
-      return { items: fb.items, error: fb.error };
-    }
-    if (parsed.items.length === 0) return { items: [], error: null };
-  }
-  return readPrintersViaCim();
+const PS_GET_PRINTER_PORTS =
+  'Get-CimInstance -ClassName Win32_TCPIPPrinterPort | Select-Object Name,HostAddress';
+
+interface SpoolerReadResult<T> {
+  items: T[];
+  error: string | null;
+  fallbackUsed?: boolean;
 }
 
-async function readPrintersViaCim(): Promise<{ items: RawPrinter[]; error: string | null }> {
-  const res = await runPowerShell(psJsonCommand(PS_FALLBACK_PRINTER));
-  const parsed = parsePsJson<RawPrinter>(res.stdout);
-  return { items: parsed.items, error: parsed.error ?? res.spawnError };
+function executionError(res: RunResult): string | null {
+  if (res.spawnError) return res.spawnError;
+  if (res.timedOut) return 'PowerShell timed out';
+  if (res.code !== 0) return res.stderr.trim() || `PowerShell exited with code ${res.code ?? 'null'}`;
+  // 非终止 PowerShell 错误也可能以 code=0 退出，不能当成成功的空列表。
+  return res.stderr.trim() || null;
 }
 
-export async function readCimPrinters(): Promise<{ items: RawCimPrinter[]; error: string | null }> {
-  const res = await runPowerShell(psJsonCommand(PS_GET_CIM_PRINTER));
-  const parsed = parsePsJson<RawCimPrinter>(res.stdout);
-  return { items: parsed.items, error: parsed.error ?? res.spawnError };
+async function readRows<T>(command: string): Promise<SpoolerReadResult<T>> {
+  const res = await runPowerShell(psJsonCommand(`$ErrorActionPreference='Stop'; ${command}`));
+  const error = executionError(res);
+  if (error !== null) return { items: [], error };
+  return parsePsJson<T>(res.stdout);
 }
 
-export async function readPrintJobs(): Promise<{ items: RawPrintJob[]; error: string | null }> {
-  let res = await runPowerShell(psJsonCommand(PS_GET_JOBS));
-  // 空队列：PowerShell 输出空字符串 → parsePsJson 返回 []（绝不 JSON.parse('')）
-  if (!res.spawnError) {
-    const parsed = parsePsJson<RawPrintJob>(res.stdout);
-    if (parsed.error === null) return { items: parsed.items, error: null };
-  }
-  // 回退：Win32_PrintJob
-  res = await runPowerShell(
-    psJsonCommand(
-      'Get-CimInstance -ClassName Win32_PrintJob | Select-Object JobId,Name,Document,Owner,JobStatus,TotalPages,PagesPrinted,StartTime',
-    ),
+export async function readPrinters(): Promise<SpoolerReadResult<RawPrinter>> {
+  const primary = await readRows<RawPrinter>(PS_GET_PRINTER);
+  if (primary.error === null) return primary;
+  const fallback = await readRows<RawPrinter>(PS_FALLBACK_PRINTER);
+  return {
+    ...fallback,
+    items: fallback.items.map(({ PrinterStatus, ...row }) => ({ ...row, CimStatus: PrinterStatus })),
+    error: fallback.error === null ? null : `${primary.error}; fallback: ${fallback.error}`,
+    fallbackUsed: true,
+  };
+}
+
+export async function readCimPrinters(): Promise<SpoolerReadResult<RawCimPrinter>> {
+  return readRows<RawCimPrinter>(PS_GET_CIM_PRINTER);
+}
+
+/** 只读取本机 TCP/IP 端口元数据，不解析 HostAddress 中的 hostname。 */
+export async function readPrinterPorts(): Promise<SpoolerReadResult<RawPrinterPort>> {
+  return readRows<RawPrinterPort>(PS_GET_PRINTER_PORTS);
+}
+
+export async function readPrintJobs(): Promise<SpoolerReadResult<RawPrintJob>> {
+  const primary = await readRows<RawPrintJob>(PS_GET_JOBS);
+  // 只有执行成功时，空 stdout 才代表空队列。
+  if (primary.error === null) return primary;
+  const fallback = await readRows<Record<string, unknown>>(
+    'Get-CimInstance -ClassName Win32_PrintJob | Select-Object JobId,Name,Document,Owner,JobStatus,TotalPages,PagesPrinted,StartTime',
   );
-  const parsed = parsePsJson<Record<string, unknown>>(res.stdout);
-  const items: RawPrintJob[] = parsed.items.map((row) => {
+  const items: RawPrintJob[] = fallback.items.map((row) => {
     const name = typeof row.Name === 'string' ? row.Name : '';
     // Win32_PrintJob.Name 形如 "PrinterName, 12" → 拆出打印机名
     const commaIdx = name.lastIndexOf(',');
@@ -284,25 +340,30 @@ export async function readPrintJobs(): Promise<{ items: RawPrintJob[]; error: st
       SubmittedTime: typeof row.StartTime === 'string' ? row.StartTime : undefined,
     };
   });
-  return { items, error: parsed.error ?? res.spawnError };
+  return {
+    items,
+    error: fallback.error === null ? null : `${primary.error}; fallback: ${fallback.error}`,
+    fallbackUsed: true,
+  };
 }
 
 /**
- * 一次采集本机全部 printers + cim 补充 + 全部 jobs。
- * 三次 PowerShell 调用串行（单飞闸门），冷启动主导，实测总计 ≈2.3s。
+ * 一次采集本机全部 printers + cim 补充 + 全部 jobs + TCP/IP ports。
+ * 四次 PowerShell 调用串行（单飞闸门），失败时保留各来源错误。
  */
 export async function readSpooler(): Promise<SpoolerSnapshot> {
   const started = Date.now();
   const printers = await readPrinters();
   const cim = await readCimPrinters();
   const jobs = await readPrintJobs();
-  const fallbackUsed = cim.error !== null;
+  const ports = await readPrinterPorts();
   return {
     printers: printers.items,
     cim: cim.items,
     jobs: jobs.items,
-    errors: { printers: printers.error, cim: cim.error, jobs: jobs.error },
+    ports: ports.items,
+    errors: { printers: printers.error, cim: cim.error, jobs: jobs.error, ports: ports.error },
     ms: Date.now() - started,
-    fallbackUsed,
+    fallbackUsed: printers.fallbackUsed === true || jobs.fallbackUsed === true,
   };
 }

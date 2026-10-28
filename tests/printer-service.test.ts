@@ -5,11 +5,11 @@
  * Normal/Idle/WorkOffline=false（"假在线"），**必须**由 TCP 探活覆盖为 offline。
  * 探活与耗材 provider 都是注入点，因此无需真机、无需网络。
  */
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { collectPrinters, type ConsumableProvider } from '../src/main/engine/printers/printer-service';
 import type { RawCimPrinter, RawPrinter, SpoolerSnapshot } from '../src/main/engine/printers/spooler';
 import type { ReachabilityResult } from '../src/main/engine/discovery/ports';
-import { T0, supply } from './fixtures';
+import { T0, supply, device } from './fixtures';
 
 function snapshot(printers: RawPrinter[], cim: RawCimPrinter[] = []): SpoolerSnapshot {
   return {
@@ -68,7 +68,7 @@ describe('P0. .213 假在线：探活必须覆盖 spooler 的判定', () => {
 
   it('reachable 表应记录该打印机 ip 不可达（供状态联动消费）', async () => {
     const res = await collect(async () => UNREACHABLE);
-    expect(res.reachable.get('prn-192.168.2.213')).toBe(false);
+    expect(res.reachable.get(res.printers[0]!.id)).toBe(false);
   });
 
   it('反例：探活 9100 可达时不得覆盖 spooler 的 idle 判定', async () => {
@@ -217,9 +217,9 @@ describe('型号清洗（sanitizeModel）与 sysDescr 的接入点', () => {
     expect(res.printers[0]?.model).not.toMatch(/SS\s*103|103\.002/);
   });
 
-  it('spooler 给出了具体驱动名时，不得被 provider 型号覆盖（用户看到的是自己装的驱动）', async () => {
-    const res = await collect(async () => REACHABLE_9100, [providerWith({ model: XEROX_MODEL })]);
-    expect(res.printers[0]?.model).toBe('Canon Generic Plus PCL6');
+  it('厂商通用驱动不能覆盖设备自报型号', async () => {
+    const res = await collect(async () => REACHABLE_9100, [providerWith({ model: 'Canon MF750C' })]);
+    expect(res.printers[0]?.model).toBe('Canon MF750C');
   });
 
   it('sysDescr 原文应进入 stateDetail（排查固件版本时必须看得到 SS/NC）', async () => {
@@ -247,5 +247,142 @@ describe('型号清洗（sanitizeModel）与 sysDescr 的接入点', () => {
       model: XEROX_MODEL,
       hasFirmwareInDetail: true,
     });
+  });
+});
+
+const MDNS = { name: '前台彩色打印机', ip: '10.1.1.40', port: 631, service: '_ipp._tcp.local', model: 'Canon MF750C; Firmware 1.0' };
+const baseInput = () => ({ spooler: snapshot([]), arp: new Map(), devices: [], consumableProviders: [], now: T0 });
+
+describe('打印机多源身份与实时状态', () => {
+  it('mDNS 可独立发现并保留 TXT 型号，不伪造系统队列或 SNMP 来源', async () => {
+    const probe = vi.fn(async () => REACHABLE_9100);
+    const res = await collectPrinters({ ...baseInput(), mdns: [MDNS], probe });
+    expect(res.printers).toHaveLength(1);
+    expect(res.printers[0]).toMatchObject({ ip: MDNS.ip, name: MDNS.name, model: 'Canon MF750C', source: 'mdns', queueName: null, state: 'unknown' });
+    expect(probe).toHaveBeenCalledExactlyOnceWith(MDNS.ip);
+  });
+
+  it('WSD 唯一同名先补 IP，再探活/登记 ID/采耗材', async () => {
+    const provider: ConsumableProvider = { name: 'ipp', load: vi.fn(async () => ({ consumables: [], model: 'Canon MF750C', pageCount: null, panelText: 'media-jam-error', state: 'error', error: null })) };
+    const res = await collectPrinters({ ...baseInput(),
+      spooler: snapshot([{ Name: MDNS.name, PortName: 'WSD-abc', PrinterStatus: 0 }]),
+      mdns: [MDNS], probe: async () => REACHABLE_9100, consumableProviders: [provider],
+    });
+    expect(res.printers).toHaveLength(1);
+    expect(res.printers[0]).toMatchObject({ id: `prn-queue-${encodeURIComponent(MDNS.name)}`, ip: MDNS.ip, model: 'Canon MF750C', state: 'error', queueName: MDNS.name });
+    expect(res.reachable.get(res.printers[0]!.id)).toBe(true);
+    expect(provider.load).toHaveBeenCalledOnce();
+  });
+
+  it('同名多个 IP、空名称和子串不绑定 WSD 队列', async () => {
+    for (const name of [MDNS.name, '前台', '!!!']) {
+      const res = await collectPrinters({ ...baseInput(),
+        spooler: snapshot([{ Name: name, PortName: 'WSD-abc' }]),
+        mdns: [MDNS, { ...MDNS, ip: '10.1.1.41' }], probe: async () => UNREACHABLE,
+      });
+      expect(res.printers.find((p) => p.queueName === name)?.ip).toBeNull();
+    }
+  });
+
+  it('mDNS 不把同名 USB/虚拟队列变成网络打印机', async () => {
+    for (const port of ['USB001', 'PORTPROMPT:']) {
+      const res = await collectPrinters({ ...baseInput(), spooler: snapshot([{ Name: MDNS.name, PortName: port }]), mdns: [MDNS], probe: async () => UNREACHABLE });
+      expect(res.printers.find((p) => p.queueName === MDNS.name)?.ip).toBeNull();
+    }
+  });
+
+  it('无效地址、范围外地址与非打印服务不进入候选', async () => {
+    const probe = vi.fn(async () => REACHABLE_9100);
+    const res = await collectPrinters({ ...baseInput(), discoveryHosts: [MDNS.ip], probe,
+      mdns: [{ ...MDNS, ip: '999.1.2.3' }, { ...MDNS, ip: '10.2.2.40' }, { ...MDNS, service: '_http._tcp.local' }],
+    });
+    expect(res.printers).toEqual([]);
+    expect(probe).not.toHaveBeenCalled();
+  });
+
+  it('同 IP 多服务不重复采集/建卡', async () => {
+    const probe = vi.fn(async () => REACHABLE_9100);
+    const res = await collectPrinters({ ...baseInput(), mdns: [MDNS, { ...MDNS, service: '_pdl-datastream._tcp.local', port: 9100 }], probe });
+    expect(res.printers).toHaveLength(1);
+    expect(probe).toHaveBeenCalledOnce();
+  });
+
+  it('历史端口不能证明本轮在线，离线网络条目不查耗材', async () => {
+    const load = vi.fn(async () => ({ consumables: [], model: null, pageCount: null, panelText: null, error: null }));
+    const probe = vi.fn(async () => UNREACHABLE);
+    const res = await collectPrinters({ ...baseInput(), devices: [device({ id: `dev-${MDNS.ip}`, ip: MDNS.ip, kind: 'printer', openPorts: [9100] })], probe, consumableProviders: [{ name: 'snmp', load }] });
+    expect(probe).toHaveBeenCalledOnce();
+    expect(load).not.toHaveBeenCalled();
+    expect(res.printers[0]).toMatchObject({ state: 'offline', source: 'probe', queueName: null, consumables: [] });
+  });
+
+  it('同 IP 多个本机队列保留任务归属、唯一 ID，网络请求仅一次', async () => {
+    const spooler = snapshot([{ Name: '彩色队列', PortName: MDNS.ip }, { Name: '黑白队列', PortName: MDNS.ip }]);
+    spooler.jobs = [{ Id: 1, PrinterName: '彩色队列', DocumentName: '彩色文档' }, { Id: 1, PrinterName: '黑白队列', DocumentName: '黑白文档' }];
+    const probe = vi.fn(async () => REACHABLE_9100);
+    const load = vi.fn(async () => ({ consumables: [], model: null, pageCount: null, panelText: null, error: null }));
+    const res = await collectPrinters({ ...baseInput(), spooler, probe, consumableProviders: [{ name: 'ipp', load }] });
+    expect(new Set(res.printers.map((p) => p.id)).size).toBe(2);
+    expect(res.printers.find((p) => p.queueName === '彩色队列')?.jobs[0]?.documentName).toBe('彩色文档');
+    expect(res.printers.find((p) => p.queueName === '黑白队列')?.jobs[0]?.documentName).toBe('黑白文档');
+    expect(probe).toHaveBeenCalledOnce();
+    expect(load).toHaveBeenCalledOnce();
+  });
+
+  it('队列换序、同 IP 队列移除和地址变化不改变身份或串用忽略配置', async () => {
+    const first = { Name: '彩色队列', PortName: MDNS.ip };
+    const second = { Name: '黑白队列', PortName: MDNS.ip };
+    const run = (rows: RawPrinter[], ignored: string[] = []) => collectPrinters({ ...baseInput(), spooler: snapshot(rows), probe: async () => REACHABLE_9100, manage: { manual: [], ignored } });
+    const initial = await run([first, second]);
+    const ids = Object.fromEntries(initial.printers.map((p) => [p.queueName, p.id]));
+    const reversed = await run([second, first]);
+    expect(Object.fromEntries(reversed.printers.map((p) => [p.queueName, p.id]))).toEqual(ids);
+    const remaining = await run([second], [ids['彩色队列']!]);
+    expect(remaining.printers[0]?.id).toBe(ids['黑白队列']);
+    const moved = await run([{ ...second, PortName: '10.1.1.55' }]);
+    expect(moved.printers[0]?.id).toBe(ids['黑白队列']);
+  });
+
+  it.each([[3, 'idle'], [4, 'printing'], [7, 'offline']] as const)('CIM 回退状态 %i 使用自身枚举，补采缺失仍保留默认标记', async (CimStatus, state) => {
+    const res = await collectPrinters({ ...baseInput(), spooler: snapshot([{ Name: 'CIM queue', PortName: 'USB001', CimStatus, Default: true }]) });
+    expect(res.printers[0]).toMatchObject({ state, isDefault: true, stateDetail: expect.stringContaining('win32=') });
+    expect(res.printers[0]?.stateDetail).not.toContain('spooler=');
+  });
+
+  it('CIM 补采失败时仍使用回退行的离线与错误字段', async () => {
+    const res = await collectPrinters({ ...baseInput(), spooler: snapshot([
+      { Name: 'Offline queue', PortName: 'USB001', CimStatus: 3, WorkOffline: true },
+      { Name: 'Jammed queue', PortName: 'USB002', CimStatus: 3, DetectedErrorState: 8 },
+    ]) });
+    expect(res.printers.find((p) => p.name === 'Offline queue')?.state).toBe('offline');
+    expect(res.printers.find((p) => p.name === 'Jammed queue')?.state).toBe('error');
+  });
+
+  it('中文无 IP 队列 ID 不碰撞', async () => {
+    const res = await collectPrinters({ ...baseInput(), spooler: snapshot([{ Name: '前台打印机', PortName: 'USB001' }, { Name: '仓库打印机', PortName: 'USB002' }]) });
+    expect(new Set(res.printers.map((p) => p.id)).size).toBe(2);
+  });
+
+  it('手动监控与自动识别合并后仍不受忽略影响', async () => {
+    const res = await collectPrinters({ ...baseInput(), mdns: [MDNS], probe: async () => UNREACHABLE,
+      manage: { manual: [{ ip: MDNS.ip, note: null, addedAt: T0 }], ignored: [`prn-${MDNS.ip}`] },
+    });
+    expect(res.printers).toHaveLength(1);
+    expect(res.printers[0]).toMatchObject({ manual: true, state: 'offline', model: 'Canon MF750C' });
+  });
+
+  it('仅 IPP 成功不冒充 SNMP，且状态由协议决定', async () => {
+    const res = await collectPrinters({ ...baseInput(), mdns: [MDNS], probe: async () => REACHABLE_9100,
+      consumableProviders: [{ name: 'ipp', load: async () => ({ consumables: [], model: null, pageCount: null, panelText: 'toner-low-warning', state: 'warning', error: null }) }],
+    });
+    expect(res.printers[0]).toMatchObject({ source: 'ipp', state: 'warning', stateDetail: expect.stringContaining('toner-low') });
+  });
+
+  it('单一耗材来源抛错后继续降级，不让整轮消失', async () => {
+    const res = await collectPrinters({ ...baseInput(), mdns: [MDNS], probe: async () => REACHABLE_9100,
+      consumableProviders: [{ name: 'snmp', load: async () => { throw new Error('transport failed'); } },
+        { name: 'ipp', load: async () => ({ consumables: [], model: 'Canon MF750C', pageCount: null, panelText: null, state: 'idle', error: null }) }],
+    });
+    expect(res.printers[0]).toMatchObject({ source: 'ipp', state: 'idle', model: 'Canon MF750C' });
   });
 });

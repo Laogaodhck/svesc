@@ -110,6 +110,7 @@ export type PrintJobAction = 'cancel' | 'pause' | 'resume';
 export interface Printer {
   id: string;
   name: string;
+  queueName: string | null;
   /** 用户设置的显示别名（打印管理页设置）；null = 未设置 */
   alias: string | null;
   model: string | null;
@@ -125,7 +126,7 @@ export interface Printer {
   pageCount: number | null;
   consumables: Consumable[];
   jobs: PrintJob[];
-  source: 'snmp' | 'spooler' | 'both' | 'simulated';
+  source: 'snmp' | 'ipp' | 'mdns' | 'probe' | 'spooler' | 'both' | 'simulated';
   lastSeen: number;
 }
 
@@ -420,6 +421,7 @@ export interface LanApi {
   routerCheckWebSession(): Promise<{ session: boolean }>;
   // —— 打印管理 ——
   printerGetManageConfig(): Promise<PrinterManageConfig>;
+  printerRefresh(): Promise<{ ok: boolean; error: string | null }>;
   printerAddManual(ip: string, note: string | null): Promise<{ ok: boolean; error: string | null }>;
   printerRemoveManual(ip: string): Promise<{ ok: boolean }>;
   printerSetIgnored(printerId: string, ignored: boolean): Promise<{ ok: boolean }>;

@@ -85,6 +85,10 @@ vi.mock('../src/main/engine/discovery/ports', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/main/engine/discovery/ports')>();
   return {
     ...actual,
+    probePrinterEndpoint: async (ip: string) => {
+      const port = io.openPorts.get(ip)?.find((p) => [9100, 631, 515].includes(p)) ?? null;
+      return { reachable: port !== null, port, triedPorts: [9100, 631, 515] };
+    },
     probeHosts: async (targets: string[], portsToProbe: readonly number[]) => {
       io.calls.ports += 1;
       io.probedTargets = [...targets];

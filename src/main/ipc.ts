@@ -5,6 +5,7 @@
  * 推送优先：每轮快照由引擎主动 send，渲染层不轮询。
  */
 import os from 'node:os';
+import { isIP } from 'node:net';
 import { app, ipcMain, type BrowserWindow } from 'electron';
 import { CH } from '../shared/channels';
 import { DIAG } from '../shared/constants';
@@ -146,6 +147,7 @@ export function registerIpc(win: BrowserWindow, engine: Engine, router: RouterMa
 
   // —— 打印管理通道 ——
   ipcMain.handle(CH.printerGetManageConfig, () => engine.getPrinterManage());
+  ipcMain.handle(CH.printerRefresh, () => engine.printerRefresh());
   ipcMain.handle(CH.printerAddManual, (_e, ip: string, note: string | null) =>
     engine.addManualPrinter(String(ip), note == null ? null : String(note)),
   );
@@ -178,9 +180,11 @@ export function registerIpc(win: BrowserWindow, engine: Engine, router: RouterMa
   );
   ipcMain.handle(CH.printerOpenAdmin, (_e, ip: string) => {
     const ipStr = String(ip ?? '').trim();
-    // 点分十进制格式校验（拒斜杠/冒号等注入字符；八位组范围由浏览器侧自然处理）
-    if (!/^(\d{1,3}\.){3}\d{1,3}$/.test(ipStr)) {
+    if (isIP(ipStr) !== 4) {
       return { ok: false, error: `无效的打印机 IP：${ipStr}`, url: null };
+    }
+    if (!engine.getSnapshot().printers.some((p) => p.ip === ipStr && p.source !== 'simulated')) {
+      return { ok: false, error: '该地址没有正在监控的真实打印机', url: null };
     }
     return openPrinterAdminWindow(ipStr);
   });

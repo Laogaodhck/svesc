@@ -62,7 +62,7 @@ import { QualityTracker } from './network/monitor';
 import { isDegraded } from './network/quality';
 import { BandwidthMeter, readConnections, type BandwidthSample } from './network/bandwidth';
 import { readSpooler } from './printers/spooler';
-import { collectPrinters, hasFault } from './printers/printer-service';
+import { collectPrinters, hasFault, SnmpConsumableProvider, IppConsumableProvider } from './printers/printer-service';
 import { discoverMdnsPrinters } from './printers/mdns';
 import { normalizeDhcpLeases, normalizeLeaseMac } from './router/leases';
 import { Simulator } from './simulator';
@@ -255,6 +255,10 @@ export class Scheduler {
   private heartbeatInFlight = false;
   private qualityInFlight = false;
   private printersInFlight = false;
+  private printerRefreshPromise: Promise<{ ok: boolean; error: string | null }> | null = null;
+  private printerRefreshPending = false;
+  private readonly snmpProvider = new SnmpConsumableProvider();
+  private readonly ippProvider = new IppConsumableProvider();
   /** 首次 refreshPrinters 成功后置 true。 */
   private printersCollected = false;
   private bandwidthInFlight = false;
@@ -373,6 +377,9 @@ export class Scheduler {
   setPrinterSources(opts: { snmpEnabled?: boolean; useMdns?: boolean }): { snmpEnabled: boolean; useMdns: boolean } {
     if (opts.snmpEnabled !== undefined) this.cfg.snmpEnabled = opts.snmpEnabled;
     if (opts.useMdns !== undefined) this.cfg.useMdns = opts.useMdns;
+    this.snmpProvider.clear();
+    this.ippProvider.clear();
+    if (this.printersInFlight) this.printerRefreshPending = true;
     return { snmpEnabled: this.cfg.snmpEnabled, useMdns: this.cfg.useMdns };
   }
 
@@ -604,37 +611,55 @@ export class Scheduler {
       .map((r) => r.ip);
   }
 
-  async refreshPrinters(): Promise<void> {
-    if (this.printersInFlight) return;
-    this.printersInFlight = true;
-    try {
-      const spooler = await readSpooler();
-      const mdns = this.cfg.useMdns ? await discoverMdnsPrinters() : [];
-      const devices = this.buildDevices();
-      const result = await collectPrinters({
-        spooler,
-        arp: this.arp,
-        devices,
-        mdns,
-        snmpEnabled: this.cfg.snmpEnabled,
-        manage: this.hooks.getPrinterManage?.(),
-      });
-      this.printers = result.printers;
-      this.printerReachable = result.reachable;
-      // 首轮打印机采集完成
-      this.printersCollected = true;
-      // R-03②：collectPrinters 的 errors 以前被调用方丢弃，Get-Printer 失败在界面上就是"没有打印机"
-      this.replaceWarnings('printers', result.errors);
-      this.emitSnapshot();
-    } catch (err) {
-      // spooler 全失败也不能让整个引擎崩：保留上一轮结果，但必须让用户看见
-      this.replaceWarnings('printers', [
-        `打印机采集失败：${err instanceof Error ? err.message : String(err)}`,
-      ]);
-      this.emitSnapshot();
-    } finally {
-      this.printersInFlight = false;
+  refreshPrinters(force = false): Promise<{ ok: boolean; error: string | null }> {
+    if (this.printerRefreshPromise) {
+      this.printerRefreshPending ||= force;
+      return this.printerRefreshPromise;
     }
+    this.printersInFlight = true;
+    this.printerRefreshPending = force;
+    const pending = (async () => {
+      let status: { ok: boolean; error: string | null } = { ok: true, error: null };
+      do {
+        if (this.printerRefreshPending) {
+          this.snmpProvider.clear();
+          this.ippProvider.clear();
+        }
+        this.printerRefreshPending = false;
+        const snmpEnabled = this.cfg.snmpEnabled;
+        const useMdns = this.cfg.useMdns;
+        try {
+          const [spooler, mdns] = await Promise.all([
+            readSpooler(), useMdns ? discoverMdnsPrinters() : Promise.resolve([]),
+          ]);
+          const result = await collectPrinters({
+            spooler, mdns, arp: this.arp, devices: this.buildDevices(),
+            discoveryHosts: this.cfg.hosts,
+            consumableProviders: snmpEnabled ? [this.snmpProvider, this.ippProvider] : [this.ippProvider],
+            manage: this.hooks.getPrinterManage?.(),
+          });
+          if (this.printerRefreshPending) continue;
+          this.printers = result.printers;
+          this.printerReachable = result.reachable;
+          this.printersCollected = true;
+          this.replaceWarnings('printers', result.errors);
+          this.emitSnapshot();
+          status = { ok: result.errors.length === 0, error: result.errors.join(' · ') || null };
+        } catch (err) {
+          status = { ok: false, error: `打印机采集失败：${err instanceof Error ? err.message : String(err)}` };
+          if (!this.printerRefreshPending) {
+            this.replaceWarnings('printers', [status.error!]);
+            this.emitSnapshot();
+          }
+        }
+      } while (this.printerRefreshPending);
+      return status;
+    })();
+    this.printerRefreshPromise = pending.finally(() => {
+      this.printersInFlight = false;
+      this.printerRefreshPromise = null;
+    });
+    return this.printerRefreshPromise;
   }
 
   /** 手动刷新：立即出一次快照（<1s 有反馈），随后后台跑完整扫描。 */

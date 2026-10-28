@@ -73,6 +73,7 @@ const api: LanApi = {
     ipcRenderer.invoke(CH.routerCheckWebSession),
 
   printerGetManageConfig: () => ipcRenderer.invoke(CH.printerGetManageConfig),
+  printerRefresh: () => ipcRenderer.invoke(CH.printerRefresh),
   printerAddManual: (ip: string, note: string | null) => ipcRenderer.invoke(CH.printerAddManual, ip, note),
   printerRemoveManual: (ip: string) => ipcRenderer.invoke(CH.printerRemoveManual, ip),
   printerSetIgnored: (printerId: string, ignored: boolean) =>
