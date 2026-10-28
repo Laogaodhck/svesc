@@ -15,6 +15,7 @@ import type {
   DataSource,
   Device,
   DeviceDetail,
+  DhcpLease,
   NetQuality,
   Printer,
   RouterHints,
@@ -63,6 +64,7 @@ import { BandwidthMeter, readConnections, type BandwidthSample } from './network
 import { readSpooler } from './printers/spooler';
 import { collectPrinters, hasFault } from './printers/printer-service';
 import { discoverMdnsPrinters } from './printers/mdns';
+import { normalizeDhcpLeases, normalizeLeaseMac } from './router/leases';
 import { Simulator } from './simulator';
 
 export interface SchedulerConfig {
@@ -232,10 +234,10 @@ export class Scheduler {
   /** ONVIF 探测轮转游标（与 HTTP 指纹各用一套，避免互相挤占覆盖）。 */
   private onvifCursor = 0;
   /**
-   * 路由器通道提示（task-022 C-1）：DHCP 租约 hostname 回填。
-   * 内存态不持久化；主进程在路由器状态推送回调里每轮重灌，未登录时为空数组（不猜）。
+   * 路由器通道提示（task-022 C-1）：规范化 MAC + IP → 有名称的 DHCP 租约副本。
+   * 内存态不持久化；主进程在路由器状态推送回调里每轮重灌，未登录时清空（不猜）。
    */
-  private routerHints: RouterHints = { leaseHostnames: [] };
+  private routerLeaseIndex = new Map<string, DhcpLease>();
   /** NetBIOS 采集轮转游标：无主机名候选多于一轮配额时均匀覆盖。 */
   private nbtstatCursor = 0;
   private simulator = new Simulator();
@@ -319,24 +321,35 @@ export class Scheduler {
     this.emitSnapshot();
   }
 
-  /** 灌入路由器通道提示（task-022 C-1，由 Engine 门面转发；内存态，不持久化）。 */
-  setRouterHints(hints: RouterHints): void {
-    this.routerHints = hints;
+  /** 灌入路由器通道提示；仅当下有效的 MAC + IP → hostname 投影变化时返回 true。 */
+  setRouterHints(hints: RouterHints): boolean {
+    const now = Date.now();
+    const next = new Map<string, DhcpLease>();
+    // 统一入口负责校验、复制、消歧和限量；不保留调用方的数组或租约引用。
+    for (const lease of normalizeDhcpLeases(hints.leaseHostnames, now)) {
+      if (lease.hostname !== null) next.set(`${lease.mac}|${lease.ip}`, lease);
+    }
+    let previousSize = 0;
+    let changed = false;
+    for (const [key, lease] of this.routerLeaseIndex) {
+      // 两边都按同一时刻求值：续租不制造噪声，过期后续租则重新成为有效名称。
+      if (lease.expiresAt !== null && lease.expiresAt <= now) continue;
+      previousSize += 1;
+      if (next.get(key)?.hostname !== lease.hostname) changed = true;
+    }
+    if (previousSize !== next.size) changed = true;
+    // 即便名称没变也必须换入新租期，避免引擎的降噪逻辑吞掉续租。
+    this.routerLeaseIndex = next;
+    return changed;
   }
 
-  /**
-   * 按 MAC 查 DHCP 租约自报的 hostname（task-022 C-1）。
-   * 找不到 / 租约 hostname 为空 → null。MAC 归一化小写后比对，吸收大小写书写差异。
-   */
-  private leaseHostnameByMac(mac: string | null): string | null {
-    if (mac === null) return null;
-    const key = mac.toLowerCase();
-    for (const lease of this.routerHints.leaseHostnames) {
-      if (lease.mac.toLowerCase() === key && lease.hostname !== null && lease.hostname.trim() !== '') {
-        return lease.hostname.trim();
-      }
-    }
-    return null;
+  /** MAC 与当前 IP 必须同时匹配；每次投影检查租期，不给已过期名称续命。 */
+  private leaseHostnameFor(mac: string | null, ip: string, now: number): string | null {
+    const normalizedMac = normalizeLeaseMac(mac);
+    if (normalizedMac === null) return null;
+    const lease = this.routerLeaseIndex.get(`${normalizedMac}|${ip}`);
+    if (!lease || (lease.expiresAt !== null && lease.expiresAt <= now)) return null;
+    return lease.hostname;
   }
 
   get snapshotCached(): Snapshot | null {
@@ -1104,6 +1117,7 @@ export class Scheduler {
   // —— 快照组装 ——
 
   buildDevices(): Device[] {
+    const now = Date.now();
     const devices: Device[] = [];
     // 侦测联动：最近一轮有效 ARP 解析出的冲突 IP 集合（null = 尚无有效读取，一律 false）
     const conflictIps = new Set(
@@ -1127,7 +1141,7 @@ export class Scheduler {
       const onvifHint = this.onvifHints.get(rec.ip) ?? null;
       // task-022 C-1：设备自身 hostname 为空时用 DHCP 租约自报回填（单点回填，
       // 同时服务指纹管线与展示）。不覆盖 rDNS/mDNS 已有值，不 mutate 记录。
-      const leaseHostname = rec.hostname === null ? this.leaseHostnameByMac(rec.mac) : null;
+      const leaseHostname = rec.hostname === null ? this.leaseHostnameFor(rec.mac, rec.ip, now) : null;
       const effectiveHostname = rec.hostname ?? leaseHostname;
       // task-023：OUI 查不到时，本地管理位 MAC（安卓 10+/iOS 14+ 默认随机化）给出诚实
       // 标签——绝不猜厂商

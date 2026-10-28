@@ -19,7 +19,8 @@ directories:
   # 历史目录：release-0.2.0 / -icons / -full / -tray / -alarm / -alarm2 / -alarm3 / -alarm4 / release-0.2.1。
   # 0.3.0 运维功能版：持续监控/WOL/Webhook/端口扫描/HTML 报告/配置迁移（task-024 + task-025）。
   # 0.4.0 实时监控版：5s 心跳实时探测/未知 IP 滚动发现/早推帧/离线判定 ≈20s（task-026）。
-  output: release-0.4.0
+  # 0.4.0-setup-icon：NSIS 安装器独立图标（setup-icon.ico，箱子+光盘）+ task-028 五生态识别扩充。
+  output: release-0.4.0-setup-icon
   buildResources: build
 
 # 环境安全层拦截"一次调用递归删大目录"（electron-builder 解压 Electron 前必先
@@ -63,6 +64,10 @@ nsis:
   artifactName: SVESC-Setup-${version}.${ext}
   shortcutName: SVESC 局域网管理台
   uninstallDisplayName: SVESC 局域网管理台
+  # 安装器专用图标（箱子+光盘，build/setup-icon.ico 由 scripts/make-setup-icon.py
+  # 生成）：只影响 Setup exe 自身（资源管理器/UAC/安装向导窗口）。
+  # 卸载器与应用 exe 图标不动（默认回退 win.icon = build/icon.ico）。
+  installerIcon: build/setup-icon.ico
 
 portable:
   artifactName: SVESC-Portable-${version}.${ext}

@@ -10,7 +10,7 @@ import { createEngine, type Engine } from './engine';
 import { RouterManager } from './engine/router';
 import { clearPushTarget, pushRouterStatus, pushScanProgress, pushSnapshot, registerIpc, setPushTarget } from './ipc';
 import { loadCredentials, saveCredentials, clearCredentials } from './router-store';
-import { getRouterAdminCookieHeader } from './router-browser';
+import { bindRouterAdminGateway, checkRouterWebSession, getRouterAdminCookieHeader } from './router-browser';
 import { createTray, destroyTray, isQuitRequested, refreshTray } from './tray';
 
 const isSmoke = process.env.SMOKE === '1';
@@ -109,6 +109,7 @@ async function bootstrap(): Promise<void> {
     onScanProgress: (progress) => pushScanProgress(progress),
   });
 
+  await bindRouterAdminGateway(engine.getGatewayIp());
   mainWindow = await createWindow();
 
   // 路由器管理通道：网关 IP 接引擎探测结果；启动即轮询，凭据可从 safeStorage 恢复
@@ -121,7 +122,9 @@ async function bootstrap(): Promise<void> {
   });
   // task-030：管理页租约实验通道的 Cookie 提供者——内置浏览器登录后分区里的
   // 会话 Cookie 每轮现读，登出清空后自动变 null（通道静默跳过）
-  routerManager.setWebLeaseProvider(getRouterAdminCookieHeader);
+  routerManager.setWebLeaseProvider(async (url) =>
+    await bindRouterAdminGateway(engine?.getGatewayIp() ?? null) ? getRouterAdminCookieHeader(url) : null,
+  );
   registerIpc(mainWindow, engine, routerManager);
   routerManager.startPolling((status) => {
     pushRouterStatus(status);
@@ -130,10 +133,10 @@ async function bootstrap(): Promise<void> {
     if (status.session.invalidatedAt !== null && engine?.getSettings().rememberRouterPassword) {
       routerManager?.scheduleRelogin();
     }
-    // task-022 C-1：DHCP 租约灌入设备识别管线做 hostname 回填。
-    // 未登录 / web 会话时 dhcpLeases 天然为空数组，不猜数据
     engine?.applyRouterHints({ leaseHostnames: status.dhcpLeases });
-  });
+  }, () => routerManager
+    ? checkRouterWebSession(routerManager, engine?.getGatewayIp() ?? null)
+    : Promise.resolve());
   const saved = await loadCredentials();
   if (saved) routerManager.restoreSession(saved.user, saved.password);
 

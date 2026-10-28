@@ -113,9 +113,6 @@ export function registerIpc(win: BrowserWindow, engine: Engine, router: RouterMa
   ipcMain.handle(CH.routerRefresh, async (): Promise<RouterStatus> => router.refresh());
   ipcMain.handle(CH.routerLogin, async (_event, user: string, password: string) => {
     const res = await router.login(String(user), String(password));
-    // 审查 R-7（状态同步）：login() 内部的 refresh 是异步的，轮询推送最长滞后 10s——
-    // 登录/登出后立即推一帧，UI 即时反馈会话变化，不等下一轮轮询
-    pushRouterStatus(router.getStatus());
     if (res.ok) {
       // task-022 B-1：记住密码开关关闭 → 不落盘（也不清除——清理由 settingsUpdate 负责），
       // 渲染层如实提示"凭据未保存"的原因
@@ -123,7 +120,13 @@ export function registerIpc(win: BrowserWindow, engine: Engine, router: RouterMa
         return { ok: true, error: null, persisted: false, persistError: '已关闭「记住密码」，凭据未保存' };
       }
       // 登录成功 → 凭据加密落盘（密钥环不可用时如实带出原因，不静默）
-      const saved = await saveCredentials(String(user), String(password));
+      const revision = router.getSessionRevision();
+      const saved = await saveCredentials(String(user), String(password), () =>
+        router.getSessionRevision() === revision && engine.getSettings().rememberRouterPassword,
+      );
+      if (router.getSessionRevision() !== revision) {
+        return { ok: false, error: '登录已取消（会话或网关已变化）', persisted: false, persistError: null };
+      }
       return { ok: true, error: null, persisted: saved.ok, persistError: saved.error };
     }
     return { ok: false, error: res.error, persisted: false, persistError: null };
@@ -131,10 +134,8 @@ export function registerIpc(win: BrowserWindow, engine: Engine, router: RouterMa
   ipcMain.handle(CH.routerLogout, async (): Promise<{ ok: boolean }> => {
     router.logout();
     clearCredentials();
-    await clearAdminCookies();
-    // 审查 R-7：登出后立即推帧——渲染层马上回到"未登录"，不等下一轮 10s 轮询
-    pushRouterStatus(router.getStatus());
-    return { ok: true };
+    const cleared = await clearAdminCookies();
+    return { ok: cleared };
   });
   // 内置浏览器登录（task-032 重构）：管理页以 <webview> 内嵌在路由器页面（不再弹窗），
   // 挂 persist:router-admin 分区；渲染层在 dom-ready / did-navigate 后调本通道，

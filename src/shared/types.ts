@@ -504,7 +504,7 @@ export interface DhcpLease {
   ip: string;
   mac: string;
   hostname: string | null;
-  /** unix ms；null = 无限租期 */
+  /** unix ms；null = 未知或无限租期 */
   expiresAt: number | null;
 }
 
