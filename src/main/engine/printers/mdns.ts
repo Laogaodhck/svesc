@@ -4,6 +4,7 @@
  * 组播 224.0.0.251:5353，查询 `_ipp._tcp.local` 与 `_pdl-datastream._tcp.local`，1.5s 超时。
  * **任何异常都静默吞掉并返回 []**：这是增强路径，绝不允许拖垮主流程（brief §3 printers/mdns.ts）。
  */
+import { isUtf8 } from 'node:buffer';
 import dgram from 'node:dgram';
 import { TIMEOUTS } from '../../../shared/constants';
 
@@ -55,63 +56,84 @@ interface DnsRecord {
   name: string;
   type: number;
   data: Buffer;
+  /** PTR 实例或 SRV 主机名：压缩指针必须在完整报文上解引用。 */
+  target?: string;
+  port?: number;
 }
 
-/** 读取带压缩指针的 DNS 名称。 */
-function readName(buf: Buffer, offset: number, depth = 0): { name: string; next: number } {
-  if (depth > 8) return { name: '', next: offset + 1 };
+const MAX_DNS_RECORDS = 1024;
+const MAX_CACHE_ENTRIES = 1024;
+
+/** end 限制名称本体；指针跳转后才允许读取报文其它位置。畸形名称不返回部分结果。 */
+function readName(buf: Buffer, offset: number, end = buf.length): { name: string; next: number } | null {
   const labels: string[] = [];
+  const visited = new Set<number>();
   let cursor = offset;
-  let advanced = false;
-  let next = offset;
-  for (;;) {
-    if (cursor >= buf.length) return { name: labels.join('.'), next };
-    const len = buf[cursor] as number;
-    if (len === 0) {
-      cursor += 1;
-      if (!advanced) next = cursor;
-      break;
-    }
+  let limit = end;
+  let next: number | null = null;
+  let wireLength = 1; // 包含结尾的根标签，展开后最多 255 字节
+  for (let steps = 0; steps < 128; steps += 1) {
+    if (cursor >= limit || visited.has(cursor)) return null;
+    visited.add(cursor);
+    const len = buf[cursor]!;
+    if (len === 0) return { name: labels.join('.'), next: next ?? cursor + 1 };
     if ((len & 0xc0) === 0xc0) {
-      const ptr = ((len & 0x3f) << 8) | (buf[cursor + 1] as number);
-      if (!advanced) next = cursor + 2;
-      const sub = readName(buf, ptr, depth + 1);
-      if (sub.name) labels.push(sub.name);
-      break;
+      if (cursor + 2 > limit) return null;
+      const ptr = ((len & 0x3f) << 8) | buf[cursor + 1]!;
+      if (ptr < 12 || ptr >= buf.length) return null;
+      next ??= cursor + 2;
+      cursor = ptr;
+      limit = buf.length;
+      continue;
     }
-    const label = buf.subarray(cursor + 1, cursor + 1 + len).toString('utf8');
-    labels.push(label);
+    if ((len & 0xc0) !== 0 || cursor + 1 + len > limit) return null;
+    wireLength += len + 1;
+    if (wireLength > 255) return null;
+    labels.push(buf.subarray(cursor + 1, cursor + 1 + len).toString('utf8'));
     cursor += 1 + len;
-    if (!advanced) next = cursor;
   }
-  return { name: labels.join('.'), next };
+  return null;
 }
 
-/** 解析 DNS/mDNS 报文中的 answer/authority/additional 记录（失败返回 []）。 */
+/** 解析响应中的有效 IN answer/authority/additional；结构截断时丢弃整包。 */
 export function parseMdnsRecords(buf: Buffer): DnsRecord[] {
   const records: DnsRecord[] = [];
-  if (buf.length < 12) return records;
+  if (buf.length < 12 || buf.length > 65535) return records;
+  const flags = buf.readUInt16BE(2);
+  if ((flags & 0x8000) === 0 || (flags & 0x780f) !== 0) return records;
   const qd = buf.readUInt16BE(4);
-  const an = buf.readUInt16BE(6);
-  const ns = buf.readUInt16BE(8);
-  const ar = buf.readUInt16BE(10);
+  const total = buf.readUInt16BE(6) + buf.readUInt16BE(8) + buf.readUInt16BE(10);
+  if (qd + total > MAX_DNS_RECORDS) return records;
   let offset = 12;
   for (let i = 0; i < qd; i += 1) {
-    const { next } = readName(buf, offset);
-    offset = next + 4;
+    const question = readName(buf, offset);
+    if (!question || question.next + 4 > buf.length) return [];
+    offset = question.next + 4;
   }
-  const total = an + ns + ar;
   for (let i = 0; i < total; i += 1) {
-    const { name, next } = readName(buf, offset);
-    offset = next;
-    if (offset + 10 > buf.length) break;
+    const owner = readName(buf, offset);
+    if (!owner || owner.next + 10 > buf.length) return [];
+    offset = owner.next;
     const type = buf.readUInt16BE(offset);
+    const klass = buf.readUInt16BE(offset + 2) & 0x7fff; // cache-flush 位不是 class
+    const ttl = buf.readUInt32BE(offset + 4);
     const rdLength = buf.readUInt16BE(offset + 8);
-    const rdataStart = offset + 10;
-    const rdataEnd = rdataStart + rdLength;
-    if (rdataEnd > buf.length) break;
-    records.push({ name, type, data: buf.subarray(rdataStart, rdataEnd) });
-    offset = rdataEnd;
+    const start = offset + 10;
+    const end = start + rdLength;
+    if (end > buf.length) return [];
+    offset = end;
+    if (klass !== 1 || ttl === 0) continue;
+    const rec: DnsRecord = { name: owner.name, type, data: buf.subarray(start, end) };
+    if (type === 12 || type === 33) {
+      if (type === 33 && rdLength < 7) continue;
+      const target = readName(buf, start + (type === 33 ? 6 : 0), end);
+      if (!target || !target.name || target.next !== end) continue;
+      rec.target = target.name;
+      if (type === 33) rec.port = buf.readUInt16BE(start + 4);
+    } else if (type === 1 && rdLength !== 4) {
+      continue;
+    }
+    records.push(rec);
   }
   return records;
 }
@@ -135,20 +157,24 @@ export interface MdnsHit {
   model?: string | null;
 }
 
-/** 从 TXT 记录里取设备自报型号（纯函数）：model > md > ty，最后一个同名键生效。 */
+/** 标准 DNS TXT 长度前缀字节串：model > md > ty，最后一个同名键生效。 */
 export function parseTxtModel(data: Buffer): string | null {
-  if (data.length === 0) return null;
-  const fields = data.toString('utf8').split('|');
-  let model: string | null = null;
-  for (const field of fields) {
-    const eq = field.indexOf('=');
+  const values: Partial<Record<'model' | 'md' | 'ty', string | null>> = {};
+  let offset = 0;
+  while (offset < data.length) {
+    const length = data[offset]!;
+    offset += 1;
+    if (offset + length > data.length) return null;
+    const bytes = data.subarray(offset, offset + length);
+    offset += length;
+    const eq = bytes.indexOf(0x3d);
     if (eq <= 0) continue;
-    const key = field.slice(0, eq).trim().toLowerCase();
+    const key = bytes.subarray(0, eq).toString('utf8').trim().toLowerCase();
     if (key !== 'model' && key !== 'md' && key !== 'ty') continue;
-    const value = field.slice(eq + 1).trim();
-    if (value) model = value;
+    const value = bytes.subarray(eq + 1);
+    values[key] = isUtf8(value) ? value.toString('utf8').trim() || null : null;
   }
-  return model;
+  return values.model ?? values.md ?? values.ty ?? null;
 }
 
 /**
@@ -164,7 +190,21 @@ export function parseTxtModel(data: Buffer): string | null {
  */
 export async function mdnsQuery(services: readonly string[], timeoutMs: number = TIMEOUTS.mdns): Promise<MdnsHit[]> {
   if (services.length === 0) return [];
-  const found = new Map<string, MdnsHit>();
+  const normalize = (name: string): string => name.replace(/\.$/, '').toLowerCase();
+  const requested = new Set(services.map(normalize));
+  const requestedServices = [...requested];
+  // 本次窗口内按实例保存 PTR/SRV/TXT；即使容量已满，旧实例仍能补齐首个型号。
+  const instances = new Map<string, {
+    name: string;
+    service: string;
+    hasPtr: boolean;
+    target: string | null;
+    port: number | null;
+    model: string | null;
+  }>();
+  const addresses = new Map<string, string>();
+  const isRequestedInstance = (name: string, service: string): boolean =>
+    name.endsWith(`.${service}`) && name.length > service.length + 1;
   try {
     await new Promise<void>((resolve) => {
       let socket: dgram.Socket;
@@ -193,28 +233,46 @@ export async function mdnsQuery(services: readonly string[], timeoutMs: number =
       const timer = setTimeout(close, timeoutMs);
 
       socket.on('message', (msg) => {
+        if (closed) return;
         try {
-          const records = parseMdnsRecords(msg);
-          const ipByName = new Map<string, string>();
-          for (const rec of records) {
-            if (rec.type === 1 && rec.data.length === 4) {
-              ipByName.set(rec.name.toLowerCase(), Array.from(rec.data).join('.'));
+          for (const rec of parseMdnsRecords(msg)) {
+            const owner = normalize(rec.name);
+            if (rec.type === 1) {
+              // A 可以早于 SRV 到达，但绝不使用 UDP 来源地址代替 SRV target。
+              if (addresses.has(owner) || addresses.size < MAX_CACHE_ENTRIES) {
+                addresses.set(owner, Array.from(rec.data).join('.'));
+              }
+              continue;
             }
-          }
-          for (const rec of records) {
-            if (rec.type !== 12) continue; // PTR only
-            const instance = readName(rec.data, 0).name;
-            if (!instance) continue;
-            const service = rec.name.replace(/\.$/, '');
-            const srv = records.find((r) => r.type === 33 && r.name.toLowerCase() === instance.toLowerCase());
-            const target = srv ? readName(srv.data, 6).name : '';
-            const port = srv && srv.data.length >= 6 ? srv.data.readUInt16BE(4) : null;
-            const ip = ipByName.get(target.toLowerCase()) ?? null;
-            const txt = records.find((r) => r.type === 16 && r.name.toLowerCase() === instance.toLowerCase());
-            const model = txt ? parseTxtModel(txt.data) : null;
-            const friendly = instance.replace(new RegExp(`\\.${service.replace(/\./g, '\\.')}$`, 'i'), '');
-            const key = `${friendly}|${ip ?? ''}|${service}`;
-            if (!found.has(key)) found.set(key, { name: friendly, ip, port, service, model });
+            if (rec.type !== 12 && rec.type !== 33 && rec.type !== 16) continue;
+            const service = rec.type === 12
+              ? (requested.has(owner) ? owner : undefined)
+              : requestedServices.find((s) => isRequestedInstance(owner, s));
+            const rawInstance = rec.type === 12 ? rec.target : rec.name;
+            if (!service || !rawInstance) continue;
+            const instance = normalize(rawInstance);
+            if (!isRequestedInstance(instance, service)) continue;
+            const model = rec.type === 16 ? parseTxtModel(rec.data) : null;
+            if (rec.type === 16 && model === null) continue;
+            const key = `${service}\0${instance}`;
+            let entry = instances.get(key);
+            if (!entry) {
+              if (instances.size >= MAX_CACHE_ENTRIES) continue;
+              entry = {
+                name: rawInstance.slice(0, -(service.length + 1)), service,
+                hasPtr: false, target: null, port: null, model: null,
+              };
+              instances.set(key, entry);
+            }
+            if (rec.type === 12) {
+              entry.hasPtr = true;
+              entry.name = rawInstance.slice(0, -(service.length + 1));
+            } else if (rec.type === 33 && rec.target && rec.port !== undefined) {
+              entry.target = normalize(rec.target);
+              entry.port = rec.port;
+            } else if (rec.type === 16) {
+              entry.model = model;
+            }
           }
         } catch {
           /* 单包解析失败忽略 */
@@ -272,5 +330,11 @@ export async function mdnsQuery(services: readonly string[], timeoutMs: number =
   } catch {
     return [];
   }
-  return Array.from(found.values());
+  // 窗口结束才关联快照，PTR 重传或后到 A/TXT 不会产生旧的、不完整的重复命中。
+  return Array.from(instances.values())
+    .filter((entry) => entry.hasPtr)
+    .map(({ name, service, target, port, model }) => ({
+      name, service, port, model,
+      ip: target ? addresses.get(target) ?? null : null,
+    }));
 }

@@ -11,9 +11,12 @@
  * 全部 fake timers + 注入时钟，不 spawn 进程、不碰网络、不依赖真实 180s。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { HEARTBEAT_PROBE, SCHEDULE, WINDOW } from '../src/shared/constants';
+import { HEARTBEAT_PROBE, PROBE_PORTS, SCAN_BUDGET_MS, SCHEDULE, WINDOW } from '../src/shared/constants';
 import { emptyBandwidthStat } from './fixtures';
-import type { Scheduler } from '../src/main/engine/scheduler';
+import type { Scheduler, SchedulerHooks } from '../src/main/engine/scheduler';
+import type { MdnsDeviceHint } from '../src/main/engine/discovery/mdns-devices';
+import type { WsdCameraHint } from '../src/main/engine/discovery/wsdiscovery';
+import type { SsdpDeviceHint } from '../src/main/engine/discovery/ssdp-devices';
 
 // —— 注入状态（vi.hoisted 保证在 vi.mock 工厂之前可用）——
 const io = vi.hoisted(() => ({
@@ -22,6 +25,14 @@ const io = vi.hoisted(() => ({
   pingAlive: new Set<string>(),
   openPorts: new Map<string, number[]>(),
   spoolerError: null as string | null,
+  mdns: [] as MdnsDeviceHint[],
+  wsd: [] as WsdCameraHint[],
+  ssdp: [] as SsdpDeviceHint[],
+  mdnsQuery: null as (() => Promise<MdnsDeviceHint[]>) | null,
+  discoveryCalls: 0,
+  pingGate: null as Promise<void> | null,
+  probedTargets: [] as string[],
+  probedPorts: [] as number[],
   calls: { arp: 0, ping: 0, ports: 0, spooler: 0, quality: 0 },
 }));
 
@@ -51,6 +62,7 @@ vi.mock('../src/main/engine/discovery/ping', async (importOriginal) => {
     ...actual,
     pingSweep: async (hosts: string[]) => {
       io.calls.ping += 1;
+      if (io.pingGate) await io.pingGate;
       const results = new Map(
         hosts.map((ip) => {
           const alive = io.pingAlive.has(ip);
@@ -73,8 +85,10 @@ vi.mock('../src/main/engine/discovery/ports', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/main/engine/discovery/ports')>();
   return {
     ...actual,
-    probeHosts: async (targets: string[]) => {
+    probeHosts: async (targets: string[], portsToProbe: readonly number[]) => {
       io.calls.ports += 1;
+      io.probedTargets = [...targets];
+      io.probedPorts = [...portsToProbe];
       const out = new Map<string, number[]>();
       for (const ip of targets) {
         const ports = io.openPorts.get(ip);
@@ -118,12 +132,18 @@ vi.mock('../src/main/engine/printers/ipp', async (importOriginal) => {
   };
 });
 
-// task-023：WS-Discovery / SSDP 是新的网络 IO 出口，测试里同样必须替掉（不碰网络）
+vi.mock('../src/main/engine/discovery/mdns-devices', () => ({
+  discoverMdnsDevices: async () => {
+    io.discoveryCalls += 1;
+    return io.mdnsQuery ? io.mdnsQuery() : io.mdns;
+  },
+}));
+
 vi.mock('../src/main/engine/discovery/wsdiscovery', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/main/engine/discovery/wsdiscovery')>();
   return {
     ...actual,
-    discoverCamerasWsdiscovery: async () => [],
+    discoverCamerasWsdiscovery: async () => io.wsd,
   };
 });
 
@@ -131,7 +151,15 @@ vi.mock('../src/main/engine/discovery/ssdp-devices', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/main/engine/discovery/ssdp-devices')>();
   return {
     ...actual,
-    discoverSsdpDevices: async () => [],
+    discoverSsdpDevices: async () => io.ssdp,
+  };
+});
+
+vi.mock('../src/main/engine/discovery/onvif-http', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/main/engine/discovery/onvif-http')>();
+  return {
+    ...actual,
+    discoverOnvifDevices: async () => [],
   };
 });
 
@@ -171,7 +199,7 @@ const { Scheduler: SchedulerClass, WarningLog } = await import('../src/main/engi
 
 const HAWK = { ip: '192.168.2.9', mac: 'aa-bb-cc-00-00-09', iface: null };
 
-function makeScheduler(overrides: Record<string, unknown> = {}): Scheduler {
+function makeScheduler(overrides: Record<string, unknown> = {}, hooks: SchedulerHooks = {}): Scheduler {
   return new SchedulerClass({
     prefix: '192.168.2.',
     hosts: [HAWK.ip],
@@ -183,7 +211,7 @@ function makeScheduler(overrides: Record<string, unknown> = {}): Scheduler {
     snmpEnabled: false,
     useMdns: false,
     ...overrides,
-  });
+  }, hooks);
 }
 
 type SampleStub = {
@@ -261,6 +289,14 @@ beforeEach(() => {
   io.pingAlive = new Set();
   io.openPorts = new Map();
   io.spoolerError = null;
+  io.mdns = [];
+  io.wsd = [];
+  io.ssdp = [];
+  io.mdnsQuery = null;
+  io.discoveryCalls = 0;
+  io.pingGate = null;
+  io.probedTargets = [];
+  io.probedPorts = [];
   io.calls = { arp: 0, ping: 0, ports: 0, spooler: 0, quality: 0 };
 });
 
@@ -803,5 +839,131 @@ describe('task-026. 实时化：未知滚动发现 + 早推帧 + 暂停语义', 
       deviceOf(s, HAWK.ip)?.state,
       '暂停期间缺席计数不得推进（探测停止 = 观测停止，不许用旧观测继续判离线）',
     ).toBe('online');
+  });
+});
+
+describe('独立协议发现', () => {
+  const mdnsHint = (ip = HAWK.ip): MdnsDeviceHint => ({
+    ip, name: '客厅平板', service: '_device-info._tcp.local', kind: 'tablet', model: 'iPad13,4',
+  });
+
+  it('ARP 和 ICMP 均无响应时，mDNS 自报仍建册并保留型号', async () => {
+    const s = makeScheduler();
+    io.mdns = [mdnsHint()];
+    await s.runFullScan();
+    expect(deviceOf(s, HAWK.ip)).toMatchObject({
+      state: 'online', kind: 'tablet', displayName: '客厅平板', mac: null,
+      quality: { samples: 0, grade: 'unknown' },
+    });
+    expect(deviceOf(s, HAWK.ip)?.osHint).toContain('iPad13,4');
+    expect(io.probedTargets).toContain(HAWK.ip);
+    expect(io.discoveryCalls).toBe(1);
+  });
+
+  it('WS-Discovery 与 SSDP 可以分别发现摄像头和影音设备', async () => {
+    const tv = '192.168.2.10';
+    const s = makeScheduler({ hosts: [HAWK.ip, tv] });
+    io.wsd = [{ ip: HAWK.ip, kind: 'ipc', xaddr: null }];
+    io.ssdp = [{ ip: tv, kind: 'iot', name: '客厅电视', osHint: '投屏/音响 (UPnP)' }];
+    await s.runFullScan();
+    expect(deviceOf(s, HAWK.ip)).toMatchObject({ kind: 'camera', state: 'online', mac: null });
+    expect(deviceOf(s, tv)).toMatchObject({ kind: 'iot', displayName: '客厅电视', state: 'online' });
+  });
+
+  it('多协议及 ARP 发现同一个 IP 不生成重复设备，并保留真实 MAC', async () => {
+    const s = makeScheduler();
+    io.arpEntries = [HAWK];
+    io.mdns = [mdnsHint()];
+    io.ssdp = [{ ip: HAWK.ip, kind: 'iot', name: '另一个显示名', osHint: 'UPnP' }];
+    await s.runFullScan();
+    expect(s.buildDevices()).toHaveLength(1);
+    expect(deviceOf(s, HAWK.ip)?.mac).toBe(HAWK.mac);
+  });
+
+  it('跨网段、广播、组播及无效 IP 的自报不得扩大扫描范围', async () => {
+    const s = makeScheduler();
+    io.mdns = ['8.8.8.8', '192.168.2.255', '224.0.0.251', '192.168.2.999', 'not-an-ip'].map(mdnsHint);
+    io.wsd = [{ ip: '10.0.0.1', kind: 'ipc', xaddr: null }];
+    io.ssdp = [{ ip: '127.0.0.1', kind: 'router', name: null, osHint: 'UPnP' }];
+    await s.runFullScan();
+    expect(s.buildDevices()).toEqual([]);
+    expect(io.probedTargets).toEqual([]);
+  });
+
+  it('设备在 ping 尚未结束时即可通过协议响应推送到快照', async () => {
+    const emitted: string[][] = [];
+    const s = makeScheduler({}, {
+      onSnapshot: (snapshot) => emitted.push(snapshot.devices.map((d) => d.ip)),
+    });
+    io.mdns = [mdnsHint()];
+    let releasePing!: () => void;
+    io.pingGate = new Promise<void>((resolve) => { releasePing = resolve; });
+    const scan = s.runFullScan();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(emitted.some((ips) => ips.includes(HAWK.ip))).toBe(true);
+    expect(io.calls.ports).toBe(0);
+    releasePing();
+    await scan;
+  });
+
+  it('旧身份缓存不能续活：连续四轮无观测后离线，lastSeen 不推进', async () => {
+    const s = makeScheduler();
+    io.mdns = [mdnsHint()];
+    await s.runFullScan();
+    const lastSeen = deviceOf(s, HAWK.ip)?.lastSeen;
+    io.mdns = [];
+    for (let i = 0; i < HEARTBEAT_PROBE.offlineArpMisses; i += 1) {
+      vi.advanceTimersByTime(SCHEDULE.devices);
+      await s.heartbeat();
+    }
+    expect(deviceOf(s, HAWK.ip)).toMatchObject({ state: 'offline', lastSeen, kind: 'tablet' });
+    await s.runFullScan();
+    expect(deviceOf(s, HAWK.ip)).toMatchObject({ state: 'offline', lastSeen });
+    io.mdns = [mdnsHint()];
+    await s.runFullScan();
+    expect(deviceOf(s, HAWK.ip)?.state).toBe('online');
+    expect(deviceOf(s, HAWK.ip)?.lastSeen).toBeGreaterThan(lastSeen!);
+  });
+
+  it('单路发现失败不影响其它协议建册', async () => {
+    const s = makeScheduler();
+    io.mdnsQuery = async () => { throw new Error('mDNS unavailable'); };
+    io.wsd = [{ ip: HAWK.ip, kind: 'nvr', xaddr: null }];
+    await s.runFullScan();
+    expect(deviceOf(s, HAWK.ip)?.kind).toBe('camera');
+  });
+
+  it('慢协议受扫描预算约束，过期结果不会写入下一轮', async () => {
+    const s = makeScheduler();
+    let deliver!: (hints: MdnsDeviceHint[]) => void;
+    io.mdnsQuery = () => new Promise((resolve) => { deliver = resolve; });
+    const scan = s.runFullScan();
+    await vi.advanceTimersByTimeAsync(SCAN_BUDGET_MS);
+    await scan;
+    expect(s.lastTimings?.total).toBeLessThanOrEqual(SCAN_BUDGET_MS);
+    io.mdnsQuery = null;
+    await s.runFullScan();
+    deliver([mdnsHint()]);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(s.buildDevices()).toEqual([]);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('没有可用扫描网段时不发组播发现', async () => {
+    const s = makeScheduler({ hosts: [], prefix: null });
+    await s.runFullScan();
+    expect(io.discoveryCalls).toBe(0);
+    expect(s.buildDevices()).toEqual([]);
+  });
+
+  it.each([135, 139])('RPC/NetBIOS 端口 %i 实际参与探测并进入识别管线', async (port) => {
+    const s = makeScheduler();
+    io.arpEntries = [HAWK];
+    io.openPorts.set(HAWK.ip, [port]);
+    await s.runFullScan();
+    expect(PROBE_PORTS).toContain(port);
+    expect(io.probedPorts).toContain(port);
+    expect(deviceOf(s, HAWK.ip)?.kind).toBe('workstation');
+    expect(deviceOf(s, HAWK.ip)?.osHint).toContain('RPC/NetBIOS');
   });
 });
