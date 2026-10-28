@@ -134,7 +134,8 @@ export function hintsFromHits(hits: MdnsHit[]): MdnsDeviceHint[] {
     const kind = kindFromHit(hit);
     if (!kind || !hit.ip) continue;
     const prev = byIp.get(hit.ip);
-    if (!prev || rank[kind] > rank[prev.kind]) {
+    // 类别优先级不变；同类服务优先保留显式自报型号及其来源。
+    if (!prev || rank[kind] > rank[prev.kind] || (kind === prev.kind && !prev.model && hit.model)) {
       byIp.set(hit.ip, {
         ip: hit.ip,
         name: hit.name,

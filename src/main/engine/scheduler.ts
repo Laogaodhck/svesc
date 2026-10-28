@@ -112,6 +112,9 @@ interface ScanCtx {
   arp2Entries: Map<string, ArpEntry>;
   /** phaseComputeTargets 填充：端口探测候选 */
   probeTargets: string[];
+  discovered: Set<string>;
+  wsUnicast: string[];
+  acceptingIdentity: boolean;
 }
 
 interface DeviceRecord {
@@ -664,6 +667,9 @@ export class Scheduler {
       alive: new Set(),
       arp2Entries: new Map(),
       probeTargets: [],
+      discovered: new Set(),
+      wsUnicast: [],
+      acceptingIdentity: true,
     };
     this.progress = { active: true, pct: 2, phase: 'arp', scanned: 0, total: this.cfg.hosts.length, startedAt };
     this.emitProgress();
@@ -672,17 +678,20 @@ export class Scheduler {
       // R-06①：本轮"ICMP 存活"归零，只有本轮真的回包才置 true
       for (const rec of this.records.values()) rec.pingAlive = false;
       await this.phaseInitialArp(ctx);
+      const discovery = this.discoverMulticastDevices(ctx);
       await this.phasePingSweep(ctx);
       await this.phaseSecondArp(ctx);
+      await this.waitWithinBudget(discovery, ctx.deadline);
       this.phaseComputeTargets(ctx);
       await this.phasePorts(ctx);
       await this.phaseFingerprint(ctx);
-      this.applyArpPresence(ctx.arp2Entries);
+      this.applyArpPresence(ctx.arp2Entries, ctx.discovered);
       this.updatePortResponders();
     } catch (err) {
       // 单轮扫描失败不得抛到主进程；R-03：但也不许静默，至少让快照带一条 discovery 告警
       this.replaceWarnings('discovery', [`扫描轮异常：${err instanceof Error ? err.message : String(err)}`]);
     } finally {
+      ctx.acceptingIdentity = false;
       this.scanInFlight = false;
       timings.total = Date.now() - startedAt;
       this.lastTimings = timings;
@@ -766,10 +775,10 @@ export class Scheduler {
 
   /** phase 4 前置：汇总端口探测候选（ARP 在位 ∪ ICMP 存活 ∪ 有端口史的在册记录）。 */
   private phaseComputeTargets(ctx: ScanCtx): void {
-    const candidates = new Set<string>([...ctx.arp2Entries.keys(), ...ctx.alive]);
+    const candidates = new Set<string>([...ctx.arp2Entries.keys(), ...ctx.alive, ...ctx.discovered]);
     for (const ip of this.records.keys()) candidates.add(ip);
     ctx.probeTargets = Array.from(candidates).filter((ip) => {
-      if (ctx.arp2Entries.has(ip) || ctx.alive.has(ip)) return true;
+      if (ctx.arp2Entries.has(ip) || ctx.alive.has(ip) || ctx.discovered.has(ip)) return true;
       const rec = this.records.get(ip);
       return rec ? rec.openPorts.length > 0 && rec.arpMissStreak < HEARTBEAT_PROBE.offlineArpMisses : false;
     });
@@ -805,49 +814,83 @@ export class Scheduler {
     }
   }
 
-  /** phase 5：指纹（主机名反向 DNS + mDNS 类型侦测 + NetBIOS 名采集，共享剩余预算）。 */
+  /** phase 5：主机名与定向身份探测共享剩余预算；组播发现已与 ping 并行。 */
   private async phaseFingerprint(ctx: ScanCtx): Promise<void> {
     this.progress = { ...this.progress, pct: 88, phase: 'fingerprint' };
     this.emitProgress();
     const t0 = Date.now();
     const needHostname = ctx.probeTargets.filter((ip) => !this.records.get(ip)?.hostname);
     const budgetLeft = ctx.deadline - Date.now();
-    if ((needHostname.length > 0 || ctx.probeTargets.length > 0) && budgetLeft > 0) {
-      await Promise.race([
+    if (ctx.probeTargets.length > 0 && budgetLeft > 0) {
+      await this.waitWithinBudget(
         Promise.all([this.resolveHostnames(needHostname), this.augmentDeviceIdentity(ctx)]),
-        new Promise<void>((resolve) => setTimeout(resolve, Math.max(300, budgetLeft))),
-      ]);
+        ctx.deadline,
+      );
     }
     ctx.timings.hostnames = Date.now() - t0;
   }
 
-  /**
-   * 设备身份增强（task-020/023/027/028，全部为尽力而为的增强路径）：
-   *  ① mDNS 类型侦测（1s 窗口）：自报服务 → iot/mobile/tablet/printer/camera 提示；
-   *  ② WS-Discovery 摄像头自报（1.2s 窗口，task-023）：组播 + 本轮存活 IP 单播补探；
-   *  ③ SSDP 设备自报（1.5s 窗口，task-023）：UPnP deviceType → router/ap/camera/printer/iot；
-   *  ④ ONVIF 设备服务探测（task-028）：POST /onvif/device_service 拿自报厂商/型号；
-   *  ⑤ NetBIOS 名采集（≤16 台/轮，轮转覆盖）：回填 hostname，进入既有主机名指纹管线；
-   *  ⑥ HTTP 管理页指纹（task-027）：已探明 80/8080 开放的候选 ≤6 台/轮，GET / 抓
-   *     title/Server 头 → 厂商型号自报分类。
-   * ①~⑥ 并行（总耗时≈最长一路而非相加，保住 phaseFingerprint 预算）；
-   * 任何一步失败静默跳过，绝不拖垮扫描。
-   */
+  private async waitWithinBudget(work: Promise<unknown>, deadline: number): Promise<void> {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) return;
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      await Promise.race([
+        work,
+        new Promise<void>((resolve) => { timer = setTimeout(resolve, remaining); }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  private async discoverMulticastDevices(ctx: ScanCtx): Promise<void> {
+    if (this.cfg.hosts.length === 0 || Date.now() >= ctx.deadline) return;
+    ctx.wsUnicast = [...this.arp.keys()].filter((ip) => this.cfg.hosts.includes(ip)).slice(0, 32);
+    await Promise.all([
+      discoverMdnsDevices()
+        .then((hints) => this.mergeDiscoveryHints(hints, this.mdnsHints, ctx))
+        .catch(() => undefined),
+      discoverCamerasWsdiscovery(undefined, ctx.wsUnicast)
+        .then((hints) => this.mergeDiscoveryHints(hints, this.wsdiscoveryHints, ctx))
+        .catch(() => undefined),
+      discoverSsdpDevices()
+        .then((hints) => this.mergeDiscoveryHints(hints, this.ssdpHints, ctx))
+        .catch(() => undefined),
+    ]);
+  }
+
+  private mergeDiscoveryHints<T extends { ip: string }>(hints: T[], cache: Map<string, T>, ctx: ScanCtx): void {
+    if (!ctx.acceptingIdentity || Date.now() >= ctx.deadline) return;
+    const allowed = new Set(this.cfg.hosts);
+    let observed = false;
+    for (const hint of hints) {
+      if (!allowed.has(hint.ip)) continue;
+      cache.set(hint.ip, hint);
+      const rec = this.ensureRecord(hint.ip, Date.now());
+      rec.lastSeen = Date.now();
+      rec.arpMissStreak = 0;
+      ctx.discovered.add(hint.ip);
+      observed = true;
+    }
+    if (observed) this.emitSnapshot();
+  }
+
   private async augmentDeviceIdentity(ctx: ScanCtx): Promise<void> {
-    // WS-Discovery 单播补探：只打本轮 ICMP 存活的主机，每台 1 包，最多 32 台。
-    // 组播被交换机/AP 过滤时，这条路径是摄像头唯一还可能应答的通道。
-    const wsUnicast = ctx.probeTargets.slice(0, 32);
-    const [mdnsHints, wsdHints, ssdpHints, onvifHints, httpHints, _nbt] = await Promise.all([
-      discoverMdnsDevices().catch(() => [] as MdnsDeviceHint[]),
-      discoverCamerasWsdiscovery(undefined, wsUnicast).catch(() => [] as WsdCameraHint[]),
-      discoverSsdpDevices().catch(() => [] as SsdpDeviceHint[]),
+    const wsUnicast = ctx.probeTargets
+      .filter((ip) => this.cfg.hosts.includes(ip) && !ctx.wsUnicast.includes(ip))
+      .slice(0, 32 - ctx.wsUnicast.length);
+    const [onvifHints, httpHints] = await Promise.all([
       this.probeOnvifDevices().catch(() => [] as OnvifHint[]),
       this.probeHttpFingerprints().catch(() => [] as HttpFingerprintHint[]),
       this.queryNetbiosNamesForCandidates().catch(() => undefined),
+      wsUnicast.length > 0
+        ? discoverCamerasWsdiscovery(undefined, wsUnicast)
+          .then((hints) => this.mergeDiscoveryHints(hints, this.wsdiscoveryHints, ctx))
+          .catch(() => undefined)
+        : Promise.resolve(),
     ]);
-    for (const hint of mdnsHints) this.mdnsHints.set(hint.ip, hint);
-    for (const hint of wsdHints) this.wsdiscoveryHints.set(hint.ip, hint);
-    for (const hint of ssdpHints) this.ssdpHints.set(hint.ip, hint);
+    if (!ctx.acceptingIdentity || Date.now() >= ctx.deadline) return;
     for (const hint of onvifHints) this.onvifHints.set(hint.ip, hint);
     for (const hint of httpHints) this.httpHints.set(hint.ip, hint);
   }
@@ -965,7 +1008,7 @@ export class Scheduler {
    * - `lastSeen` 只在本轮真的观测到（ARP 在位 / 本轮 ping 回包）时推进：
    *   陈旧的 `portResponded` 不得给设备续命（心跳侧对缺席设备另有显式失效逻辑）。
    */
-  private applyArpPresence(latest?: Map<string, ArpEntry>): void {
+  private applyArpPresence(latest?: Map<string, ArpEntry>, discovered?: ReadonlySet<string>): void {
     const now = Date.now();
     for (const rec of this.records.values()) {
       const present = latest ? latest.has(rec.ip) : this.arpPresentIn(rec.ip);
@@ -973,6 +1016,9 @@ export class Scheduler {
       if (present || rec.pingAlive) {
         rec.arpMissStreak = 0;
         rec.lastSeen = now;
+      } else if (discovered?.has(rec.ip)) {
+        // 仅本轮新收到的协议响应算存活证据，身份缓存不能给离线设备续命。
+        rec.arpMissStreak = 0;
       } else {
         rec.arpMissStreak += 1;
       }
