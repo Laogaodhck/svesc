@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
-import type { Device, Snapshot } from '../shared/types'
+import type { Device, Snapshot, UpdateStatus } from '../shared/types'
 import { AppShell } from './components/AppShell'
 import { OverviewView } from './views/OverviewView'
 import { DevicesView } from './views/DevicesView'
@@ -39,6 +39,11 @@ export function App() {
   const printerRefreshPending = useRef(false)
   /** 应用版本（settingsGet 注入），侧边栏 footer 展示 */
   const [appVersion, setAppVersion] = useState<string | undefined>(undefined)
+  /** 更新就绪提示（主进程推送；只在 downloaded 时显示顶部横幅） */
+  const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null)
+  const [updateDismissed, setUpdateDismissed] = useState(false)
+  const [updateError, setUpdateError] = useState<string | null>(null)
+  const [updateInstalling, setUpdateInstalling] = useState(false)
   const renderMsRef = useRef<HTMLSpanElement | null>(null)
   const lastSnapshotRef = useRef<Snapshot | null>(null)
 
@@ -80,6 +85,44 @@ export function App() {
         /* 主进程未就绪时用默认值，下一次设置页/打印机页操作会再对齐 */
       })
   }, [])
+
+  /* -------- 更新就绪提示：主进程推送，只在下载完成时打断 -------- */
+  useEffect(() => {
+    if (typeof window === 'undefined' || !window.lanApi?.onUpdateStatus) return
+    let alive = true
+    window.lanApi
+      .updateGetStatus()
+      .then((s) => {
+        if (alive) setUpdateStatus(s)
+      })
+      .catch(() => {
+        /* 更新状态不可用时保持安静，不打断监控 */
+      })
+    const off = window.lanApi.onUpdateStatus((s) => {
+      if (!alive) return
+      setUpdateStatus(s)
+      setUpdateError(null)
+      if (s.phase === 'downloaded') setUpdateDismissed(false)
+    })
+    return () => {
+      alive = false
+      off()
+    }
+  }, [])
+
+  const installUpdate = useCallback(async () => {
+    if (updateInstalling) return
+    setUpdateInstalling(true)
+    setUpdateError(null)
+    try {
+      const res = await window.lanApi.updateInstall()
+      if (!res.ok) setUpdateError(res.error ?? '启动安装失败')
+    } catch (err) {
+      setUpdateError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setUpdateInstalling(false)
+    }
+  }, [updateInstalling])
 
   /* -------- __ready：首个快照提交后置 true（不用 rAF，离屏/无头环境可能不派发） -------- */
   useEffect(() => {
@@ -316,6 +359,46 @@ export function App() {
           />
         }
       >
+        {updateStatus?.phase === 'downloaded' && !updateDismissed && (
+          <div className="banner banner--ok" role="status">
+            <Icon name="arrow-down" size={14} />
+            <span className="banner__text">
+              新版本{updateStatus.availableVersion ? ` v${updateStatus.availableVersion}` : ''} 已下载，重启应用完成安装。
+            </span>
+            <button
+              type="button"
+              className="btn btn--primary btn--sm"
+              onClick={() => void installUpdate()}
+              disabled={updateInstalling}
+            >
+              {updateInstalling ? '正在安装…' : '重启并安装'}
+            </button>
+            <button
+              type="button"
+              className="banner__close"
+              onClick={() => setUpdateDismissed(true)}
+              aria-label="稍后安装"
+              title="稍后安装"
+            >
+              <Icon name="close" size={13} />
+            </button>
+          </div>
+        )}
+        {updateError && (
+          <div className="banner" role="alert">
+            <Icon name="warn" size={14} />
+            <span className="banner__text">安装更新失败：{updateError}</span>
+            <button
+              type="button"
+              className="banner__close"
+              onClick={() => setUpdateError(null)}
+              aria-label="关闭错误提示"
+              title="关闭"
+            >
+              <Icon name="close" size={13} />
+            </button>
+          </div>
+        )}
         {feed.error && (
           <div className="banner" role="alert">
             <Icon name="warn" size={14} />

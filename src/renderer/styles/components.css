@@ -984,6 +984,32 @@
   overflow-wrap: anywhere;
 }
 
+.banner--ok {
+  border-color: var(--ok-a40);
+  background: var(--ok-a10);
+  color: var(--ok);
+}
+
+.banner--ok .banner__close:hover {
+  background: var(--ok-a18);
+}
+
+/* ---------- 自动更新下载进度 ---------- */
+
+.update-progress {
+  height: 4px;
+  border-radius: 999px;
+  background: var(--line);
+  overflow: hidden;
+}
+
+.update-progress__bar {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.3s ease;
+}
+
 .banner__close {
   flex: none;
   display: inline-flex;

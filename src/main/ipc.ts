@@ -16,6 +16,7 @@ import type {
   RouterStatus,
   ScanProgress,
   Snapshot,
+  UpdateStatus,
 } from '../shared/types';
 import type { Engine } from './engine';
 import type { RouterManager } from './engine/router';
@@ -25,6 +26,14 @@ import { remoteOpen } from './remote-ops';
 import { terminalRun } from './terminal';
 import { clearCredentials, saveCredentials } from './router-store';
 import { checkRouterWebSession, clearAdminCookies, openPrinterAdminWindow } from './router-browser';
+
+/** 更新服务的最小接口（实现见 updater.ts；IPC 层不直接依赖 electron-updater）。 */
+export interface UpdateApi {
+  status(): UpdateStatus;
+  check(): void;
+  install(): { ok: boolean; error: string | null };
+  setAutoUpdateEnabled(on: boolean): void;
+}
 
 let target: BrowserWindow | null = null;
 
@@ -51,7 +60,12 @@ export function clearPushTarget(win: BrowserWindow): void {
   if (target === win) target = null;
 }
 
-export function registerIpc(win: BrowserWindow, engine: Engine, router: RouterManager): void {
+/** 更新状态推送（下载进度/就绪/失败），渲染层据此刷新设置页与顶部提示。 */
+export function pushUpdateStatus(status: UpdateStatus): void {
+  send(CH.updateStatus, status);
+}
+
+export function registerIpc(win: BrowserWindow, engine: Engine, router: RouterManager, update: UpdateApi): void {
   target = win;
 
   ipcMain.handle(CH.getSnapshot, (): Snapshot => engine.getSnapshot());
@@ -107,7 +121,12 @@ export function registerIpc(win: BrowserWindow, engine: Engine, router: RouterMa
 
   // —— 配置通道（task-025） ——
   ipcMain.handle(CH.configExport, () => engine.configExport());
-  ipcMain.handle(CH.configImport, (_event, json: string) => engine.configImport(String(json ?? '')));
+  ipcMain.handle(CH.configImport, (_event, json: string) => {
+    const res = engine.configImport(String(json ?? ''));
+    // 导入可能翻转 autoUpdate：让更新控制器的定时器与新设置对齐
+    if (res.ok) update.setAutoUpdateEnabled(engine.getSettings().autoUpdate);
+    return res;
+  });
 
   // —— 路由器管理通道 ——
   ipcMain.handle(CH.routerGetStatus, (): RouterStatus => router.getStatus());
@@ -207,6 +226,7 @@ export function registerIpc(win: BrowserWindow, engine: Engine, router: RouterMa
       'useMdns',
       'closeToTray',
       'printerAlerts',
+      'autoUpdate',
       'rememberRouterPassword',
     ] as const;
     const clean: Record<string, unknown> = {};
@@ -215,8 +235,19 @@ export function registerIpc(win: BrowserWindow, engine: Engine, router: RouterMa
     if (clean.rememberRouterPassword === false && engine.getSettings().rememberRouterPassword === true) {
       clearCredentials();
     }
-    return { ...engine.updateSettings(clean), appVersion: app.getVersion() };
+    const next = engine.updateSettings(clean);
+    if ('autoUpdate' in clean) update.setAutoUpdateEnabled(next.autoUpdate);
+    return { ...next, appVersion: app.getVersion() };
   });
+
+  // —— 自动更新（安装版 + GitHub Releases） ——
+  ipcMain.handle(CH.updateGetStatus, (): UpdateStatus => update.status());
+  ipcMain.handle(CH.updateCheck, (): UpdateStatus => {
+    // 立即返回当前状态（checking），后续进度经 pushUpdateStatus 推送
+    update.check();
+    return update.status();
+  });
+  ipcMain.handle(CH.updateInstall, (): { ok: boolean; error: string | null } => update.install());
   // 开机自启（task-021）：isPackaged 门控（dev 下注册的是 electron.exe 本体）+ 写后回读验证——
   // setLoginItemSettings 会静默失败（系统策略/权限受限），必须回读比对，不能写完就报成功。
   ipcMain.handle(CH.launchAtLoginSet, (_e, on: unknown): { ok: boolean; error: string | null } => {

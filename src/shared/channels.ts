@@ -53,6 +53,11 @@ export const CH = {
   /** 开机自启开关（task-021：OS 为唯一事实源，payload { on } → { ok, error }） */
   launchAtLoginSet: 'settings:launch-at-login',
 
+  // 自动更新（安装版；便携版/开发态由主进程如实拒绝）
+  updateGetStatus: 'app:update-get-status',
+  updateCheck: 'app:update-check',
+  updateInstall: 'app:update-install',
+
   // 网络诊断 / 日志 / 远程操作 / 内置终端
   diagRun: 'diag:run',
   diagAdapters: 'diag:adapters',
@@ -65,6 +70,7 @@ export const CH = {
   snapshot: 'lan:snapshot',
   scanProgress: 'lan:scanProgress',
   routerStatus: 'router:status',
+  updateStatus: 'app:update-status',
 } as const;
 
 export type ChannelName = (typeof CH)[keyof typeof CH];

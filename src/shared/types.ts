@@ -166,6 +166,11 @@ export interface AppSettings {
   /** 打印机离线/故障/耗材不足时弹系统通知，恢复时同样提醒（默认开启） */
   printerAlerts: boolean;
   /**
+   * 自动检查并后台下载更新（默认开启，仅安装版生效）。
+   * 安装始终由用户确认；便携版与开发态不执行检查。
+   */
+  autoUpdate: boolean;
+  /**
    * 是否记住路由器登录凭据（task-022 B-1，默认 true）。
    * 关闭即清除盘上已存凭据，且后续登录不再落盘；自动重登也随之停用。
    */
@@ -180,6 +185,41 @@ export interface SettingsPayload extends AppSettings {
   launchAtLogin: boolean;
   /** 开机自启是否可设置（dev 模式注册的是 electron.exe 本体，须用安装版） */
   launchAtLoginAvailable: boolean;
+}
+
+// —— 自动更新（electron-updater + GitHub Releases） ——
+
+export type UpdatePhase =
+  | 'disabled'
+  | 'idle'
+  | 'checking'
+  | 'downloading'
+  | 'downloaded'
+  | 'up-to-date'
+  | 'installing'
+  | 'error';
+
+/** 主进程更新状态机快照；渲染层只读展示，不自行推导进度。 */
+export interface UpdateStatus {
+  phase: UpdatePhase;
+  currentVersion: string;
+  /** 新版本号（checking/downloading/downloaded 时有值） */
+  availableVersion: string | null;
+  /** 下载百分比 0-100；未知为 null */
+  percent: number | null;
+  /** 已下载字节；未知为 null */
+  transferred: number | null;
+  /** 总字节；未知为 null */
+  total: number | null;
+  /** phase=error 时非空，其余为 null */
+  error: string | null;
+  /** 不支持自动更新的原因（开发态/便携版/冒烟）；支持时为 null */
+  unavailableReason: string | null;
+  supported: boolean;
+  /** 自动检查开关的当前值（与设置一致） */
+  autoUpdate: boolean;
+  /** 最近一次检查/下载结果时间（unix ms）；从未检查为 null */
+  checkedAt: number | null;
 }
 
 // —— 网络诊断与运维（诊断中心 / 日志 / 远程操作） ——
@@ -455,6 +495,13 @@ export interface LanApi {
   settingsUpdate(patch: Partial<AppSettings>): Promise<SettingsPayload>;
   /** 开机自启开关（task-021：主进程 setLoginItemSettings + 写后回读验证；dev 模式返回不可用文案） */
   setLaunchAtLogin(on: boolean): Promise<{ ok: boolean; error: string | null }>;
+  // —— 自动更新 ——
+  /** 当前更新状态（安装版/便携版/开发态由主进程判定） */
+  updateGetStatus(): Promise<UpdateStatus>;
+  /** 立即检查并后台下载；返回检查开始时的状态 */
+  updateCheck(): Promise<UpdateStatus>;
+  /** 重启并安装（仅 download 完成后可用；失败如实返回） */
+  updateInstall(): Promise<{ ok: boolean; error: string | null }>;
   // —— 网络诊断 / 日志 / 远程操作 ——
   diagRun(kind: DiagKind, target: string): Promise<DiagResult>;
   diagAdapters(): Promise<NetAdapter[]>;
@@ -467,6 +514,7 @@ export interface LanApi {
   onSnapshot(cb: (s: Snapshot) => void): () => void;
   onScanProgress(cb: (p: ScanProgress) => void): () => void;
   onRouterStatus(cb: (s: RouterStatus) => void): () => void;
+  onUpdateStatus(cb: (s: UpdateStatus) => void): () => void;
 }
 
 // —— 路由器管理（能力探测 + 诚实降级）——

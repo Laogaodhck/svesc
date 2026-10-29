@@ -221,6 +221,7 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
     useMdns: 'boolean',
     closeToTray: 'boolean',
     printerAlerts: 'boolean',
+    autoUpdate: 'boolean',
     rememberRouterPassword: 'boolean',
   };
 
@@ -493,6 +494,7 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
         useMdns: s.useMdns,
         closeToTray: s.closeToTray,
         printerAlerts: s.printerAlerts,
+        autoUpdate: s.autoUpdate,
         rememberRouterPassword: s.rememberRouterPassword,
       };
     },

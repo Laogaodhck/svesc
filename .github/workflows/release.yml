@@ -109,6 +109,8 @@ jobs:
           path: |
             release-ci/SVESC-Setup-*.exe
             release-ci/SVESC-Portable-*.exe
+            release-ci/latest.yml
+            release-ci/*.blockmap
             SHA256SUMS.txt
           retention-days: 14
 
@@ -121,9 +123,19 @@ jobs:
           DRAFT: ${{ github.event_name == 'push' && 'true' || inputs.draft }}
         run: |
           $ErrorActionPreference = 'Stop'
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          # latest.yml 是 electron-updater 的更新清单：缺失或版本不符会让已安装客户端静默拿不到更新
+          $latest = Join-Path (Get-Location) 'release-ci/latest.yml'
+          if (-not (Test-Path -LiteralPath $latest)) { throw '缺少 release-ci/latest.yml，自动更新无法工作' }
+          $meta = Get-Content -LiteralPath $latest -Raw
+          if ($meta -notmatch "(?m)^version:\s*$([regex]::Escape($version))\s*$") {
+            throw "latest.yml 版本与 package.json ($version) 不一致"
+          }
+
           $installers = Get-ChildItem release-ci -Filter 'SVESC-*.exe' | Sort-Object Name | ForEach-Object { $_.FullName }
-          $arguments = @($env:TAG) + $installers + @(
-            'SHA256SUMS.txt',
+          $blockmaps = Get-ChildItem release-ci -Filter '*.blockmap' | ForEach-Object { $_.FullName }
+          $assets = @($installers) + @($latest) + $blockmaps + @('SHA256SUMS.txt')
+          $arguments = @($env:TAG) + $assets + @(
             '--title', "SVESC $env:TAG",
             '--generate-notes'
           )

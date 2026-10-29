@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type ChangeEvent } from 'react'
-import type { AppSettings, SettingsPayload } from '../../shared/types'
+import type { AppSettings, SettingsPayload, UpdateStatus } from '../../shared/types'
 import { EmptyState } from '../components/atoms/EmptyState'
 import { Icon } from '../components/Icon'
 import type { Tone } from '../lib/semantics'
@@ -106,6 +106,187 @@ function LaunchAtLoginSwitch({
       hint={available ? '开机后自动在后台启动并常驻托盘' : '开发模式下不可用，请使用安装版'}
       disabled={!available || busy || pending}
     />
+  )
+}
+
+function formatSize(bytes: number | null): string {
+  if (bytes === null || !Number.isFinite(bytes)) return '—'
+  if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(2)} GB`
+  if (bytes >= 1024 ** 2) return `${(bytes / 1024 ** 2).toFixed(1)} MB`
+  return `${Math.max(1, Math.round(bytes / 1024))} KB`
+}
+
+function updatePhaseText(s: UpdateStatus): string {
+  switch (s.phase) {
+    case 'disabled':
+      return s.unavailableReason ?? '当前构建不支持自动更新'
+    case 'idle':
+      return '尚未检查更新'
+    case 'checking':
+      return '正在检查更新…'
+    case 'downloading': {
+      const version = s.availableVersion ? `v${s.availableVersion}` : '新版本'
+      const pct = s.percent === null ? '' : ` ${s.percent.toFixed(1)}%`
+      return `正在下载 ${version}${pct}`
+    }
+    case 'downloaded':
+      return `${s.availableVersion ? `v${s.availableVersion}` : '新版本'} 已下载，重启应用完成安装`
+    case 'up-to-date':
+      return `已是最新版本（v${s.currentVersion}）`
+    case 'installing':
+      return '正在退出并安装…'
+    case 'error':
+      return s.error ?? '检查更新失败'
+  }
+}
+
+/**
+ * 自动更新卡片：主进程是唯一状态源（检查/下载进度走推送），这里不发乐观状态。
+ * 便携版/开发态由主进程返回 supported=false，按钮禁用并展示真实原因。
+ */
+function UpdateCard({
+  autoUpdate,
+  busy,
+  onToggle,
+}: {
+  autoUpdate: boolean
+  busy: boolean
+  onToggle: () => void
+}) {
+  const [status, setStatus] = useState<UpdateStatus | null>(null)
+  const [pending, setPending] = useState(false)
+  const [installPending, setInstallPending] = useState(false)
+  const [localError, setLocalError] = useState<string | null>(null)
+
+  const hasApi = typeof window !== 'undefined' && window.lanApi !== undefined
+
+  useEffect(() => {
+    if (!hasApi) return
+    let alive = true
+    window.lanApi
+      .updateGetStatus()
+      .then((s) => {
+        if (alive) setStatus(s)
+      })
+      .catch((err: unknown) => {
+        if (alive) setLocalError(err instanceof Error ? err.message : String(err))
+      })
+    const off = window.lanApi.onUpdateStatus((s) => {
+      if (!alive) return
+      setStatus(s)
+      setLocalError(null)
+    })
+    return () => {
+      alive = false
+      off()
+    }
+  }, [hasApi])
+
+  const supported = status?.supported ?? false
+  const busyPhase =
+    status?.phase === 'checking' || status?.phase === 'downloading' || status?.phase === 'installing'
+
+  const onCheck = useCallback(async () => {
+    if (!hasApi || pending || busyPhase) return
+    setPending(true)
+    setLocalError(null)
+    try {
+      const next = await window.lanApi.updateCheck()
+      setStatus(next)
+    } catch (err) {
+      setLocalError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setPending(false)
+    }
+  }, [hasApi, pending, busyPhase])
+
+  const onInstall = useCallback(async () => {
+    if (!hasApi || installPending) return
+    setInstallPending(true)
+    setLocalError(null)
+    try {
+      const res = await window.lanApi.updateInstall()
+      if (!res.ok) setLocalError(res.error ?? '启动安装失败')
+    } catch (err) {
+      setLocalError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setInstallPending(false)
+    }
+  }, [hasApi, installPending])
+
+  const phaseText = status ? updatePhaseText(status) : '正在读取更新状态…'
+  const failed = status?.phase === 'error'
+  const downloaded = status?.phase === 'downloaded'
+
+  return (
+    <div className="card">
+      <div className="card__head">
+        <span className="card__title">应用更新</span>
+        <span className="card__hint mono">当前 v{status?.currentVersion ?? '—'}</span>
+      </div>
+      <div className="settings-stack">
+        <Switch
+          on={autoUpdate}
+          onToggle={onToggle}
+          label="自动检查并下载更新"
+          hint={
+            supported
+              ? '启动后自动检查并在后台下载；安装前需手动确认，不会在退出时静默安装'
+              : status?.unavailableReason ?? '仅安装版支持自动更新'
+          }
+          disabled={busy || !supported}
+        />
+        <div className="settings-row">
+          <span className="u-115">更新状态</span>
+          <span className={failed || localError ? 'u-11 u-crit' : 'u-11 dim'}>{localError ?? phaseText}</span>
+        </div>
+        {status?.phase === 'downloading' && status.percent !== null && (
+          <div
+            className="update-progress"
+            role="progressbar"
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={status.percent}
+            aria-label="更新下载进度"
+          >
+            <span className="update-progress__bar" style={{ width: `${status.percent}%` }} />
+          </div>
+        )}
+        {status?.phase === 'downloading' && (
+          <div className="u-11 dim">
+            {formatSize(status.transferred)} / {formatSize(status.total)}
+          </div>
+        )}
+        <div className="settings-row">
+          <span className="u-11 dim">
+            {supported
+              ? '更新源：GitHub Releases；安装包未配置代码签名，Windows 可能提示未知发布者，请核对来源。'
+              : '便携版请从 Releases 手动下载新版本；开发态不执行更新。'}
+          </span>
+          {downloaded ? (
+            <button
+              type="button"
+              className="btn btn--primary btn--sm"
+              onClick={() => void onInstall()}
+              disabled={installPending}
+            >
+              <Icon name="arrow-down" size={13} />
+              {installPending ? '正在启动安装…' : '重启并安装'}
+            </button>
+          ) : (
+            <button
+              type="button"
+              className="btn btn--ghost btn--sm"
+              onClick={() => void onCheck()}
+              disabled={!supported || pending || busyPhase}
+            >
+              <Icon name="refresh" size={13} />
+              {pending || status?.phase === 'checking' ? '检查中…' : '检查更新'}
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
   )
 }
 
@@ -434,6 +615,18 @@ export function SettingsView({
           {cfgMsg && <div className="u-11" data-tone={cfgTone === 'ok' ? undefined : 'crit'}>{cfgMsg}</div>}
         </div>
       </div>
+
+      {/* —— 应用更新 —— */}
+      <UpdateCard
+        autoUpdate={settings.autoUpdate}
+        busy={busy}
+        onToggle={() =>
+          void update(
+            { autoUpdate: !settings.autoUpdate },
+            settings.autoUpdate ? '已关闭自动检查更新' : '已开启自动检查更新',
+          )
+        }
+      />
 
       {/* —— 关于 —— */}
       <div className="card">

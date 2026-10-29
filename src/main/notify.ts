@@ -20,3 +20,15 @@ export function showPrinterAlert(alert: PrinterAlert, onClick: () => void): bool
   notification.show();
   return true;
 }
+
+/** 更新下载完成：提示用户手动重启安装（不自作主张在退出时静默安装）。 */
+export function showUpdateReady(version: string, onClick: () => void): boolean {
+  if (!Notification.isSupported()) return false;
+  const notification = new Notification({
+    title: `更新已就绪：v${version}`,
+    body: '点击打开主窗口，在设置页选择“重启并安装”。安装包未签名，Windows 可能提示未知发布者。',
+  });
+  notification.on('click', onClick);
+  notification.show();
+  return true;
+}

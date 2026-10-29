@@ -22,6 +22,8 @@ export interface PersistedSettings {
   closeToTray: boolean;
   /** 打印机异常/恢复的系统通知（默认开启；被忽略与演示打印机不参与） */
   printerAlerts: boolean;
+  /** 自动检查并后台下载更新（默认开启；仅安装版生效，安装需用户确认） */
+  autoUpdate: boolean;
   /** 是否记住路由器登录凭据（task-022 B-1，默认 true；关闭即清盘上凭据并停用自动重登） */
   rememberRouterPassword: boolean;
 }
@@ -93,7 +95,7 @@ export const defaultState = (): PersistedState => ({
   version: STORE_VERSION,
   aliases: {},
   firstSeen: {},
-  settings: { autoScan: true, autoScanIntervalSec: 60, showVirtualPrinters: false, snmpEnabled: true, useMdns: false, closeToTray: true, printerAlerts: true, rememberRouterPassword: true },
+  settings: { autoScan: true, autoScanIntervalSec: 60, showVirtualPrinters: false, snmpEnabled: true, useMdns: false, closeToTray: true, printerAlerts: true, autoUpdate: true, rememberRouterPassword: true },
   printers: { manual: [], ignored: [] },
   deviceNotes: {},
   deviceTags: {},
@@ -165,6 +167,7 @@ export class JsonStore implements PersistStore {
           useMdns: obj.settings?.useMdns ?? false,
           closeToTray: obj.settings?.closeToTray ?? true,
           printerAlerts: obj.settings?.printerAlerts ?? true,
+          autoUpdate: obj.settings?.autoUpdate ?? true,
           rememberRouterPassword: obj.settings?.rememberRouterPassword ?? true,
         },
         // task-025：备注/标签/监控目标（形状脏数据直接丢弃，不猜）

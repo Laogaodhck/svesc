@@ -58,6 +58,14 @@ win:
     - target: portable
       arch: [x64]
 
+# 自动更新源：electron-updater 读取 resources/app-update.yml 后访问 GitHub Releases。
+# `--publish never` 只禁止上传，仍会生成本文件与 latest.yml；发布流水线负责把它们
+# 和安装包一起上传。owner/repo 必须与实际仓库一致，否则客户端检查会 404。
+publish:
+  provider: github
+  owner: Laogaodhck
+  repo: svesc
+
 nsis:
   oneClick: false
   perMachine: false

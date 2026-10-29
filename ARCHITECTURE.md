@@ -301,6 +301,24 @@ printers 采集 4520ms（独立任务，不在扫描预算内；SNMP 命中即�
 - **健壮性**：heartbeat 补 catch → warnings（此前 spawn 失败会让快照静默停更）；手动刷新在扫描进行中如实返 `started:false`；`exportReport` 附 routerStatus + printerManage。
 - **M3**：`runFullScan` 抽为 5 个 phase 方法（ScanCtx 共享上下文），预算语义逐行保留，engine-check 回归 PASS。
 
+## 9.8 自动更新（electron-updater，2026-10-29）
+
+**分层**：`engine/update-policy.ts`（纯函数：能力判定 + 错误文案归一）→ `engine/update-controller.ts`（纯 Node 状态机、定时器、安装门控，适配器注入）→ `main/updater.ts`（包装 `electron-updater`，只做事件翻译与通知）。`engine/**` 仍不 import Electron；状态机可用假适配器 + 假定时器完整测试。
+
+**更新源与调度**：打包时 electron-builder 依据 `electron-builder.yml` 的 `publish`（GitHub，`Laogaodhck/svesc`）生成 `resources/app-update.yml`；即使 `--publish never` 也会生成 `app-update.yml`、`latest.yml` 与 NSIS `.blockmap`。控制器强制 `autoDownload=true`、`autoInstallOnAppQuit=false`、`allowPrerelease=false`、`allowDowngrade=false`：只检查并后台下载，安装必须由用户触发；旧版不会被“降级更新”覆盖。启动 15 秒后首次自动检查，之后每 6 小时一次，`checking/downloading/installing` 期间不重复发起；手动检查不受 `autoUpdate` 开关限制。
+
+**能力门控（`resolveUpdateSupport`）**：冒烟模式、未打包（开发）直接进入 `disabled`；便携版依据 `PORTABLE_EXECUTABLE_FILE/_DIR/_APP_FILENAME` 判定为不支持并给出“从 Releases 手动下载”的原因。不支持时状态机不发网络请求，IPC 的 check/install 也不会穿透成 electron-updater 调用；设置页禁用开关与按钮，只展示原因。
+
+**未签名包策略**：应用不自带签名校验旁路，也不关闭系统安全检查。下载完成只置 `downloaded` 并通过 `main/notify.ts` 弹通知；`install()` 仅在 `downloaded` 放行，先调用 `markQuitting()`（绕开关闭到托盘的拦截），再 `quitAndInstall(false, true)`，保留安装器界面让 Windows 展示“未知发布者”提示由用户确认。UI 与通知都明确说明未签名，安装不会被伪装成静默升级。
+
+**失败语义**：`normalizeUpdateError` 将 `latest.yml`/404、`app-update.yml`、sha512/checksum/signature、ENOSPC、EACCES/EPERM、网络类错误翻译成可执行中文提示并截断未知长文本；promise rejection 与 `error` 事件去重，统一落到 `phase='error'` 并写应用日志（`source='update'`）。迟到的 `download-progress` 在 `downloaded/installing` 阶段被忽略，进度不会把就绪状态倒退。
+
+**契约**：`shared/channels.ts` 新增 `app:update-get-status` / `app:update-check` / `app:update-install`，推送 `app:update-status`；`UpdateStatus` 暴露 `phase/currentVersion/availableVersion/percent/transferred/total/error/unavailableReason/supported/autoUpdate/checkedAt`。渲染器订阅主进程推送，设置页 `UpdateCard` 负责开关、进度条、检查/安装按钮，`App.tsx` 在下载完成与安装失败时显示横幅。
+
+**发布流水线**：`.github/workflows/release.yml` 把 `latest.yml` 与 `*.blockmap` 一并收集，发布前校验 `latest.yml` 存在且 `version:` 与 `package.json` 一致，再连同安装包和 `SHA256SUMS.txt` 上传。缺任一附件时更新器会报“未找到更新元数据”，不会假装检查成功。
+
+**版本约束**：electron-updater 只接受严格更高的 semver。当前所有发行包内部版本仍为 `0.4.0`，因此现有 Release 之间不会互相提示升级；下一次发布必须提高 `version`，且已装旧版的用户需手动安装一次带更新器的构建。
+
 ## 10. 路由器管理模块
 
 当前 `RouterView` 只保留账号登录、退出、状态反馈和内嵌管理页。WAN、租约、无线状态、重启操作卡片已从该页移除；底层可用数据继续采集，租约名称供设备列表使用。引擎协议能力不等于当前页面提供对应操作入口。
@@ -458,7 +476,7 @@ printers 采集 4520ms（独立任务，不在扫描预算内；SNMP 命中即�
 | 自动化测试 | `npm test` | Vitest 单元与本地集成测试；包含回环 TCP/HTTP 服务，不代表真机兼容认证 |
 | 类型检查 | `npm run typecheck` 和 `npx tsc --noEmit -p tsconfig.web.json` | 分别检查主进程/Node 与渲染器 |
 | 真实采集 | `npm run engine-check` / `npm run soak` / `npm run smoke` | 会执行真实采集或启动 Electron，须确认网络授权 |
-| 打包 | `npm run dist -- --config.directories.output=<全新目录>` | 构建 NSIS + portable Windows x64，`--publish never` 不上传 |
+| 打包 | `npm run dist -- --config.directories.output=<全新目录>` | 构建 NSIS + portable Windows x64，`--publish never` 不上传；仍生成 `app-update.yml` / `latest.yml` / `.blockmap` |
 
 `electron-builder.yml` 将 dist 与 package.json 放入 ASAR，额外复制运行时图标；NSIS 单独使用 `build/setup-icon.ico`，应用/便携版/卸载器仍使用应用图标。重打包使用全新输出目录，避免旧 ASAR 清理限制；当前未配置代码签名证书。
 
@@ -466,6 +484,8 @@ printers 采集 4520ms（独立任务，不在扫描预算内；SNMP 命中即�
 
 **状态历史 / 异常提醒 / 组件测试（2026-10-29）**：全量 43 个测试文件、1149 项测试通过；主进程与渲染器类型检查、production build 通过；Electron 冒烟检查启动正常（15 台设备、5 台打印机、0 问题）。组件测试运行于 jsdom，不代表安装包内 UI 或真实打印机行为已验证。
 
-**未验证项**：该轮没有登录真实路由器，也没有安装发行包后测试 UI。不得将自动化测试或旧真机记录写成所有管理页固件均兼容。
+**自动更新（2026-10-29，当前基线）**：全量 45 个测试文件、1169 项测试通过（含 `update-policy` / `update-controller` 的假适配器与假定时器用例）；主进程与渲染器类型检查、production build 通过；Electron 冒烟检查正常（13 台设备、5 台打印机、0 问题），设置页更新卡片渲染正常。安装包已构建并核验 `resources/app-update.yml`（provider github、owner/repo 正确）、`latest.yml`（版本 0.4.0、Setup 的 sha512 与大小）及 `.blockmap`。
+
+**未验证项**：本轮没有对公开 Release 执行过真实升级，没有安装发行包实测未签名安装器的信任提示，也没有登录真实路由器测试。自动化测试不能替代真机升级验证；首个版本号更高的 Release 才是端到端验证起点。
 
 **发布边界**：源码同步到 GitHub/Gitee 不会自动发布安装包。Release 应指向明确提交，先上传草稿并核验附件大小与 SHA256，再公开；同内部版本的增强构建应使用不冲突的标签，不能移动旧标签或覆盖旧附件。下载是否可用以公开 Release 状态为准。

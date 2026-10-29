@@ -9,11 +9,20 @@ import path from 'node:path';
 import { createEngine, type Engine } from './engine';
 import { RouterManager } from './engine/router';
 import { PrinterAlertTracker } from './engine/printers/alerts';
-import { clearPushTarget, pushRouterStatus, pushScanProgress, pushSnapshot, registerIpc, setPushTarget } from './ipc';
+import {
+  clearPushTarget,
+  pushRouterStatus,
+  pushScanProgress,
+  pushSnapshot,
+  pushUpdateStatus,
+  registerIpc,
+  setPushTarget,
+} from './ipc';
 import { showPrinterAlert } from './notify';
 import { loadCredentials, saveCredentials, clearCredentials } from './router-store';
 import { bindRouterAdminGateway, checkRouterWebSession, getRouterAdminCookieHeader } from './router-browser';
-import { createTray, destroyTray, isQuitRequested, refreshTray, showWindow } from './tray';
+import { createTray, destroyTray, isQuitRequested, markQuitting, refreshTray, showWindow } from './tray';
+import { createUpdateService, type UpdateService } from './updater';
 
 const isSmoke = process.env.SMOKE === '1';
 
@@ -36,6 +45,7 @@ app.commandLine.appendSwitch('disable-renderer-backgrounding');
 let mainWindow: BrowserWindow | null = null;
 let engine: Engine | null = null;
 let routerManager: RouterManager | null = null;
+let updateService: UpdateService | null = null;
 
 function rendererEntry(): string {
   // 产物结构：dist/main/index.cjs + dist/renderer/index.html
@@ -148,7 +158,19 @@ async function bootstrap(): Promise<void> {
   routerManager.setWebLeaseProvider(async (url) =>
     await bindRouterAdminGateway(engine?.getGatewayIp() ?? null) ? getRouterAdminCookieHeader(url) : null,
   );
-  registerIpc(mainWindow, engine, routerManager);
+  // 自动更新：仅安装版（非便携、非开发、非冒烟）；检查/下载自动化，安装始终由用户确认
+  updateService = createUpdateService({
+    isPackaged: app.isPackaged,
+    isSmoke,
+    env: process.env,
+    currentVersion: app.getVersion(),
+    getAutoUpdate: () => engine?.getSettings().autoUpdate ?? true,
+    showWindow,
+    beforeInstall: markQuitting,
+    onStatus: pushUpdateStatus,
+    onLog: (level, message) => engine?.logs.push(level, 'update', message),
+  });
+  registerIpc(mainWindow, engine, routerManager, updateService);
   routerManager.startPolling((status) => {
     pushRouterStatus(status);
     // task-022 B-2：观测到会话失效（invalidatedAt 粘性）→ 触发自动重登。
@@ -180,6 +202,9 @@ async function bootstrap(): Promise<void> {
     engine.stop();
     app.exit(result.ok ? 0 : 3);
   }
+
+  // 启动扫描稳定后再检查更新，避免与首轮深度扫描争网络
+  updateService?.start();
 }
 
 process.on('unhandledRejection', (reason) => {
@@ -211,6 +236,8 @@ app.on('window-all-closed', () => {
 app.on('before-quit', () => {
   // 先置位真退出（托盘菜单"退出"之外的 quit 路径也要放行 close），再销毁托盘
   destroyTray();
+  updateService?.dispose();
+  updateService = null;
   engine?.stop();
   routerManager?.stopPolling();
   engine = null;
