@@ -90,10 +90,16 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $installers = Get-ChildItem release-ci -Filter 'SVESC-*.exe' | Sort-Object Name
           if ($installers.Count -ne 2) { throw "预期 2 个安装包，实际 $($installers.Count)" }
-          $installers | ForEach-Object {
+          $lines = $installers | ForEach-Object {
             $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName).Hash.ToLowerInvariant()
             "$hash  $($_.Name)"
-          } | Set-Content -Encoding utf8 -Path SHA256SUMS.txt
+          }
+          # 统一 LF + 无 BOM，保证与本地生成的清单逐字节同格式
+          [IO.File]::WriteAllText(
+            (Join-Path (Get-Location) 'SHA256SUMS.txt'),
+            (($lines -join "`n") + "`n"),
+            [Text.UTF8Encoding]::new($false)
+          )
           Get-Content SHA256SUMS.txt
 
       - name: 留存构建产物
