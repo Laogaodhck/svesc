@@ -20,7 +20,8 @@ directories:
   # 0.3.0 运维功能版：持续监控/WOL/Webhook/端口扫描/HTML 报告/配置迁移（task-024 + task-025）。
   # 0.4.0 实时监控版：5s 心跳实时探测/未知 IP 滚动发现/早推帧/离线判定 ≈20s（task-026）。
   # 0.4.0-setup-icon：NSIS 安装器独立图标（setup-icon.ico，箱子+光盘）+ task-028 五生态识别扩充。
-  output: release-0.4.0-setup-icon
+  # 0.4.0-printers-20261029：打印机识别与队列管理增强（多源识别/真实队列门控/独立刷新）。
+  output: release-0.4.0-printers-20261029
   buildResources: build
 
 # 环境安全层拦截"一次调用递归删大目录"（electron-builder 解压 Electron 前必先
