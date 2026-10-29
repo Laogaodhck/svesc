@@ -1,0 +1,120 @@
+name: Release
+
+# 标签发布：推送 v* 标签后重新跑一遍质量门禁，构建 Windows 安装包，
+# 生成 SHA256 清单，并以草稿形式创建 GitHub Release（人工核对后再公开）。
+# 不覆盖既有发布：同名 Release 已存在时直接失败，不做 --clobber。
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 已存在的版本标签（如 v0.4.0-printers-20261029）
+        required: true
+        type: string
+      draft:
+        description: 以草稿创建，核对后再公开
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: 构建并发布 Windows 安装包
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: 缓存 Electron 运行时
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/AppData/Local/electron/Cache
+            ~/AppData/Local/electron-builder/Cache
+          key: ${{ runner.os }}-electron-${{ hashFiles('package-lock.json') }}
+          restore-keys: ${{ runner.os }}-electron-
+
+      - name: 安装依赖
+        run: npm ci
+
+      - name: 标签与版本一致性校验
+        shell: pwsh
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          if ($env:TAG -notmatch "^v$([regex]::Escape($version))") {
+            throw "标签 $env:TAG 与 package.json 版本 $version 不匹配"
+          }
+
+      - name: 主进程与脚本类型检查
+        run: npm run typecheck
+
+      - name: 渲染器类型检查
+        run: npm run typecheck:web
+
+      - name: 单元测试
+        run: npm test
+
+      - name: 构建安装包
+        run: |
+          npm run build
+          npx electron-builder --win --config electron-builder.yml --publish never --config.directories.output=release-ci
+
+      - name: 生成校验清单
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $installers = Get-ChildItem release-ci -Filter 'SVESC-*.exe' | Sort-Object Name
+          if ($installers.Count -ne 2) { throw "预期 2 个安装包，实际 $($installers.Count)" }
+          $installers | ForEach-Object {
+            $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName).Hash.ToLowerInvariant()
+            "$hash  $($_.Name)"
+          } | Set-Content -Encoding utf8 -Path SHA256SUMS.txt
+          Get-Content SHA256SUMS.txt
+
+      - name: 留存构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: svesc-windows-${{ inputs.tag || github.ref_name }}
+          path: |
+            release-ci/SVESC-Setup-*.exe
+            release-ci/SVESC-Portable-*.exe
+            SHA256SUMS.txt
+          retention-days: 14
+
+      - name: 创建 GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+          # 标签推送默认草稿（发布说明由人工补齐），手动触发可按输入选择。
+          DRAFT: ${{ github.event_name == 'push' && 'true' || inputs.draft }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $installers = Get-ChildItem release-ci -Filter 'SVESC-*.exe' | Sort-Object Name | ForEach-Object { $_.FullName }
+          $arguments = @($env:TAG) + $installers + @(
+            'SHA256SUMS.txt',
+            '--title', "SVESC $env:TAG",
+            '--generate-notes'
+          )
+          if ($env:DRAFT -eq 'true') { $arguments += '--draft' }
+          gh release create @arguments
