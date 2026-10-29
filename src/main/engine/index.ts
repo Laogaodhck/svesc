@@ -220,6 +220,7 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
     snmpEnabled: 'boolean',
     useMdns: 'boolean',
     closeToTray: 'boolean',
+    printerAlerts: 'boolean',
     rememberRouterPassword: 'boolean',
   };
 
@@ -491,6 +492,7 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
         snmpEnabled: s.snmpEnabled,
         useMdns: s.useMdns,
         closeToTray: s.closeToTray,
+        printerAlerts: s.printerAlerts,
         rememberRouterPassword: s.rememberRouterPassword,
       };
     },
@@ -532,8 +534,14 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
       store.setSettings({ autoScan: result.autoScan, autoScanIntervalSec: result.intervalSec });
       return result;
     },
-    getDeviceDetail(deviceId: string): Promise<DeviceDetail | null> {
-      return scheduler.getDeviceDetail(deviceId);
+    async getDeviceDetail(deviceId: string): Promise<DeviceDetail | null> {
+      const detail = await scheduler.getDeviceDetail(deviceId);
+      if (!detail) return null;
+      // 跨重启的在线历史只存在于支持状态日志的后端（SQLite）；JSON/降级后端如实给空数组
+      return {
+        ...detail,
+        statusHistory: store.getDeviceStatusHistory?.(detail.device.ip, 50) ?? [],
+      };
     },
     /**
      * 导出报告。extras（可选）由主进程合入路由器状态与打印管理配置——

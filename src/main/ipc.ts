@@ -206,6 +206,7 @@ export function registerIpc(win: BrowserWindow, engine: Engine, router: RouterMa
       'snmpEnabled',
       'useMdns',
       'closeToTray',
+      'printerAlerts',
       'rememberRouterPassword',
     ] as const;
     const clean: Record<string, unknown> = {};

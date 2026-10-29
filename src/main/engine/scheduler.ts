@@ -1354,7 +1354,8 @@ export class Scheduler {
       txBps: h.txBps,
     }));
 
-    return { device, ports, connections, history };
+    // 状态历史由持久化层注入（引擎门面），调度器自身不持存储依赖
+    return { device, ports, connections, history, statusHistory: [] };
   }
 
   /**

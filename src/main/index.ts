@@ -8,10 +8,12 @@ import { app, BrowserWindow, Menu } from 'electron';
 import path from 'node:path';
 import { createEngine, type Engine } from './engine';
 import { RouterManager } from './engine/router';
+import { PrinterAlertTracker } from './engine/printers/alerts';
 import { clearPushTarget, pushRouterStatus, pushScanProgress, pushSnapshot, registerIpc, setPushTarget } from './ipc';
+import { showPrinterAlert } from './notify';
 import { loadCredentials, saveCredentials, clearCredentials } from './router-store';
 import { bindRouterAdminGateway, checkRouterWebSession, getRouterAdminCookieHeader } from './router-browser';
-import { createTray, destroyTray, isQuitRequested, refreshTray } from './tray';
+import { createTray, destroyTray, isQuitRequested, refreshTray, showWindow } from './tray';
 
 const isSmoke = process.env.SMOKE === '1';
 
@@ -21,6 +23,9 @@ const isSmoke = process.env.SMOKE === '1';
  * （gpu_process_host.cc: GPU process isn't usable. Goodbye.）导致应用直接 FATAL 退出。
  * 本应用是纯数据表格/曲线 UI，软件合成完全够用，稳定性优先。
  */
+// Windows 通知归属：必须与 electron-builder appId 一致，否则 toast 会显示为 electron.app.*
+app.setAppUserModelId('cn.svesc.lan-monitor');
+
 app.disableHardwareAcceleration();
 app.commandLine.appendSwitch('disable-gpu');
 app.commandLine.appendSwitch('disable-gpu-compositing');
@@ -98,13 +103,31 @@ async function createWindow(): Promise<BrowserWindow> {
 async function bootstrap(): Promise<void> {
   Menu.setApplicationMenu(null);
 
+  /** 异常判定账本常驻：即使开关关闭也持续推进基线，重新开启时不会补弹存量故障 */
+  const printerAlerts = new PrinterAlertTracker();
+
   engine = await createEngine({
     userDataDir: app.getPath('userData'),
     exportDir: app.getPath('downloads'),
     onSnapshot: (snapshot) => {
       pushSnapshot(snapshot);
-      // 托盘菜单随心跳重建（勾选态保鲜）
-      if (!isSmoke) refreshTray();
+      if (!isSmoke) {
+        // 托盘菜单随心跳重建（勾选态保鲜）
+        refreshTray();
+        const alerts = printerAlerts.evaluate(snapshot.printers);
+        if (alerts.length > 0 && (engine?.getSettings().printerAlerts ?? true)) {
+          for (const alert of alerts) {
+            showPrinterAlert(alert, showWindow);
+            engine?.logs.push(
+              alert.kind === 'fault' ? 'warn' : 'info',
+              'printers',
+              alert.kind === 'fault'
+                ? `打印机异常：${alert.printerName}（${alert.reason}）`
+                : `打印机已恢复：${alert.printerName}`,
+            );
+          }
+        }
+      }
     },
     onScanProgress: (progress) => pushScanProgress(progress),
   });

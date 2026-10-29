@@ -282,6 +282,12 @@ printers 采集 4520ms（独立任务，不在扫描预算内；SNMP 命中即�
 - **安全边界**（打印机名是不可信字符串）：PowerShell 单引号转义（`escapePsSingleQuoted`：`'`→`''`）+ `isSafePrinterName` 拒绝换行/反引号/双引号；jobId 强制正整数（非数字不进命令）；IPC 层先做 action 白名单与 IPv4 格式校验。
 - **管理页监控增强（PrinterManageView）**：耗材摘要（仅 `levelPct` 非 null 条目，缺失显示"—"）、队列长度列、默认打印机标识 + 测试页/设默认/管理页操作按钮，全部 busy 单飞 + 失败如实反馈。
 
+### 9.6.1 状态历史与打印机异常提醒（2026-10-29）
+
+- **在线历史**：`device_status_log` 原本只写转移记录，现由引擎门面（`engine/index.ts`）在 `getDeviceDetail` 中注入 `statusHistory`（新→旧最多 50 条）。调度器不持有存储依赖，仍返回空数组；JSON/降级后端如实为空。渲染器详情抽屉直接展示，不新增 IPC 通道或存储表。历史只在状态转移时写入，不是连续采样。
+- **异常提醒**：`engine/printers/alerts.ts` 为纯 Node 判定器——`printerIssue()` 汇总 `offline/error/warning` 与耗材 ≤10%（`source != 'unknown'`），跳过演示与虚拟打印机；`PrinterAlertTracker` 首帧建基线不补弹存量故障，按打印机 10 分钟冷却，只有"通知过故障"的打印机才发恢复提醒，被忽略/移除的条目清账本。主进程 `onSnapshot` 每帧推进基线（即使开关关闭，避免重新开启时补弹），命中且 `settings.printerAlerts` 开启时经 `main/notify.ts` 弹 Electron `Notification`，点击唤起主窗口；`app.setAppUserModelId('cn.svesc.lan-monitor')` 与 electron-builder `appId` 对齐，保证 Windows toast 归属。
+- **组件测试**：`vitest.config.ts` 启用 `esbuild.jsx='automatic'` 并纳入 `.tsx`；`tests/printer-manage-view.test.tsx` 在 jsdom 下 mock `window.lanApi`，锁定队列门控、测试页双步确认（确认前不发命令）与快照更新时别名草稿保留。新增依赖：jsdom、`@testing-library/react`、`@testing-library/dom`。
+
 ## 9.7 历史审计修复（2026-10-25）
 
 本节保留当时的改动背景；告警相关功能现已移除，存储与路由器会话的当前实现分别见第 2、10 节。
@@ -457,6 +463,8 @@ printers 采集 4520ms（独立任务，不在扫描预算内；SNMP 命中即�
 `electron-builder.yml` 将 dist 与 package.json 放入 ASAR，额外复制运行时图标；NSIS 单独使用 `build/setup-icon.ico`，应用/便携版/卸载器仍使用应用图标。重打包使用全新输出目录，避免旧 ASAR 清理限制；当前未配置代码签名证书。
 
 **租约增强验证基线（代码提交 `7e0cf25`）**：38 个测试文件、892 项测试通过；主进程、渲染器与修改测试的类型检查通过，production build 通过。安装版/便携版包内的 6 个 dist 文件及 3 个额外资源已与本地构建校验一致，包内版本为 0.4.0。
+
+**状态历史 / 异常提醒 / 组件测试（2026-10-29）**：全量 43 个测试文件、1149 项测试通过；主进程与渲染器类型检查、production build 通过；Electron 冒烟检查启动正常（15 台设备、5 台打印机、0 问题）。组件测试运行于 jsdom，不代表安装包内 UI 或真实打印机行为已验证。
 
 **未验证项**：该轮没有登录真实路由器，也没有安装发行包后测试 UI。不得将自动化测试或旧真机记录写成所有管理页固件均兼容。
 

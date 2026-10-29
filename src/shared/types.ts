@@ -163,6 +163,8 @@ export interface AppSettings {
   useMdns: boolean;
   /** 点关闭按钮时最小化到系统托盘而不是退出（托盘菜单"退出"始终真正退出） */
   closeToTray: boolean;
+  /** 打印机离线/故障/耗材不足时弹系统通知，恢复时同样提醒（默认开启） */
+  printerAlerts: boolean;
   /**
    * 是否记住路由器登录凭据（task-022 B-1，默认 true）。
    * 关闭即清除盘上已存凭据，且后续登录不再落盘；自动重登也随之停用。
@@ -368,11 +370,20 @@ export interface Snapshot {
   warnings: WarningEntry[];
 }
 
+/** 持久化的设备状态转移记录（SQLite device_status_log）。 */
+export interface DeviceStatusEvent {
+  state: string;
+  at: number;
+  latencyMs: number | null;
+}
+
 export interface DeviceDetail {
   device: Device;
   ports: { port: number; service: string; open: boolean }[];
   connections: { remoteIp: string; remotePort: number; state: string; proto: string }[];
   history: { ts: number; rtt: number | null; rxBps: number; txBps: number }[];
+  /** 跨重启的状态转移历史（新→旧，最多 50 条）；JSON 后端/无记录时为空数组（诚实降级） */
+  statusHistory: DeviceStatusEvent[];
 }
 
 /** 预加载桥暴露给渲染层的 API 形状（plan.md 第 5 节 IPC 通道一一对应）。 */

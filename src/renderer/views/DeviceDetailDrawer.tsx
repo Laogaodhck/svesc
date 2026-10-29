@@ -278,6 +278,8 @@ export function DeviceDetailDrawer({
   }, [detail, device])
 
   const connections = detail?.connections.slice(0, 10) ?? []
+  /** 跨重启状态转移（SQLite 已持久化，新→旧） */
+  const statusHistory = detail?.statusHistory ?? []
   const mac = fmtMac(device?.mac ?? null)
   /** 该设备是否已在持续监控中（按 IP 匹配监控目标） */
   const watched = !!(device && watches?.some((w) => w.ip === device.ip))
@@ -579,6 +581,40 @@ export function DeviceDetailDrawer({
                     unit="ms"
                   />
                 </div>
+              </section>
+
+              {/* -------- 在线历史（跨重启，SQLite 持久化） -------- */}
+              <section>
+                <div className="section-label">
+                  在线历史
+                  <span className="u-105 dim">持久化</span>
+                </div>
+                {statusHistory.length === 0 ? (
+                  <p className="note">
+                    <Icon name="info" size={13} className="note__icon" />
+                    {loading ? '正在读取状态历史…' : '暂无跨重启的状态记录（新设备或当前存储后端不提供历史）。'}
+                  </p>
+                ) : (
+                  <>
+                    <ul className="status-history" aria-label="设备状态历史">
+                      {statusHistory.slice(0, 12).map((e, i) => (
+                        <li className="status-history__row" key={`${e.at}-${i}`}>
+                          <StatusDot tone={stateTone(e.state)} />
+                          <span className="status-history__state">{STATE_LABEL[e.state] ?? e.state}</span>
+                          <span className="status-history__time">{fmtDateTime(e.at)}</span>
+                          <span className="status-history__lat">{e.latencyMs === null ? '—' : fmtMs(e.latencyMs)}</span>
+                        </li>
+                      ))}
+                    </ul>
+                    {statusHistory.length > 12 && (
+                      <span className="u-11 dim">仅显示最近 12 条，共 {statusHistory.length} 条。</span>
+                    )}
+                  </>
+                )}
+                <p className="note mt-10">
+                  <Icon name="info" size={13} className="note__icon" />
+                  只在状态发生变化时记录（在线/离线/降级），保存在本地 SQLite，重启后仍可回溯。
+                </p>
               </section>
 
               {/* -------- 带宽 -------- */}

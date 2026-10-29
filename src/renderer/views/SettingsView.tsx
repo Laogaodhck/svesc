@@ -367,6 +367,13 @@ export function SettingsView({
             hint="辅助补齐无 IP 打印机的地址；默认关闭"
             disabled={busy}
           />
+          <Switch
+            on={settings.printerAlerts}
+            onToggle={() => void update({ printerAlerts: !settings.printerAlerts }, settings.printerAlerts ? '已关闭打印机异常提醒' : '已开启打印机异常提醒')}
+            label="打印机异常提醒"
+            hint="离线、故障、耗材不足时弹系统通知，恢复时同样提醒；被忽略的打印机与演示数据不提醒"
+            disabled={busy}
+          />
         </div>
       </div>
 
