@@ -2,7 +2,7 @@
 
 Windows 桌面端局域网监控应用（Electron 45 + React 19 + Vite 7 + TypeScript）。无需单独部署后台服务或安装抓包驱动：探测使用 Windows 自带命令（`ping` / `arp` / `netstat` / `route` / `nbtstat` / PowerShell）和标准协议（SNMPv2c / mDNS / SSDP / WS-Discovery / IPP）。
 
-- 源码：[GitHub](https://github.com/Laogaodhck/svesc) · [Gitee](https://gitee.com/laogao-tall/svesc.git)
+- 源码：[GitHub](https://github.com/Laogaodhck/svesc)
 - 下载：[GitHub Releases](https://github.com/Laogaodhck/svesc/releases)
 - 设计与实现：[ARCHITECTURE.md](ARCHITECTURE.md)
 
@@ -77,7 +77,7 @@ AirPlay 等跨设备服务只提供生态证据，不单凭服务名认定手机
 - `SVESC-Setup-0.4.0.exe`：安装版（NSIS 安装向导）。
 - `SVESC-Portable-0.4.0.exe`：免安装便携版。
 
-系统要求：**Windows 10/11 x64**。当前构建未配置代码签名证书，Windows 可能提示未知发布者；请核对来源与 Release 提供的 SHA256。代码推送、打包成功或创建 Release 草稿不代表附件已经公开可下载，Gitee 代码同步也不自动同步 GitHub Release 附件。
+系统要求：**Windows 10/11 x64**。当前构建未配置代码签名证书，Windows 可能提示未知发布者；请核对来源与 Release 提供的 SHA256。代码推送、打包成功或创建 Release 草稿不代表附件已经公开可下载。
 
 ### 自动更新
 
