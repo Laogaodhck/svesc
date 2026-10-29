@@ -130,7 +130,7 @@ function updatePhaseText(s: UpdateStatus): string {
       return `正在下载 ${version}${pct}`
     }
     case 'downloaded':
-      return `${s.availableVersion ? `v${s.availableVersion}` : '新版本'} 已下载，重启应用完成安装`
+      return `${s.availableVersion ? `v${s.availableVersion}` : '新版本'} 已下载，请点击“重启并安装”；普通退出不会安装`
     case 'up-to-date':
       return `已是最新版本（v${s.currentVersion}）`
     case 'installing':
@@ -157,27 +157,33 @@ function UpdateCard({
   const [pending, setPending] = useState(false)
   const [installPending, setInstallPending] = useState(false)
   const [localError, setLocalError] = useState<string | null>(null)
+  const statusRevision = useRef(0)
+  const mounted = useRef(false)
 
   const hasApi = typeof window !== 'undefined' && window.lanApi !== undefined
 
   useEffect(() => {
     if (!hasApi) return
+    mounted.current = true
     let alive = true
-    window.lanApi
-      .updateGetStatus()
-      .then((s) => {
-        if (alive) setStatus(s)
-      })
-      .catch((err: unknown) => {
-        if (alive) setLocalError(err instanceof Error ? err.message : String(err))
-      })
+    const revision = statusRevision.current
     const off = window.lanApi.onUpdateStatus((s) => {
       if (!alive) return
+      statusRevision.current += 1
       setStatus(s)
       setLocalError(null)
     })
+    window.lanApi
+      .updateGetStatus()
+      .then((s) => {
+        if (alive && statusRevision.current === revision) setStatus(s)
+      })
+      .catch((err: unknown) => {
+        if (alive && statusRevision.current === revision) setLocalError(err instanceof Error ? err.message : String(err))
+      })
     return () => {
       alive = false
+      mounted.current = false
       off()
     }
   }, [hasApi])
@@ -190,13 +196,14 @@ function UpdateCard({
     if (!hasApi || pending || busyPhase) return
     setPending(true)
     setLocalError(null)
+    const revision = ++statusRevision.current
     try {
       const next = await window.lanApi.updateCheck()
-      setStatus(next)
+      if (mounted.current && statusRevision.current === revision) setStatus(next)
     } catch (err) {
-      setLocalError(err instanceof Error ? err.message : String(err))
+      if (mounted.current && statusRevision.current === revision) setLocalError(err instanceof Error ? err.message : String(err))
     } finally {
-      setPending(false)
+      if (mounted.current) setPending(false)
     }
   }, [hasApi, pending, busyPhase])
 
@@ -206,16 +213,16 @@ function UpdateCard({
     setLocalError(null)
     try {
       const res = await window.lanApi.updateInstall()
-      if (!res.ok) setLocalError(res.error ?? '启动安装失败')
+      if (mounted.current && !res.ok) setLocalError(res.error ?? '启动安装失败')
     } catch (err) {
-      setLocalError(err instanceof Error ? err.message : String(err))
+      if (mounted.current) setLocalError(err instanceof Error ? err.message : String(err))
     } finally {
-      setInstallPending(false)
+      if (mounted.current) setInstallPending(false)
     }
   }, [hasApi, installPending])
 
   const phaseText = status ? updatePhaseText(status) : '正在读取更新状态…'
-  const failed = status?.phase === 'error'
+  const failed = Boolean(status?.error)
   const downloaded = status?.phase === 'downloaded'
 
   return (
@@ -238,7 +245,7 @@ function UpdateCard({
         />
         <div className="settings-row">
           <span className="u-115">更新状态</span>
-          <span className={failed || localError ? 'u-11 u-crit' : 'u-11 dim'}>{localError ?? phaseText}</span>
+          <span className={failed || localError ? 'u-11 u-crit' : 'u-11 dim'}>{localError ?? status?.error ?? phaseText}</span>
         </div>
         {status?.phase === 'downloading' && status.percent !== null && (
           <div
@@ -268,10 +275,10 @@ function UpdateCard({
               type="button"
               className="btn btn--primary btn--sm"
               onClick={() => void onInstall()}
-              disabled={installPending}
+              disabled={!supported || installPending}
             >
               <Icon name="arrow-down" size={13} />
-              {installPending ? '正在启动安装…' : '重启并安装'}
+              {installPending ? '正在启动安装…' : failed || localError ? '重试安装' : '重启并安装'}
             </button>
           ) : (
             <button
@@ -299,6 +306,7 @@ export function SettingsView({
   onShowVirtualChange: (next: boolean) => void
 }) {
   const [settings, setSettings] = useState<SettingsPayload | null>(null)
+  const [loadAttempt, setLoadAttempt] = useState(0)
   const [intervalDraft, setIntervalDraft] = useState<string>('')
   const [busy, setBusy] = useState(false)
   const [msg, setMsg] = useState<{ tone: Tone; text: string } | null>(null)
@@ -327,6 +335,7 @@ export function SettingsView({
         if (!alive) return
         setSettings(s)
         setIntervalDraft(String(s.autoScanIntervalSec))
+        onShowVirtualChange(s.showVirtualPrinters)
       })
       .catch((err: unknown) => {
         if (alive) setMsg({ tone: 'crit', text: err instanceof Error ? err.message : String(err) })
@@ -334,7 +343,7 @@ export function SettingsView({
     return () => {
       alive = false
     }
-  }, [hasApi])
+  }, [hasApi, loadAttempt, onShowVirtualChange])
 
   const update = useCallback(
     async (patch: Partial<AppSettings>, okText: string) => {
@@ -345,6 +354,7 @@ export function SettingsView({
         const next = await window.lanApi.settingsUpdate(patch)
         setSettings(next)
         if (patch.autoScanIntervalSec !== undefined) setIntervalDraft(String(next.autoScanIntervalSec))
+        if (patch.showVirtualPrinters !== undefined) onShowVirtualChange(next.showVirtualPrinters)
         setMsg({ tone: 'ok', text: okText })
       } catch (err) {
         setMsg({ tone: 'crit', text: err instanceof Error ? err.message : String(err) })
@@ -352,7 +362,7 @@ export function SettingsView({
         setBusy(false)
       }
     },
-    [hasApi, busy],
+    [hasApi, busy, onShowVirtualChange],
   )
 
   const onExport = useCallback(async () => {
@@ -416,6 +426,7 @@ export function SettingsView({
         const s = await window.lanApi.settingsGet()
         setSettings(s)
         setIntervalDraft(String(s.autoScanIntervalSec))
+        onShowVirtualChange(s.showVirtualPrinters)
       } else {
         setCfgTone('crit')
         setCfgMsg(res.error ?? '导入失败')
@@ -426,7 +437,7 @@ export function SettingsView({
     } finally {
       setCfgBusy(false)
     }
-  }, [])
+  }, [onShowVirtualChange])
 
   if (!hasApi) {
     return (
@@ -439,7 +450,15 @@ export function SettingsView({
   if (!settings) {
     return (
       <div className="card">
-        <EmptyState icon="info" title="正在读取设置…" desc="设置由主进程持久化，首帧稍候。" />
+        {msg ? (
+          <>
+            <EmptyState icon="warn" title="设置加载失败" desc={msg.text} />
+            <button type="button" className="btn btn--ghost btn--sm" onClick={() => {
+              setMsg(null)
+              setLoadAttempt((attempt) => attempt + 1)
+            }}>重试</button>
+          </>
+        ) : <EmptyState icon="info" title="正在读取设置…" desc="设置由主进程持久化，首帧稍候。" />}
       </div>
     )
   }
@@ -527,7 +546,6 @@ export function SettingsView({
             on={showVirtualPrinters}
             onToggle={() => {
               const next = !showVirtualPrinters
-              onShowVirtualChange(next)
               void update({ showVirtualPrinters: next }, next ? '打印机页将显示虚拟打印机' : '已隐藏虚拟打印机')
             }}
             label="显示本机虚拟打印机"
@@ -552,7 +570,7 @@ export function SettingsView({
             on={settings.printerAlerts}
             onToggle={() => void update({ printerAlerts: !settings.printerAlerts }, settings.printerAlerts ? '已关闭打印机异常提醒' : '已开启打印机异常提醒')}
             label="打印机异常提醒"
-            hint="离线、故障、耗材不足时弹系统通知，恢复时同样提醒；被忽略的打印机与演示数据不提醒"
+            hint="离线持续 30 秒且新采样确认后提醒；持续异常每 30 分钟提醒，已提醒异常恢复时通知；忽略项与演示数据不提醒"
             disabled={busy}
           />
         </div>

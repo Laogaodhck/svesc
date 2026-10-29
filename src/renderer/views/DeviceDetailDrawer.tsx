@@ -182,7 +182,7 @@ export function DeviceDetailDrawer({
   // 详情轮询（task-025：修复链路断点——旧实现只在打开时取一次，端口/连接/RTT 历史会冻结）。
   // 打开期间每 5s 重取一次；轮询失败保留旧数据不打断展示，仅首次加载失败才置错误。
   useEffect(() => {
-    if (!activeId || !deviceId) return
+    if (!activeId || activeId !== deviceId) return
     const api = readApi()
     if (!api) {
       setLoading(false)
@@ -191,18 +191,23 @@ export function DeviceDetailDrawer({
     }
     let alive = true
     let hasData = false
+    let requestId = 0
+    let settledId = 0
     const fetchDetail = (): void => {
+      const currentId = ++requestId
       api
         .getDeviceDetail(activeId)
         .then((d) => {
-          if (!alive) return
+          if (!alive || currentId < settledId) return
+          settledId = currentId
           setDetail(d)
           hasData = true
           setError(null)
           setLoading(false)
         })
         .catch((err: unknown) => {
-          if (!alive) return
+          if (!alive || currentId < settledId) return
+          settledId = currentId
           if (!hasData) {
             setError(err instanceof Error ? err.message : String(err))
             setLoading(false)

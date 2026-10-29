@@ -136,9 +136,10 @@ vi.mock('../src/main/engine/discovery/subnet', async (importOriginal) => {
 });
 vi.mock('../src/main/engine/db/sqlite', () => ({
   SqliteStore: class {
-    settings = { autoScanIntervalSec: 60, snmpEnabled: false, useMdns: false };
+    settings = { autoScanIntervalSec: 60, snmpEnabled: false, useMdns: false, printerAlerts: false };
     get() { return { firstSeen: {}, aliases: {} }; }
     watchTargets() { return []; }
+    printerManage() { return { manual: [], ignored: [] }; }
   },
 }));
 

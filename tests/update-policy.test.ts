@@ -64,6 +64,15 @@ describe('normalizeUpdateError', () => {
     expect(normalizeUpdateError(new Error('sha512 checksum mismatch'))).toContain('校验失败');
   });
 
+  it('URL 包含 latest.yml 时仍按根因区分网络失败与缺少配置', () => {
+    expect(normalizeUpdateError(new Error('net::ERR_CONNECTION_RESET https://example.test/latest.yml'))).toContain('网络连接失败');
+    expect(normalizeUpdateError(new Error('app-update.yml not found'))).toContain('安装包缺少更新配置');
+  });
+
+  it('安装权限错误不误报下载缓存权限', () => {
+    expect(normalizeUpdateError(new Error('spawn EPERM'), 'install')).toContain('启动安装器');
+  });
+
   it('磁盘/权限/网络分别给出可执行提示', () => {
     expect(normalizeUpdateError(new Error('ENOSPC: no space left'))).toContain('磁盘空间不足');
     expect(normalizeUpdateError(new Error('EACCES: permission denied'))).toContain('权限');

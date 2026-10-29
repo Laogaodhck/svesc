@@ -2,10 +2,7 @@
 import { Notification } from 'electron';
 import type { PrinterAlert } from './engine/printers/alerts';
 
-/**
- * 弹一条打印机通知；返回是否真的展示（平台不支持时返回 false，调用方不假装成功）。
- * Windows 上通知归属由 app.setAppUserModelId 决定（见 index.ts）。
- */
+/** 返回是否已提交系统通知；平台不支持返回 false，操作系统最终展示与否不作保证。 */
 export function showPrinterAlert(alert: PrinterAlert, onClick: () => void): boolean {
   if (!Notification.isSupported()) return false;
   const notification = new Notification({
@@ -13,7 +10,7 @@ export function showPrinterAlert(alert: PrinterAlert, onClick: () => void): bool
       alert.kind === 'fault'
         ? `打印机异常：${alert.printerName}`
         : `打印机已恢复：${alert.printerName}`,
-    body: alert.reason,
+    body: `${alert.reason}\n本次运行首次发现异常：${new Date(alert.firstObservedAt).toLocaleString('zh-CN', { hour12: false })}（非真实故障起点）`,
     silent: alert.kind === 'recovered',
   });
   notification.on('click', onClick);

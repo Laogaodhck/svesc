@@ -24,6 +24,8 @@ import { Scheduler } from './scheduler';
 import { isValidIpv4, type PersistStore, type PersistedSettings } from './store';
 import { SqliteStore } from './db/sqlite';
 import { printJobAction, printTestPage, setDefaultPrinter } from './printers/print-ops';
+import { PrinterAlertTracker, type PrinterAlert } from './printers/alerts';
+import { hasFault } from './printers/printer-service';
 import { sendMagicPacket } from './wol';
 import { buildHtmlReport } from './report-html';
 
@@ -38,6 +40,8 @@ export interface EngineOptions {
   useMdns?: boolean;
   autoScanIntervalSec?: number;
   onSnapshot?: (snapshot: Snapshot) => void;
+  /** 返回 true 表示已提交系统通知；无出口或返回 false 不记作已通知。 */
+  onPrinterAlert?: (alert: PrinterAlert) => boolean;
   onScanProgress?: (progress: ScanProgress) => void;
 }
 
@@ -111,6 +115,34 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
   // 设备实时状态同步的节流账本（task-018）：状态变化立即写库；无变化 15s 全量对账
   let lastDeviceSyncAt = 0;
   const lastKnownStates = new Map<string, string>();
+  const printerAlerts = new PrinterAlertTracker();
+  const prepareSnapshot = (snapshot: Snapshot): Snapshot => {
+    const withMeta = applyDeviceMeta(snapshot, store);
+    if (withMeta.printers.length === 0) return withMeta;
+    const manage = store.printerManage();
+    // 配置修改立即屏蔽旧缓存条目，不等待异步采集完成才清理提醒账本。
+    const printers = withMeta.printers.filter((printer) => printer.manual
+      ? manage.manual.some((entry) => entry.ip === printer.ip)
+      : !manage.ignored.includes(printer.id));
+    return {
+      ...withMeta,
+      printers,
+      system: { ...withMeta.system, printers: printers.length, printersWithFault: printers.filter(hasFault).length },
+    };
+  };
+  const projectPrinterAlerts = (snapshot: Snapshot): Snapshot => ({
+    ...snapshot,
+    printers: printerAlerts.project(snapshot.printers),
+  });
+  const notifyPrinter = (alert: PrinterAlert): boolean => {
+    if (!store.settings.printerAlerts || !options.onPrinterAlert) return false;
+    try {
+      return options.onPrinterAlert(alert);
+    } catch (err) {
+      netlog.push('error', 'printers', `打印机通知发送失败：${err instanceof Error ? err.message : String(err)}`);
+      return false;
+    }
+  };
 
   const scheduler = new Scheduler(
     {
@@ -148,8 +180,9 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
             }
           }
         }
-        const withMeta = applyDeviceMeta(snapshot, store);
-        options.onSnapshot?.(withMeta);
+        const prepared = prepareSnapshot(snapshot);
+        printerAlerts.evaluate(prepared.printers, Date.now(), notifyPrinter);
+        options.onSnapshot?.(projectPrinterAlerts(prepared));
       },
       onScanProgress: options.onScanProgress,
       getPrinterManage: () => store.printerManage(),
@@ -382,11 +415,15 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
     },
     removeManualPrinter(ip: string) {
       const res = store.removeManualPrinter(ip);
-      if (res.ok) void scheduler.refreshPrinters(true);
+      if (res.ok) {
+        scheduler.emitSnapshotNow();
+        void scheduler.refreshPrinters(true);
+      }
       return res;
     },
     setPrinterIgnored(printerId: string, ignored: boolean) {
       store.setPrinterIgnored(printerId, ignored);
+      scheduler.emitSnapshotNow();
       void scheduler.refreshPrinters(true);
       return { ok: true };
     },
@@ -526,7 +563,7 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
     },
     getSnapshot(): Snapshot {
       const cached = scheduler.snapshotCached;
-      return cached ? applyDeviceMeta(cached, store) : applyDeviceMeta(scheduler.buildSnapshot(), store);
+      return projectPrinterAlerts(prepareSnapshot(cached ?? scheduler.buildSnapshot()));
     },
     refresh(): Promise<{ started: boolean }> {
       return scheduler.refresh();

@@ -30,7 +30,7 @@ describe('JsonStore.settings 扩展字段', () => {
   it('round-trip：新字段写入后重开必须读回', () => {
     const dir = mkdtempSync(path.join(tmpdir(), 'svesc-settings-'));
     const store = new JsonStore(dir);
-    store.setSettings({ showVirtualPrinters: true, snmpEnabled: false, useMdns: true });
+    store.setSettings({ showVirtualPrinters: true, snmpEnabled: false, useMdns: true, autoUpdate: false, printerAlerts: false });
     store.flush();
 
     const reopened = new JsonStore(dir);
@@ -38,6 +38,8 @@ describe('JsonStore.settings 扩展字段', () => {
       showVirtualPrinters: true,
       snmpEnabled: false,
       useMdns: true,
+      autoUpdate: false,
+      printerAlerts: false,
     });
   });
 

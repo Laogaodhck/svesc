@@ -51,24 +51,32 @@ function truncate(text: string, max = 180): string {
  * 把 electron-updater 的底层错误翻译成可执行的提示。
  * 未识别的错误保留原始信息（截断），不吞掉排查线索。
  */
-export function normalizeUpdateError(err: unknown): string {
+export function normalizeUpdateError(err: unknown, stage: 'download' | 'install' = 'download'): string {
   const raw = rawMessage(err).trim();
-  if (/latest\.ya?ml|404|not found/i.test(raw)) {
-    return '未找到更新元数据（latest.yml）；请确认 Release 已上传该文件';
-  }
-  if (/app-update\.ya?ml/i.test(raw)) {
-    return '安装包缺少更新配置（app-update.yml），无法自动更新；请手动下载安装版';
-  }
   if (/sha512|checksum|integrity|signature/i.test(raw)) {
     return '更新包校验失败，已取消安装；请重试或手动下载并核对 SHA256';
   }
+  if (stage === 'install') {
+    if (/EACCES|EPERM|permission/i.test(raw)) return '无法启动安装器；请检查权限或安全软件拦截后重试';
+    return `启动安装失败：${truncate(raw || '没有返回错误信息')}`;
+  }
   if (/ENOSPC|no space/i.test(raw)) return '磁盘空间不足，无法下载更新';
   if (/EACCES|EPERM|permission/i.test(raw)) return '没有写入更新缓存的权限；请检查用户目录权限';
-  if (/net::|ECONN|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|socket hang up|network|getaddrinfo/i.test(raw)) {
-    return '网络连接失败，无法检查更新；请稍后重试';
+  if (isTransientUpdateError(err)) return '网络连接失败，无法检查或下载更新；请稍后重试';
+  if (/app-update\.ya?ml/i.test(raw)) {
+    return '安装包缺少更新配置（app-update.yml），无法自动更新；请手动下载安装版';
+  }
+  if (/latest\.ya?ml|404|not found/i.test(raw)) {
+    return '未找到更新元数据（latest.yml）；请确认 Release 已上传该文件';
   }
   if (raw === '') return '更新失败（没有返回错误信息）';
   return `更新失败：${truncate(raw)}`;
+}
+
+export function isTransientUpdateError(err: unknown): boolean {
+  const raw = rawMessage(err);
+  if (/sha512|checksum|integrity|signature|ENOSPC|EACCES|EPERM|CERT_|SSL_/i.test(raw)) return false;
+  return /ERR_(?:INTERNET_DISCONNECTED|CONNECTION_(?:RESET|CLOSED|REFUSED|ABORTED|TIMED_OUT)|NAME_NOT_RESOLVED|NETWORK_CHANGED|TIMED_OUT)|ECONN|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|socket hang up|getaddrinfo/i.test(raw);
 }
 
 export function clampPercent(value: number): number {

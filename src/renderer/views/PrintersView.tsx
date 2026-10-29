@@ -12,6 +12,7 @@ import {
   CONNECTION_LABEL,
   PRINTER_SOURCE_LABEL,
   PRINTER_STATE_LABEL,
+  fmtDateTime,
   fmtInt,
   relTime,
 } from '../lib/format'
@@ -23,6 +24,7 @@ export interface PrintersViewProps {
   now: number
   /** 是否显示本机虚拟打印机（状态提升到 App，切视图/刷新都不丢） */
   showVirtual: boolean
+  virtualSaving?: boolean
   onToggleVirtual: () => void
   onRefresh: () => void
   /** 告警跳转定位：滚动到该打印机卡并高亮（消费后回调 onFocusConsumed） */
@@ -222,6 +224,12 @@ function PrinterCard({ printer, now, focus }: { printer: Printer; now: number; f
       </div>
 
       <div className="printer-card__body">
+        {printer.firstObservedAt != null && Number.isFinite(printer.firstObservedAt)
+          && printer.source !== 'simulated' && !printer.id.startsWith('sim-') && printer.connection !== 'virtual' && (
+          <div className="u-105 muted" title="仅记录本次运行的首次观察时间，非设备真实故障起点；恢复后清除，未知状态保留。">
+            本次运行首次发现异常：<time dateTime={new Date(printer.firstObservedAt).toISOString()}>{fmtDateTime(printer.firstObservedAt)}</time>
+          </div>
+        )}
         {printer.connection !== 'virtual' && <Supplies printer={printer} />}
 
         <div className="u-stack u-stack-5">
@@ -328,6 +336,7 @@ export function PrintersView({
   refreshError,
   now,
   showVirtual,
+  virtualSaving = false,
   onToggleVirtual,
   onRefresh,
   focusId,
@@ -367,7 +376,7 @@ export function PrintersView({
         <div>
           <div className="view-title">打印机</div>
           <div className="view-desc">
-            汇总协议识别、网络探活与本机队列；未获取耗材时如实标注，不以 0% 冒充。
+            未获取耗材时如实标注。开启提醒后，离线持续 30 秒并由新采集样本确认才通知；持续异常每 30 分钟复提醒，问题变化冷却 10 分钟。
           </div>
         </div>
         <div className="toolbar__meta">
@@ -389,6 +398,8 @@ export function PrintersView({
           className="switch-field"
           aria-pressed={showVirtual}
           onClick={onToggleVirtual}
+          disabled={virtualSaving}
+          aria-busy={virtualSaving}
           title="本机虚拟打印机（Microsoft Print to PDF / XPS / Fax 等）不参与网络监控"
         >
           <span className="switch" data-on={showVirtual} aria-hidden="true">
@@ -428,7 +439,7 @@ export function PrintersView({
                 </>
               }
               actions={
-                <button type="button" className="btn" onClick={onToggleVirtual}>
+                <button type="button" className="btn" onClick={onToggleVirtual} disabled={virtualSaving} aria-busy={virtualSaving}>
                   显示虚拟打印机
                 </button>
               }

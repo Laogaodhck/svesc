@@ -57,6 +57,7 @@ function phaseInfo(s: RouterStatus): { text: string; tone: Tone } {
 
 export function RouterView() {
   const [status, setStatus] = useState<RouterStatus | null>(null)
+  const statusRevision = useRef(0)
   const [user, setUser] = useState('')
   const [password, setPassword] = useState('')
   const [loginBusy, setLoginBusy] = useState(false)
@@ -92,23 +93,25 @@ export function RouterView() {
   useEffect(() => {
     if (!hasApi) return
     let alive = true
-    void window.lanApi.routerGetStatus().then((s) => {
+    const revision = statusRevision.current
+    const off = window.lanApi.onRouterStatus((s) => {
       if (alive) {
+        statusRevision.current += 1
+        setStatus(s)
+        setProbeErr(null)
+      }
+    })
+    void window.lanApi.routerGetStatus().then((s) => {
+      if (alive && statusRevision.current === revision) {
         setStatus(s)
         setProbeErr(null)
       }
     }).catch((err: unknown) => {
-      // 审计 M-3：此前 .then 无 catch，IPC 抛错时 status 永远 null，页面永久卡在"正在探测网关…"
-      if (alive) setProbeErr(err instanceof Error ? err.message : String(err))
-    })
-    const off = window.lanApi.onRouterStatus((s) => {
-      if (alive) {
-        setStatus(s)
-        setProbeErr(null)
-      }
+      if (alive && statusRevision.current === revision) setProbeErr(err instanceof Error ? err.message : String(err))
     })
     return () => {
       alive = false
+      statusRevision.current += 1
       off()
     }
   }, [hasApi])
@@ -116,13 +119,15 @@ export function RouterView() {
   const onRefresh = useCallback(async () => {
     if (!hasApi) return
     setRefreshing(true)
+    const revision = ++statusRevision.current
     try {
       const s = await window.lanApi.routerRefresh()
-      setStatus(s)
-      setProbeErr(null)
+      if (statusRevision.current === revision) {
+        setStatus(s)
+        setProbeErr(null)
+      }
     } catch (err) {
-      // 审计 M-3：刷新失败必须可见，不能静默
-      setProbeErr(err instanceof Error ? err.message : String(err))
+      if (statusRevision.current === revision) setProbeErr(err instanceof Error ? err.message : String(err))
     } finally {
       setRefreshing(false)
     }
@@ -206,8 +211,10 @@ export function RouterView() {
     setLogoutBusy(true)
     setLoginMsg(null)
     try {
-      await window.lanApi.routerLogout()
-      setLoginMsg({ tone: 'ok', text: '已退出登录' })
+      const res = await window.lanApi.routerLogout()
+      setLoginMsg(res.ok
+        ? { tone: 'ok', text: '已退出登录' }
+        : { tone: 'crit', text: '退出登录失败' })
     } catch (err) {
       setLoginMsg({ tone: 'crit', text: err instanceof Error ? err.message : String(err) })
     } finally {
@@ -270,6 +277,8 @@ export function RouterView() {
           </button>
         </div>
       </div>
+
+      {probeErr && <div className="router-msg" data-tone="crit" role="alert">{probeErr}</div>}
 
       {status.phase === 'unreachable' ? (
         <div className="card">
