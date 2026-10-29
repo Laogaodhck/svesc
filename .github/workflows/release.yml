@@ -54,6 +54,11 @@ jobs:
       - name: 安装依赖
         run: npm ci
 
+      # Electron 45 起二进制改为按需下载，npm ci 不再生成 node_modules/electron/dist；
+      # electron-builder.yml 固定使用该目录，因此打包前必须显式准备运行时。
+      - name: 准备 Electron 运行时
+        run: node node_modules/electron/install.js
+
       - name: 标签与版本一致性校验
         shell: pwsh
         env:
