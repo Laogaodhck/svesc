@@ -61,6 +61,8 @@ describe('JsonStore.settings 扩展字段', () => {
       snmpEnabled: true,
       useMdns: false,
       closeToTray: true,
+      printerAlerts: true,
+      autoUpdate: true,
       rememberRouterPassword: true,
     });
   });
@@ -73,6 +75,8 @@ describe('JsonStore.settings 扩展字段', () => {
       snmpEnabled: true,
       useMdns: false,
       closeToTray: true,
+      printerAlerts: true,
+      autoUpdate: true,
       rememberRouterPassword: true,
     });
   });

@@ -172,6 +172,7 @@ export class Simulator {
     return {
       id: `${SIM_ID_PREFIX}prn-${ip}`,
       name: seed.name,
+      queueName: null,
       alias: null,
       model: seed.model,
       ip,

@@ -27,7 +27,8 @@ export function isQuitRequested(): boolean {
   return quitting
 }
 
-function showWindow(): void {
+/** 从托盘或系统通知唤起主窗口（最小化时先还原）。 */
+export function showWindow(): void {
   const win = getWindowRef?.() ?? null
   if (!win || win.isDestroyed()) return
   if (win.isMinimized()) win.restore()

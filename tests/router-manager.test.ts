@@ -36,6 +36,10 @@ const h = vi.hoisted(() => ({
   },
   /** task-024：Basic 凭据验证 GET（带 Authorization 头的非 JSON-RPC 请求）的应答；null = 模拟不可达 */
   basicVerifyResponse: null as null | { status: number | null; body: string; error: string | null },
+  webPage: null as string | null,
+  rpcGate: null as Promise<void> | null,
+  upnpGate: null as Promise<void> | null,
+  detectGate: null as Promise<void> | null,
 }));
 
 vi.mock('../src/main/engine/router/httpx', () => ({
@@ -52,8 +56,10 @@ vi.mock('../src/main/engine/router/httpx', () => ({
     // 其余（UPnP description.xml 直查兜底）→ 模拟不可达
     if (!parsed || parsed.method !== 'call') {
       if (h.basicVerifyResponse && opts?.headers?.Authorization) return h.basicVerifyResponse;
+      if (h.webPage !== null && opts?.headers?.Cookie) return { status: 200, body: h.webPage, error: null };
       return { status: null, body: '', error: 'mock: 非 ubus 请求' };
     }
+    if (h.rpcGate) await h.rpcGate;
     const seq = h.requests.filter((r) => r.body.includes('"method":"call"')).length;
     const res = h.script!(parsed, seq);
     if (res === null) throw new Error('脚本未覆盖该请求: ' + body);
@@ -67,8 +73,10 @@ vi.mock('../src/main/engine/router/detect', async (importOriginal) => {
     ...actual,
     // 管理页探测默认不可达：identity.brand 保持 null，避免走 openwrt 提示分支干扰；
     // task-024：h.detectResult 非空时按配置返回（Basic-Auth 登录测试）
-    detectManagementPage: async () =>
-      h.detectResult ?? { reachable: false, error: 'mock: 探测关闭' },
+    detectManagementPage: async () => {
+      if (h.detectGate) await h.detectGate;
+      return h.detectResult ?? { reachable: false, error: 'mock: 探测关闭' };
+    },
   };
 });
 
@@ -77,12 +85,13 @@ vi.mock('../src/main/engine/router/upnp', async (importOriginal) => {
   return {
     ...actual,
     // SSDP 与 UPnP 查询恒无结果：probeUpnp 走 descPaths 直查（被 httpx mock 挡下）
-    ssdpDiscover: async () => null,
+    ssdpDiscover: async () => { if (h.upnpGate) await h.upnpGate; return null; },
     upnpQuery: async () => null,
   };
 });
 
 import { RouterManager } from '../src/main/engine/router/index';
+import * as webLeases from '../src/main/engine/router/web-leases';
 
 // —— JSON-RPC 应答构造器（严格复刻 uhttpd 形状）——
 const rpcOk = (id: unknown, result: unknown) => ({
@@ -161,6 +170,10 @@ beforeEach(() => {
   h.script = null;
   h.detectResult = null;
   h.basicVerifyResponse = null;
+  h.webPage = null;
+  h.rpcGate = null;
+  h.upnpGate = null;
+  h.detectGate = null;
 });
 
 describe('RouterManager 会话失效投影（-32002 在编排层）', () => {
@@ -478,5 +491,352 @@ describe('Basic-Auth 通用登录（task-024）', () => {
     const s1 = await mgr.refresh();
     expect({ loggedIn: s1.session.loggedIn, kind: s1.session.kind, user: s1.session.user })
       .toEqual({ loggedIn: false, kind: null, user: null });
+  });
+});
+
+
+describe('双通道实时租约与并发边界', () => {
+  const webPage = (name: string, ip = '192.168.2.10', mac = 'aa-bb-cc-dd-ee-01') =>
+    `<tr><td>${name}</td><td>${mac}</td><td>${ip}</td></tr>`;
+
+  function webManager(): RouterManager {
+    const mgr = newManager();
+    mgr.markWebSession(true);
+    mgr.setWebLeaseProvider(async () => 'session=test');
+    return mgr;
+  }
+
+  it('ubus 名称优先；同 MAC/IP 缺名由 web 补充，不同 IP 不串名', async () => {
+    scriptAllOk();
+    const base = h.script!;
+    const mgr = webManager();
+    h.webPage = webPage('web-name');
+    await mgr.login('root', 'secret');
+    expect(mgr.getStatus().dhcpLeases[0]?.hostname).toBe('pc-1');
+    h.script = (parsed, seq) => (parsed.params as unknown[])[2] === 'getDHCPLeases'
+      ? rpcOk(parsed.id, [0, { dhcp_leases: [{ ipaddr: '192.168.2.10', macaddr: 'AA:BB:CC:DD:EE:01', hostname: '*', expires: -1 }] }])
+      : base(parsed, seq);
+    await mgr.refresh();
+    expect(mgr.getStatus().dhcpLeases[0]?.hostname).toBe('web-name');
+    h.webPage = webPage('old-device', '192.168.2.99');
+    await mgr.refresh();
+    expect(mgr.getStatus().dhcpLeases).toHaveLength(1);
+    expect(mgr.getStatus().dhcpLeases[0]?.hostname).toBeNull();
+  });
+
+  it('ubus ACL 失败或会话过期时，web 租约独立可用；过期状态仍可见', async () => {
+    scriptAllOk();
+    const base = h.script!;
+    h.script = (parsed, seq) => (parsed.params as unknown[])[2] === 'getDHCPLeases'
+      ? rpcOk(parsed.id, [6, {}]) : base(parsed, seq);
+    const mgr = webManager();
+    h.webPage = webPage('phone');
+    await mgr.login('root', 'secret');
+    expect(mgr.getStatus().session.kind).toBe('ubus');
+    expect(mgr.getStatus().dhcpLeases[0]?.hostname).toBe('phone');
+    h.script = (parsed) => rpcErr(parsed.id, -32002);
+    await mgr.refresh();
+    expect(mgr.getStatus().session.kind).toBe('web');
+    expect(mgr.getStatus().session.invalidatedAt).not.toBeNull();
+    expect(mgr.getStatus().dhcpLeases[0]?.hostname).toBe('phone');
+    expect(mgr.getStatus().wirelessClients).toEqual([]);
+  });
+
+  it('识别为 OpenWrt 但仅管理页登录时，仍尝试 web 通道', async () => {
+    h.detectResult = { reachable: true, brand: 'openwrt', hint: null, error: null, url: `http://${GW}/`, auth: null };
+    h.webPage = webPage('openwrt-web');
+    const mgr = webManager();
+    await mgr.refresh();
+    expect(mgr.getStatus().dhcpLeases[0]?.hostname).toBe('openwrt-web');
+    expect(ubusCallCount()).toBe(0);
+  });
+
+  it('web 失败清除上轮名称，退避后成功自动恢复', async () => {
+    vi.useFakeTimers();
+    try {
+      const mgr = webManager();
+      h.webPage = webPage('phone');
+      await mgr.refresh();
+      expect(mgr.getStatus().dhcpLeases).toHaveLength(1);
+      h.webPage = null;
+      await mgr.refresh();
+      expect(mgr.getStatus().dhcpLeases).toEqual([]);
+      h.webPage = webPage('renewed');
+      await mgr.refresh();
+      expect(mgr.getStatus().dhcpLeases).toEqual([]);
+      await vi.advanceTimersByTimeAsync(10_000);
+      await mgr.refresh();
+      expect(mgr.getStatus().dhcpLeases[0]?.hostname).toBe('renewed');
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('并发 refresh 共享同一个 Promise 和本轮结果，不立即返回旧帧', async () => {
+    const gate = Promise.withResolvers<void>();
+    h.detectGate = gate.promise;
+    const mgr = newManager();
+    const first = mgr.refresh();
+    const second = mgr.refresh();
+    expect(first).toBe(second);
+    const done = vi.fn();
+    void second.then(done);
+    await Promise.resolve();
+    expect(done).not.toHaveBeenCalled();
+    gate.resolve();
+    expect(await first).toBe(await second);
+    expect(done).toHaveBeenCalledTimes(1);
+  });
+
+  it('租约推送不等待 WAN 探测；手动刷新与 logout 即时通知', async () => {
+    scriptAllOk();
+    const mgr = newManager();
+    await mgr.login('root', 'secret');
+    const gate = Promise.withResolvers<void>();
+    const pushed = Promise.withResolvers<void>();
+    h.upnpGate = gate.promise;
+    const updates = vi.fn((status) => { if (status.dhcpLeases.length > 0) pushed.resolve(); });
+    mgr.startPolling(updates);
+    try {
+      const pending = mgr.refresh();
+      const done = vi.fn();
+      void pending.then(done);
+      await pushed.promise;
+      expect(done).not.toHaveBeenCalled();
+      mgr.logout();
+      expect(updates.mock.lastCall?.[0].dhcpLeases).toEqual([]);
+      gate.resolve();
+      await pending;
+      expect(updates.mock.lastCall?.[0].session.loggedIn).toBe(false);
+    } finally { gate.resolve(); mgr.stopPolling(); }
+  });
+
+  it('在飞登录或登录后刷新期间 logout，返回取消且不恢复会话', async () => {
+    scriptAllOk();
+    const mgr = newManager();
+    const gate = Promise.withResolvers<void>();
+    h.rpcGate = gate.promise;
+    const pending = mgr.login('root', 'secret');
+    mgr.logout();
+    gate.resolve();
+    expect((await pending).ok).toBe(false);
+    expect(mgr.getStatus().session.loggedIn).toBe(false);
+    h.rpcGate = null;
+    const wan = Promise.withResolvers<void>();
+    h.upnpGate = wan.promise;
+    const authenticated = Promise.withResolvers<void>();
+    mgr.startPolling((status) => { if (status.session.loggedIn) authenticated.resolve(); });
+    try {
+      const next = mgr.login('root', 'secret');
+      await authenticated.promise;
+      mgr.logout();
+      wan.resolve();
+      expect((await next).ok).toBe(false);
+    } finally { wan.resolve(); mgr.stopPolling(); }
+  });
+
+  it('网关改变清除旧客户端、租约和能力，不向新网关复用凭据', async () => {
+    scriptAllOk();
+    let gateway: string | null = GW;
+    const mgr = new RouterManager({ getGateway: () => gateway });
+    await mgr.login('root', 'secret');
+    const before = ubusCallCount();
+    gateway = '192.168.3.1';
+    await mgr.refresh();
+    expect(ubusCallCount()).toBe(before);
+    expect(mgr.getStatus().identity?.ip).toBe(gateway);
+    expect(mgr.getStatus().dhcpLeases).toEqual([]);
+    expect(mgr.getStatus().session.loggedIn).toBe(false);
+    expect(mgr.getStatus().capabilities.openwrt).toBe(false);
+    gateway = null;
+    await mgr.refresh();
+    expect(mgr.getStatus().phase).toBe('unreachable');
+  });
+
+  it('登录发生于旧刷新期间时，合并等待后补新会话刷新', async () => {
+    scriptAllOk();
+    const mgr = newManager();
+    const gate = Promise.withResolvers<void>();
+    h.detectGate = gate.promise;
+    const oldRefresh = mgr.refresh();
+    const login = mgr.login('root', 'secret');
+    await Promise.resolve();
+    gate.resolve();
+    await oldRefresh;
+    expect((await login).ok).toBe(true);
+    expect(mgr.getStatus().dhcpLeases[0]?.hostname).toBe('pc-1');
+  });
+
+  it('管理页会话变化不取消在飞 ubus 登录', async () => {
+    scriptAllOk();
+    const mgr = newManager();
+    const gate = Promise.withResolvers<void>();
+    h.rpcGate = gate.promise;
+    const pending = mgr.login('root', 'secret');
+    mgr.markWebSession(true);
+    gate.resolve();
+    expect((await pending).ok).toBe(true);
+    expect(mgr.getStatus().session.kind).toBe('ubus');
+    expect(mgr.getStatus().dhcpLeases[0]?.hostname).toBe('pc-1');
+  });
+
+  it('管理页退出不丢弃在飞 ubus 会话失效证据', async () => {
+    scriptAllOk();
+    const mgr = webManager();
+    await mgr.login('root', 'secret');
+    const gate = Promise.withResolvers<void>();
+    h.rpcGate = gate.promise;
+    scriptSessionDead();
+    const pending = mgr.refresh();
+    mgr.markWebSession(false);
+    gate.resolve();
+    await pending;
+    expect(mgr.getStatus().session.invalidatedAt).not.toBeNull();
+    expect(mgr.getStatus().session.loggedIn).toBe(false);
+    expect(mgr.getStatus().dhcpLeases).toEqual([]);
+  });
+
+  it('新登录刷新不等待旧轮 WAN，旧轮完成不清除新轮 Promise', async () => {
+    scriptAllOk();
+    const mgr = newManager();
+    const oldWan = Promise.withResolvers<void>();
+    const newWan = Promise.withResolvers<void>();
+    const pushed = Promise.withResolvers<void>();
+    h.upnpGate = oldWan.promise;
+    const oldRefresh = mgr.refresh();
+    h.upnpGate = newWan.promise;
+    mgr.startPolling((status) => { if (status.dhcpLeases.length > 0) pushed.resolve(); });
+    try {
+      const login = mgr.login('root', 'secret');
+      await pushed.promise;
+      expect(mgr.getStatus().dhcpLeases[0]?.hostname).toBe('pc-1');
+      const currentRefresh = mgr.refresh();
+      oldWan.resolve();
+      await oldRefresh;
+      expect(mgr.refresh()).toBe(currentRefresh);
+      newWan.resolve();
+      expect((await login).ok).toBe(true);
+      await currentRefresh;
+    } finally { oldWan.resolve(); newWan.resolve(); mgr.stopPolling(); }
+  });
+
+  it('退出后迟到 Cookie 不启动管理页请求', async () => {
+    const mgr = newManager();
+    const entered = Promise.withResolvers<void>();
+    const gate = Promise.withResolvers<string | null>();
+    mgr.setWebLeaseProvider(() => { entered.resolve(); return gate.promise; });
+    mgr.markWebSession(true);
+    const pending = mgr.refresh();
+    await entered.promise;
+    mgr.logout();
+    gate.resolve('session=late');
+    await pending;
+    expect(h.requests.filter((request) => request.headers?.Cookie)).toEqual([]);
+    expect(mgr.getStatus().dhcpLeases).toEqual([]);
+  });
+
+  it('web 已完成但 ubus 仍等待时换会话，旧 web 租约不得重新写回', async () => {
+    scriptAllOk();
+    const mgr = webManager();
+    await mgr.login('root', 'secret');
+    const rpcGate = Promise.withResolvers<void>();
+    h.rpcGate = rpcGate.promise;
+    const response = Promise.withResolvers<webLeases.WebLeaseResult>();
+    const fetch = vi.spyOn(webLeases, 'fetchWebLeases').mockReturnValueOnce(response.promise);
+    try {
+      mgr.markWebSession(false);
+      mgr.markWebSession(true);
+      const pending = mgr.refresh();
+      response.resolve({ ok: true, leases: [{ ip: '192.168.2.20', mac: 'aa-bb-cc-dd-ee-02', hostname: 'old-web', expiresAt: null }], note: 'old-web-note' });
+      await response.promise;
+      mgr.markWebSession(false);
+      mgr.markWebSession(true);
+      rpcGate.resolve();
+      await pending;
+      expect(mgr.getStatus().dhcpLeases.map((lease) => lease.hostname)).toEqual(['pc-1']);
+      expect(mgr.getStatus().capabilityNotes).not.toContain('old-web-note');
+    } finally { rpcGate.resolve(); fetch.mockRestore(); }
+  });
+
+  it('管理页退出立即撤销 web 补名，保留 ubus 会话和数据', async () => {
+    scriptAllOk();
+    const mgr = webManager();
+    h.webPage = webPage('web-only', '192.168.2.20', 'aa-bb-cc-dd-ee-02');
+    await mgr.login('root', 'secret');
+    expect(mgr.getStatus().dhcpLeases).toHaveLength(2);
+    mgr.markWebSession(false);
+    expect(mgr.getStatus().session.kind).toBe('ubus');
+    expect(mgr.getStatus().dhcpLeases.map((lease) => lease.hostname)).toEqual(['pc-1']);
+  });
+
+  it('轮询检查 Cookie 到期，主动退出后不再自动检测并复活旧 Cookie', async () => {
+    vi.useFakeTimers();
+    const mgr = webManager();
+    const check = vi.fn(async () => mgr.markWebSession(false));
+    const update = vi.fn();
+    mgr.startPolling(update, check);
+    try {
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(check).toHaveBeenCalledTimes(1);
+      expect(mgr.hasWebSession()).toBe(false);
+      expect(update.mock.lastCall?.[0].session.loggedIn).toBe(false);
+      mgr.logout();
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(check).toHaveBeenCalledTimes(1);
+    } finally { mgr.stopPolling(); vi.useRealTimers(); }
+  });
+
+  it('租约提前推帧时保留尚未完成的 WAN 能力证据', async () => {
+    const mgr = newManager();
+    mgr.getStatus().capabilities.upnp = true;
+    const gate = Promise.withResolvers<void>();
+    const pushed = Promise.withResolvers<void>();
+    h.upnpGate = gate.promise;
+    mgr.startPolling(() => pushed.resolve());
+    try {
+      const pending = mgr.refresh();
+      await pushed.promise;
+      expect(mgr.getStatus().capabilities.upnp).toBe(true);
+      gate.resolve();
+      expect((await pending).capabilities.upnp).toBe(false);
+    } finally { gate.resolve(); mgr.stopPolling(); }
+  });
+
+  it('WAN 慢响应期间租约到期，最终状态不得重新推回过期租约', async () => {
+    vi.useFakeTimers();
+    const mgr = newManager();
+    const gate = Promise.withResolvers<void>();
+    try {
+      scriptAllOk();
+      await mgr.login('root', 'secret');
+      const base = h.script!;
+      h.script = (parsed, seq) => (parsed.params as unknown[])[2] === 'getDHCPLeases'
+        ? rpcOk(parsed.id, [0, { dhcp_leases: [{ ipaddr: '192.168.2.10', macaddr: 'AA:BB:CC:DD:EE:01', hostname: 'short-lease', expires: 1 }] }])
+        : base(parsed, seq);
+      h.upnpGate = gate.promise;
+      const pushed = Promise.withResolvers<void>();
+      mgr.startPolling((status) => { if (status.dhcpLeases[0]?.hostname === 'short-lease') pushed.resolve(); });
+      const pending = mgr.refresh();
+      await pushed.promise;
+      vi.setSystemTime(Date.now() + 1_001);
+      gate.resolve();
+      expect((await pending).dhcpLeases).toEqual([]);
+    } finally { gate.resolve(); mgr.stopPolling(); vi.useRealTimers(); }
+  });
+
+  it('停止轮询后在飞检查完成，不再发送刷新或推送', async () => {
+    vi.useFakeTimers();
+    const mgr = webManager();
+    const gate = Promise.withResolvers<void>();
+    const check = vi.fn(() => gate.promise);
+    const update = vi.fn();
+    mgr.startPolling(update, check);
+    try {
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(check).toHaveBeenCalledTimes(1);
+      mgr.stopPolling();
+      gate.resolve();
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(update).not.toHaveBeenCalled();
+      expect(h.requests).toEqual([]);
+    } finally { gate.resolve(); mgr.stopPolling(); vi.useRealTimers(); }
   });
 });

@@ -193,8 +193,11 @@ export const CONNECTION_LABEL: Record<string, string> = {
 /** 打印机数据源角标文案。 */
 export const PRINTER_SOURCE_LABEL: Record<string, string> = {
   snmp: 'SNMP',
+  ipp: 'IPP',
+  mdns: 'mDNS 发现',
+  probe: '端口探测',
   spooler: '系统队列',
-  both: 'SNMP + 队列',
+  both: '协议 + 队列',
   simulated: '模拟',
 }
 

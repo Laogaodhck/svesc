@@ -60,6 +60,7 @@ export function supply(over: Partial<Consumable> = {}): Consumable {
 export function printer(over: Partial<Printer> & { id: string; name: string }): Printer {
   return {
     alias: null,
+    queueName: null,
     model: null,
     ip: null,
     mac: null,

@@ -5,6 +5,7 @@
  * 推送优先：每轮快照由引擎主动 send，渲染层不轮询。
  */
 import os from 'node:os';
+import { isIP } from 'node:net';
 import { app, ipcMain, type BrowserWindow } from 'electron';
 import { CH } from '../shared/channels';
 import { DIAG } from '../shared/constants';
@@ -15,6 +16,7 @@ import type {
   RouterStatus,
   ScanProgress,
   Snapshot,
+  UpdateStatus,
 } from '../shared/types';
 import type { Engine } from './engine';
 import type { RouterManager } from './engine/router';
@@ -24,6 +26,14 @@ import { remoteOpen } from './remote-ops';
 import { terminalRun } from './terminal';
 import { clearCredentials, saveCredentials } from './router-store';
 import { checkRouterWebSession, clearAdminCookies, openPrinterAdminWindow } from './router-browser';
+
+/** 更新服务的最小接口（实现见 updater.ts；IPC 层不直接依赖 electron-updater）。 */
+export interface UpdateApi {
+  status(): UpdateStatus;
+  check(): void;
+  install(): { ok: boolean; error: string | null };
+  setAutoUpdateEnabled(on: boolean): void;
+}
 
 let target: BrowserWindow | null = null;
 
@@ -50,7 +60,12 @@ export function clearPushTarget(win: BrowserWindow): void {
   if (target === win) target = null;
 }
 
-export function registerIpc(win: BrowserWindow, engine: Engine, router: RouterManager): void {
+/** 更新状态推送（下载进度/就绪/失败），渲染层据此刷新设置页与顶部提示。 */
+export function pushUpdateStatus(status: UpdateStatus): void {
+  send(CH.updateStatus, status);
+}
+
+export function registerIpc(win: BrowserWindow, engine: Engine, router: RouterManager, update: UpdateApi): void {
   target = win;
 
   ipcMain.handle(CH.getSnapshot, (): Snapshot => engine.getSnapshot());
@@ -106,16 +121,18 @@ export function registerIpc(win: BrowserWindow, engine: Engine, router: RouterMa
 
   // —— 配置通道（task-025） ——
   ipcMain.handle(CH.configExport, () => engine.configExport());
-  ipcMain.handle(CH.configImport, (_event, json: string) => engine.configImport(String(json ?? '')));
+  ipcMain.handle(CH.configImport, (_event, json: string) => {
+    const res = engine.configImport(String(json ?? ''));
+    // 导入可能翻转 autoUpdate：让更新控制器的定时器与新设置对齐
+    if (res.ok) update.setAutoUpdateEnabled(engine.getSettings().autoUpdate);
+    return res;
+  });
 
   // —— 路由器管理通道 ——
   ipcMain.handle(CH.routerGetStatus, (): RouterStatus => router.getStatus());
   ipcMain.handle(CH.routerRefresh, async (): Promise<RouterStatus> => router.refresh());
   ipcMain.handle(CH.routerLogin, async (_event, user: string, password: string) => {
     const res = await router.login(String(user), String(password));
-    // 审查 R-7（状态同步）：login() 内部的 refresh 是异步的，轮询推送最长滞后 10s——
-    // 登录/登出后立即推一帧，UI 即时反馈会话变化，不等下一轮轮询
-    pushRouterStatus(router.getStatus());
     if (res.ok) {
       // task-022 B-1：记住密码开关关闭 → 不落盘（也不清除——清理由 settingsUpdate 负责），
       // 渲染层如实提示"凭据未保存"的原因
@@ -123,7 +140,13 @@ export function registerIpc(win: BrowserWindow, engine: Engine, router: RouterMa
         return { ok: true, error: null, persisted: false, persistError: '已关闭「记住密码」，凭据未保存' };
       }
       // 登录成功 → 凭据加密落盘（密钥环不可用时如实带出原因，不静默）
-      const saved = await saveCredentials(String(user), String(password));
+      const revision = router.getSessionRevision();
+      const saved = await saveCredentials(String(user), String(password), () =>
+        router.getSessionRevision() === revision && engine.getSettings().rememberRouterPassword,
+      );
+      if (router.getSessionRevision() !== revision) {
+        return { ok: false, error: '登录已取消（会话或网关已变化）', persisted: false, persistError: null };
+      }
       return { ok: true, error: null, persisted: saved.ok, persistError: saved.error };
     }
     return { ok: false, error: res.error, persisted: false, persistError: null };
@@ -131,10 +154,8 @@ export function registerIpc(win: BrowserWindow, engine: Engine, router: RouterMa
   ipcMain.handle(CH.routerLogout, async (): Promise<{ ok: boolean }> => {
     router.logout();
     clearCredentials();
-    await clearAdminCookies();
-    // 审查 R-7：登出后立即推帧——渲染层马上回到"未登录"，不等下一轮 10s 轮询
-    pushRouterStatus(router.getStatus());
-    return { ok: true };
+    const cleared = await clearAdminCookies();
+    return { ok: cleared };
   });
   // 内置浏览器登录（task-032 重构）：管理页以 <webview> 内嵌在路由器页面（不再弹窗），
   // 挂 persist:router-admin 分区；渲染层在 dom-ready / did-navigate 后调本通道，
@@ -145,6 +166,7 @@ export function registerIpc(win: BrowserWindow, engine: Engine, router: RouterMa
 
   // —— 打印管理通道 ——
   ipcMain.handle(CH.printerGetManageConfig, () => engine.getPrinterManage());
+  ipcMain.handle(CH.printerRefresh, () => engine.printerRefresh());
   ipcMain.handle(CH.printerAddManual, (_e, ip: string, note: string | null) =>
     engine.addManualPrinter(String(ip), note == null ? null : String(note)),
   );
@@ -177,9 +199,11 @@ export function registerIpc(win: BrowserWindow, engine: Engine, router: RouterMa
   );
   ipcMain.handle(CH.printerOpenAdmin, (_e, ip: string) => {
     const ipStr = String(ip ?? '').trim();
-    // 点分十进制格式校验（拒斜杠/冒号等注入字符；八位组范围由浏览器侧自然处理）
-    if (!/^(\d{1,3}\.){3}\d{1,3}$/.test(ipStr)) {
+    if (isIP(ipStr) !== 4) {
       return { ok: false, error: `无效的打印机 IP：${ipStr}`, url: null };
+    }
+    if (!engine.getSnapshot().printers.some((p) => p.ip === ipStr && p.source !== 'simulated')) {
+      return { ok: false, error: '该地址没有正在监控的真实打印机', url: null };
     }
     return openPrinterAdminWindow(ipStr);
   });
@@ -201,6 +225,8 @@ export function registerIpc(win: BrowserWindow, engine: Engine, router: RouterMa
       'snmpEnabled',
       'useMdns',
       'closeToTray',
+      'printerAlerts',
+      'autoUpdate',
       'rememberRouterPassword',
     ] as const;
     const clean: Record<string, unknown> = {};
@@ -209,8 +235,19 @@ export function registerIpc(win: BrowserWindow, engine: Engine, router: RouterMa
     if (clean.rememberRouterPassword === false && engine.getSettings().rememberRouterPassword === true) {
       clearCredentials();
     }
-    return { ...engine.updateSettings(clean), appVersion: app.getVersion() };
+    const next = engine.updateSettings(clean);
+    if ('autoUpdate' in clean) update.setAutoUpdateEnabled(next.autoUpdate);
+    return { ...next, appVersion: app.getVersion() };
   });
+
+  // —— 自动更新（安装版 + GitHub Releases） ——
+  ipcMain.handle(CH.updateGetStatus, (): UpdateStatus => update.status());
+  ipcMain.handle(CH.updateCheck, (): UpdateStatus => {
+    // 立即返回当前状态（checking），后续进度经 pushUpdateStatus 推送
+    update.check();
+    return update.status();
+  });
+  ipcMain.handle(CH.updateInstall, (): { ok: boolean; error: string | null } => update.install());
   // 开机自启（task-021）：isPackaged 门控（dev 下注册的是 electron.exe 本体）+ 写后回读验证——
   // setLoginItemSettings 会静默失败（系统策略/权限受限），必须回读比对，不能写完就报成功。
   ipcMain.handle(CH.launchAtLoginSet, (_e, on: unknown): { ok: boolean; error: string | null } => {

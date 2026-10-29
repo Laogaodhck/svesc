@@ -6,6 +6,7 @@
  */
 import { ROUTER } from '../../../shared/constants';
 import { httpRequest } from './httpx';
+import { normalizeDhcpLeases } from './leases';
 import type { DhcpLease, WirelessBandStatus, WirelessClient } from '../../../shared/types';
 
 export interface RpcResult<T> {
@@ -103,16 +104,20 @@ export function parseDhcpLeases(payload: unknown): DhcpLease[] {
     const ip = typeof l.ipaddr === 'string' ? l.ipaddr : null;
     const mac = typeof l.macaddr === 'string' ? l.macaddr : null;
     if (!ip || !mac) continue; // 缺关键字段的条目直接丢弃，绝不补造
-    // expires <= 0（-1 = 无限租期）→ null；正数秒 → 到期时间
-    const expires = typeof l.expires === 'number' && l.expires > 0 ? now + l.expires * 1000 : null;
+    // 只有 -1 / null / 缺失表示未知或无限；0 已到期，非法期限不能变成无限。
+    let expiresAt: number | null = null;
+    if (l.expires !== undefined && l.expires !== null && l.expires !== -1) {
+      if (typeof l.expires !== 'number' || !Number.isFinite(l.expires) || l.expires < 0) continue;
+      expiresAt = now + l.expires * 1000;
+    }
     out.push({
       ip,
       mac,
-      hostname: typeof l.hostname === 'string' && l.hostname.length > 0 ? l.hostname : null,
-      expiresAt: expires,
+      hostname: typeof l.hostname === 'string' ? l.hostname : null,
+      expiresAt,
     });
   }
-  return out;
+  return normalizeDhcpLeases(out, now);
 }
 
 /** 解析 `luci-rpc getWirelessDevices` 响应（纯函数；形状防御到底）。 */
@@ -297,6 +302,9 @@ export class UbusClient {
       parsed = JSON.parse(res.body);
     } catch {
       return { ok: false, payload: null, error: 'ubus 响应不是合法 JSON' };
+    }
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+      return { ok: false, payload: null, error: 'ubus 响应不是 JSON 对象' };
     }
     const obj = parsed as { result?: unknown; error?: { code?: number; message?: string } | null };
     // 只有"调用路径上的 -32002"代表会话失效：官方语义是无效/过期 sid 一律走此码，

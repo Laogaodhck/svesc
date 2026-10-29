@@ -26,6 +26,7 @@ import {
 } from './openwrt';
 import { ssdpDiscover, upnpQuery, resolveControlUrl, parseDeviceDescription } from './upnp';
 import { fetchWebLeases } from './web-leases';
+import { normalizeDhcpLeases } from './leases';
 import { httpRequest } from './httpx';
 
 export interface RouterManagerOptions {
@@ -48,8 +49,13 @@ export class RouterManager {
   private controlUrl: string | null = null;
   private wanSamples: WanSample[] = [];
   private pollTimer: NodeJS.Timeout | null = null;
-  private refreshing = false;
-  private lastDetectAt = 0;
+  private refreshPromise: Promise<RouterStatus> | null = null;
+  private refreshGeneration = 0;
+  private refreshWebGeneration = 0;
+  private webGeneration = 0;
+  private onUpdate: ((status: RouterStatus) => void) | null = null;
+  private gateway: string | null;
+  private lastDetectAt: number | null = null;
   /**
    * 会话世代号（审计 L4）：logout 时自增。doRefresh 捕获进入时的世代，
    * 写回前比对——不一致即"这轮观测基于已作废的会话"，整体丢弃。
@@ -57,6 +63,7 @@ export class RouterManager {
    * DHCP 租约/无线客户端写回 status，UI 显示"未登录"却挂着旧数据。
    */
   private generation = 0;
+  private loginAttempt = 0;
   /**
    * 内置浏览器建立的"管理页会话"是否存活。由主进程的 Cookie 监视器回调维护
    * （引擎层不 import electron）。与 ubus 会话正交：它只代表"用户在管理页上已登录"，
@@ -65,11 +72,7 @@ export class RouterManager {
   private webSessionActive = false;
   /** 管理页最终可达 URL（含重定向落点）；一旦探测到即粘性保留，供内置浏览器打开。 */
   private adminUrl: string | null = null;
-  /**
-   * 进程生命周期内只置 true、不置 false 的粘性能力位：探测到 OpenWrt 指纹或登录成功即认定。
-   * 能力（协议支持）与会话（登录态）正交——会话过期/登出后 caps.openwrt 不得被打回 false，
-   * 否则 UI 会对一台确实支持 OpenWrt 的路由器显示"该路由器不支持"（数据诚实原则）。
-   */
+  // 同一网关内能力位不随登出回退，切换网关才清空。
   private openwrtCapable = false;
   /**
    * 同族的粘性能力位：HTTP 管理页"曾经可达"即认定。
@@ -94,21 +97,64 @@ export class RouterManager {
   private reloginTimer: NodeJS.Timeout | null = null;
   private reloginFailures = 0;
   private reloginInFlight = false;
-  /**
-   * 管理页租约实验通道（task-030）：Cookie 头提供者由主进程注入（内置浏览器分区的
-   * 会话 Cookie，每次现读）。引擎层不 import electron，Cookie 拿不到返回 null 即跳过。
-   */
-  private webLeaseProvider: (() => Promise<string | null>) | null = null;
-  /** 管理页租约通道失败的退避：连续失败后降频到每 5 轮试一次，避免每 10s 空打 4 个请求。 */
+  // 每个请求 URL 现取 Cookie，不跨域或路径复用凭据。
+  private webLeaseProvider: ((url: string) => Promise<string | null>) | null = null;
   private webLeaseFailures = 0;
+  private webLeaseRetryAt = 0;
+  private ubusLeases: DhcpLease[] = [];
+  private webLeases: DhcpLease[] = [];
 
-  /** 注入管理页 Cookie 头提供者（主进程调用一次；传 null 停用实验通道）。 */
-  setWebLeaseProvider(p: (() => Promise<string | null>) | null): void {
+  setWebLeaseProvider(p: ((url: string) => Promise<string | null>) | null): void {
     this.webLeaseProvider = p;
   }
 
   constructor(private readonly opts: RouterManagerOptions) {
+    this.gateway = opts.getGateway();
     this.status = this.emptyStatus();
+  }
+
+  private publish(patch: Partial<RouterStatus>): void {
+    this.status = { ...this.status, ...patch, ts: Math.max(Date.now(), this.status.ts + 1) };
+    this.onUpdate?.(this.status);
+  }
+
+  private syncGateway(): void {
+    const gateway = this.opts.getGateway();
+    if (gateway === this.gateway) return;
+    this.gateway = gateway;
+    this.adminUrl = null;
+    this.controlUrl = null;
+    this.lastDetectAt = null;
+    this.openwrtCapable = false;
+    this.managementPageCapable = false;
+    this.wanSamples = [];
+    this.status = this.emptyStatus();
+    this.logout();
+  }
+
+  private isCurrent(gen: number, gateway: string | null): boolean {
+    return gen === this.generation && gateway === this.opts.getGateway();
+  }
+
+  private currentSession(): RouterStatus['session'] {
+    const ubusAlive = this.ubus?.loggedIn === true;
+    return {
+      ...this.status.session,
+      loggedIn: ubusAlive || this.webSessionActive || this.basicAuthOk,
+      user: this.ubus !== null ? this.user : this.basicAuthOk ? this.basicUser : null,
+      kind: ubusAlive ? 'ubus' : this.webSessionActive ? 'web' : this.basicAuthOk ? 'basic' : null,
+    };
+  }
+
+  private mergedLeases(): DhcpLease[] {
+    const primary = normalizeDhcpLeases(this.ubus?.loggedIn ? this.ubusLeases : []);
+    const secondary = normalizeDhcpLeases(this.webSessionActive ? this.webLeases : []);
+    const primaryMacs = new Set(primary.map((lease) => lease.mac));
+    const names = new Map(secondary.map((lease) => [`${lease.mac}/${lease.ip}`, lease.hostname]));
+    return normalizeDhcpLeases([
+      ...primary.map((lease) => ({ ...lease, hostname: lease.hostname ?? names.get(`${lease.mac}/${lease.ip}`) ?? null })),
+      ...secondary.filter((lease) => !primaryMacs.has(lease.mac)),
+    ]);
   }
 
   private emptyStatus(): RouterStatus {
@@ -134,60 +180,56 @@ export class RouterManager {
 
   /** 登录 OpenWrt ubus；失败且管理页给出 Basic 质询时降级 Basic-Auth 验证（task-024）。成功后立即刷新一轮状态。 */
   async login(user: string, password: string): Promise<{ ok: boolean; error: string | null }> {
-    const gw = this.opts.getGateway();
+    this.syncGateway();
+    const gw = this.gateway;
     if (!gw) return { ok: false, error: '网关地址未知，无法登录' };
+    const gen = this.generation;
+    const attempt = ++this.loginAttempt;
+    const current = (): boolean => this.isCurrent(gen, gw) && attempt === this.loginAttempt;
+    const cancelled = { ok: false, error: '登录已取消（会话或网关已变化）' };
     const client = new UbusClient(gw);
     const res = await client.login(user, password);
+    if (!current()) { client.logout(); return cancelled; }
     if (!res.ok) {
       // Basic-Auth 降级（task-024）：无 ubus 通道的固件（管理页 401 + WWW-Authenticate: Basic，
       // 华硕/部分华为等）凭据经 Authorization 头验证，HTTP 200 即登录成功。
       // 只看状态码不解析页面内容——basic 会话仅提供登录态展示，不提供 ubus 数据。
-      const basic = await this.tryBasicAuth(gw, user, password);
+      const basic = await this.tryBasicAuth(gw, user, password, current);
+      if (!current()) return cancelled;
       if (basic.ok) {
+        this.generation += 1;
         this.basicAuthOk = true;
         this.basicUser = user;
         this.reloginFailures = 0;
-        this.status = {
-          ...this.status,
-          session: { loggedIn: true, user, error: null, kind: 'basic', invalidatedAt: null },
-        };
+        this.publish({ session: { ...this.currentSession(), error: null, invalidatedAt: null } });
         await this.refresh();
+        if (!this.basicAuthOk || attempt !== this.loginAttempt || gw !== this.opts.getGateway()) return cancelled;
         return { ok: true, error: null };
       }
       // 失败不清 this.ubus：若存在旧会话，它真实有效，下一轮 doRefresh 照常取数
       // （审查 L5：行为可辩护，但必须文档化。如须强制换登，在此先 logout 旧客户端）。
       // 同理不得清掉内置浏览器建立的管理页会话与既有 basic 会话：各种会话正交，
       // ubus 登录失败不构成"其他通道未登录"的证据。
-      const webAlive = this.webSessionActive || this.basicAuthOk;
-      // Basic 质询存在却验证失败 → 以 Basic 结果为准（它才是这台路由器的实际通道）。
-      // 返回值与 status.session.error 必须说同一句话：return res 只带 ubus 文案，
-      // UI 读返回值会把"Basic 认证失败：…"显示成"用户名或密码错误"（t8 测试抓到的分歧）。
       const failError = basic.attempted ? `Basic 认证失败：${basic.error ?? '凭据被拒绝'}` : res.error;
-      this.status = {
-        ...this.status,
-        session: {
-          loggedIn: webAlive,
-          user: this.basicAuthOk ? this.basicUser : null,
-          error: failError,
-          kind: webAlive ? (this.webSessionActive ? 'web' : 'basic') : null,
-          // 登录失败（凭据错等）不改变"会话是否曾被服务端作废"的事实，粘性保留
-          invalidatedAt: this.status.session.invalidatedAt,
-        },
-      };
+      this.publish({ session: { ...this.currentSession(), error: failError } });
       return { ok: false, error: failError };
     }
+    this.generation += 1;
+    this.ubus?.logout();
+    this.ubusLeases = [];
     this.ubus = client;
     this.user = user;
     // 登录成功即认定支持 OpenWrt（能力位粘性，见 openwrtCapable 字段注释）
     this.openwrtCapable = true;
     // 会话恢复/手动登录成功：自动重登计数清零（手动登录成功同样成立）
     this.reloginFailures = 0;
-    this.status = {
-      ...this.status,
+    this.publish({
       capabilities: { ...this.status.capabilities, openwrt: true },
       session: { loggedIn: true, user, error: null, kind: 'ubus', invalidatedAt: null },
-    };
+      dhcpLeases: this.mergedLeases(),
+    });
     await this.refresh();
+    if (this.ubus !== client || attempt !== this.loginAttempt || gw !== this.opts.getGateway()) return cancelled;
     return { ok: true, error: null };
   }
 
@@ -200,6 +242,7 @@ export class RouterManager {
     gw: string,
     user: string,
     password: string,
+    current: () => boolean,
   ): Promise<{ attempted: boolean; ok: boolean; error: string | null }> {
     let page: Awaited<ReturnType<typeof detectManagementPage>>;
     try {
@@ -207,7 +250,7 @@ export class RouterManager {
     } catch {
       return { attempted: false, ok: false, error: null };
     }
-    if (!page.auth) return { attempted: false, ok: false, error: null };
+    if (!current() || !page.auth) return { attempted: false, ok: false, error: null };
     const url = page.url ?? `http://${gw}/`;
     let u: URL;
     try {
@@ -246,47 +289,44 @@ export class RouterManager {
     // 不动 capabilities：caps.openwrt / caps.managementPage 是能力位，须粘性保留；
     // 未登录时 CapRow 的 note 走"登录后可查看 DHCP 租约与无线客户端"既有分支，
     // UI 不会因此撒谎。
-    this.status = {
-      ...this.status,
+    this.ubusLeases = [];
+    this.webLeases = [];
+    this.webLeaseFailures = 0;
+    this.webLeaseRetryAt = 0;
+    this.publish({
       session: { loggedIn: false, user: null, error: null, kind: null, invalidatedAt: null },
       dhcpLeases: [],
       wirelessClients: [],
-      // 审查 R-2：wirelessStatus 与 systemBoard 同属 ubus 会话数据，登出必须一并清空
-      //（此前遗漏——导出报告携带 routerStatus，会把登出前的旧无线状态带走）
       wirelessStatus: null,
       systemBoard: null,
-    };
-    // 管理页租约实验通道状态同步归零：登出即清账，下次登录从满预算重新开始
-    this.webLeaseFailures = 0;
+      capabilityNotes: [],
+    });
   }
 
-  /**
-   * 内置浏览器的 Cookie 监视器回调（主进程调用）：路由器域出现会话 Cookie 即认定
-   * 管理页登录成功。只影响 session（kind='web'），不设置 caps.openwrt——
-   * 管理页会话拿不到 ubus 数据，把 caps.openwrt 置 true 会让 UI 撒谎。
-   */
-  markWebSession(loggedIn: boolean): void {
-    if (loggedIn) {
-      this.webSessionActive = true;
-      // 新会话建立 → 实验通道失败计数清零（审查 R-1：通道连续失败 ≥10 次会永久停用，
-      // 用户重新登录是一次全新的会话，必须重新获得抓取预算，否则重登也无法复活通道）
-      this.webLeaseFailures = 0;
-      // ubus 会话在时不降级 kind（数据通道可用性 ubus > web，与 doRefresh 的合成优先级一致）；
-      // 只翻转 webSessionActive 让实验通道可用，status 交由下一轮 doRefresh 合成
-      if (this.ubus !== null && this.ubus.loggedIn) return;
-      this.status = {
-        ...this.status,
-        session: { ...this.status.session, loggedIn: true, user: null, error: null, kind: 'web' },
-      };
-      return;
-    }
-    // loggedIn=false：只清管理页会话，不动 ubus 会话（两者正交）
-    if (!this.webSessionActive) return;
-    this.webSessionActive = false;
-    this.status = {
-      ...this.status,
-      session: { ...this.status.session, loggedIn: false, user: null, error: null, kind: null },
-    };
+  getSessionRevision(): number {
+    this.syncGateway();
+    return this.generation;
+  }
+
+  getWebSessionRevision(): string {
+    return `${this.getSessionRevision()}/${this.webGeneration}`;
+  }
+
+  hasWebSession(): boolean {
+    return this.webSessionActive;
+  }
+
+  // Cookie 会话与 ubus 登录正交，不能使在飞 ubus 认证或失效观测作废。
+  markWebSession(loggedIn: boolean): boolean {
+    this.syncGateway();
+    if (this.webSessionActive === loggedIn) return false;
+    this.webGeneration += 1;
+    this.webSessionActive = loggedIn;
+    this.webLeaseFailures = 0;
+    this.webLeaseRetryAt = 0;
+    this.webLeases = [];
+    this.publish({ session: this.currentSession(), dhcpLeases: this.mergedLeases(), capabilityNotes: [] });
+    return true;
   }
 
   /** 管理页最终可达 URL（供主进程内置浏览器打开）；尚未探测到为 null。 */
@@ -295,23 +335,29 @@ export class RouterManager {
   }
 
   /** 全量刷新：能力探测（限频）→ 按能力取数。并发调用自动合并。 */
-  async refresh(): Promise<RouterStatus> {
-    if (this.refreshing) return this.status;
-    this.refreshing = true;
-    try {
-      await this.doRefresh();
-      return this.status;
-    } catch (err) {
-      // 防御性收口（审查 N4）：探测层现状均不抛，但级联抛出会经 startPolling 的
-      // async 回调变成 unhandledRejection。失败轮如实写 lastError，不静默。
-      this.status = {
-        ...this.status,
-        lastError: `路由器状态刷新失败：${err instanceof Error ? err.message : String(err)}`,
-      };
-      return this.status;
-    } finally {
-      this.refreshing = false;
+  refresh(): Promise<RouterStatus> {
+    this.syncGateway();
+    if (this.refreshPromise && this.refreshGeneration === this.generation) {
+      return this.refreshWebGeneration === this.webGeneration
+        ? this.refreshPromise
+        : this.refreshPromise.then(() => this.refresh());
     }
+    const gen = this.generation;
+    const gw = this.gateway;
+    this.refreshGeneration = gen;
+    this.refreshWebGeneration = this.webGeneration;
+    const pending = this.doRefresh()
+      .catch(() => {
+        if (this.isCurrent(gen, gw)) {
+          this.ubusLeases = [];
+          this.webLeases = [];
+          this.publish({ dhcpLeases: [], lastError: '路由器状态刷新失败，请稍后重试' });
+        }
+      })
+      .then(() => this.status)
+      .finally(() => { if (this.refreshPromise === pending) this.refreshPromise = null; });
+    this.refreshPromise = pending;
+    return pending;
   }
 
   private async doRefresh(): Promise<void> {
@@ -319,30 +365,7 @@ export class RouterManager {
     // 世代捕获必须在任何 await 之前：logout 与本轮观测的先后即靠它判定
     const gen = this.generation;
     if (!gw) {
-      const base = this.emptyStatus();
-      this.status = {
-        ...base,
-        phase: 'unreachable',
-        lastError: '网关地址未知（尚未完成首轮局域网扫描）',
-        // 粘性能力位与真实登录态不得因"本轮拿不到网关"被瞬态打回假值（审查 L3）：
-        // UI 在 unreachable 态不渲染能力卡，但状态本身必须自洽，下一轮拿到网关即恢复。
-        capabilities: { ...base.capabilities, openwrt: this.openwrtCapable },
-        session: {
-          ...base.session,
-          loggedIn: (this.ubus !== null && this.ubus.loggedIn) || this.webSessionActive || this.basicAuthOk,
-          user: this.ubus !== null ? this.user : this.basicAuthOk ? this.basicUser : null,
-          kind:
-            this.ubus !== null && this.ubus.loggedIn
-              ? 'ubus'
-              : this.webSessionActive
-                ? 'web'
-                : this.basicAuthOk
-                  ? 'basic'
-                  : null,
-          // invalidatedAt 粘性：本轮拿不到网关不构成"会话恢复"的证据，也不新增失效证据
-          invalidatedAt: this.status.session.invalidatedAt,
-        },
-      };
+      this.publish({ ...this.emptyStatus(), phase: 'unreachable', lastError: '网关地址未知（尚未完成首轮局域网扫描）' });
       return;
     }
 
@@ -353,20 +376,19 @@ export class RouterManager {
         : { ip: gw, brand: null, modelHint: null, upnpFriendlyName: null, adminUrl: this.adminUrl };
     let caps: RouterCapabilities = { ...EMPTY_CAPS };
 
-    // —— UPnP：描述页直查（SSDP 广播在闭网段常被禁，直查 /description.xml 兜底）——
-    const upnpSnap = await this.probeUpnp(gw);
-    if (upnpSnap) {
-      caps.upnp = true;
-      identity = { ...identity, upnpFriendlyName: upnpSnap.friendlyName ?? identity.upnpFriendlyName };
-      if (upnpSnap.modelName && !identity.modelHint) identity = { ...identity, modelHint: upnpSnap.modelName };
-    } else {
-      notes.push('该路由器不提供 UPnP IGD（WAN 信息与远程重启不可用）');
-    }
+    const upnpPending = this.probeUpnp(gw, gen);
+    const ubus = this.ubus;
+    const ubusPending = ubus?.loggedIn ? Promise.all([
+      ubus.call('luci-rpc', 'getDHCPLeases'),
+      ubus.call('luci-rpc', 'getWirelessDevices'),
+      ubus.call('system', 'board'),
+      ubus.call('iwinfo', 'devices'),
+    ]) : null;
 
-    // —— 管理页指纹（限频：60s 内不重复探测）——
-    if (Date.now() - this.lastDetectAt > ROUTER.detectRetryMs || identity.brand === null) {
+    if (this.lastDetectAt === null || Date.now() - this.lastDetectAt >= ROUTER.detectRetryMs) {
       this.lastDetectAt = Date.now();
       const page = await detectManagementPage(gw);
+      if (!this.isCurrent(gen, gw)) return;
       if (page.reachable) {
         // 曾可达即粘性认定（managementPageCapable 注释）：探测限频快于轮询，逐轮重算会闪烁
         this.managementPageCapable = true;
@@ -404,17 +426,11 @@ export class RouterManager {
     // 粘性信号（只置 true），identity.brand 为本轮管理页指纹，登录态仅作兜底。
     caps.openwrt = this.openwrtCapable || identity.brand === 'openwrt' || (this.ubus !== null && this.ubus.loggedIn);
 
-    if (this.ubus && this.ubus.loggedIn) {
-      // 直接走 call() + 纯函数解析，不用 board()/dhcpLeases()/wirelessClients() 包装：
-      // 包装会吞掉 sessionInvalid，"会话已过期"就必须在界面上可见，不能静默变成空数据。
-      const ubus = this.ubus;
-      const [leaseRes, wirelessRes, boardRes, iwinfoDevRes] = await Promise.all([
-        ubus.call('luci-rpc', 'getDHCPLeases'),
-        ubus.call('luci-rpc', 'getWirelessDevices'),
-        ubus.call('system', 'board'),
-        // task-024：iwinfo 设备列表（rpcd-mod-iwinfo；未安装该包的固件 -32000 → wirelessStatus 保持 null）
-        ubus.call('iwinfo', 'devices'),
-      ]);
+    const webGen = this.webGeneration;
+    const webPending = this.readWebLeases(gw, identity.brand, gen);
+    if (ubus && ubusPending) {
+      const [leaseRes, wirelessRes, boardRes, iwinfoDevRes] = await ubusPending;
+      if (!this.isCurrent(gen, gw)) return;
       sessionInvalid = [leaseRes, wirelessRes, boardRes, iwinfoDevRes].some((r) => r.sessionInvalid === true);
       dhcpLeases = leaseRes.ok ? parseDhcpLeases(leaseRes.payload) : [];
       wirelessClients = wirelessRes.ok ? parseWirelessDevices(wirelessRes.payload) : [];
@@ -443,42 +459,47 @@ export class RouterManager {
       }
     } else if (identity.brand === 'openwrt') {
       notes.push('检测到 OpenWrt，登录后可查看 DHCP 租约与无线客户端');
-    } else if (this.webSessionActive && this.webLeaseProvider !== null) {
-      if (this.webLeaseFailures >= 10) {
-        // 审查 R-3：停用必须可感知——静默跳过会让 UI 显示"已登录"却没有任何租约来源说明
-        notes.push('管理页租约实验通道已停用（连续 10 次未抓到租约；重新在内嵌管理页登录可重置）');
-      } else {
-        // —— 管理页租约实验通道（task-030）：内置浏览器登录后，用分区 Cookie 抓
-        //     候选租约页并做品牌无关解析。仅 web 会话时尝试（ubus 优先级更高）；
-        //     连续失败 ≥10 次后停用（Cookie 失效或固件页型不在候选清单，空打无益）。
-        const cookie = await this.webLeaseProvider().catch(() => null);
-        if (cookie) {
-          const res = await fetchWebLeases({ gateway: gw, cookie, brand: identity.brand });
-          if (res.ok && res.leases.length > 0) {
-            dhcpLeases = res.leases;
-            this.webLeaseFailures = 0;
-          } else {
-            this.webLeaseFailures += 1;
-          }
-          if (res.note !== null) notes.push(res.note);
-        }
-      }
     }
-
-    // —— WAN 速率：至少 2 个带计数器的样本才出 bps ——
-    const ubusLoggedIn = this.ubus !== null && this.ubus.loggedIn;
+    const webResult = await webPending;
+    if (!this.isCurrent(gen, gw)) return;
+    this.ubusLeases = sessionInvalid ? [] : dhcpLeases;
+    if (webGen === this.webGeneration) {
+      if (webResult.note) notes.push(webResult.note);
+      this.webLeases = webResult.leases;
+    }
+    dhcpLeases = this.mergedLeases();
+    if (sessionInvalid) {
+      wirelessClients = [];
+      wirelessStatus = null;
+      systemBoard = null;
+    }
+    const session = {
+      ...this.currentSession(),
+      error: sessionInvalid ? '路由器会话已过期，请重新登录' : this.status.session.error,
+      invalidatedAt: sessionInvalid ? Date.now() : this.status.session.invalidatedAt,
+    };
+    // WAN 尚未完成时保留上轮能力证据；租约先推送，不以“探测中”冒充“不支持”。
+    this.publish({
+      identity, capabilities: { ...caps, upnp: this.status.capabilities.upnp },
+      dhcpLeases, wirelessClients, wirelessStatus, systemBoard, session, capabilityNotes: [...notes],
+    });
+    const upnpSnap = await upnpPending;
+    if (!this.isCurrent(gen, gw)) return;
+    if (upnpSnap) {
+      caps.upnp = true;
+      identity = { ...identity, upnpFriendlyName: upnpSnap.friendlyName ?? identity.upnpFriendlyName };
+      if (upnpSnap.modelName && !identity.modelHint) identity = { ...identity, modelHint: upnpSnap.modelName };
+    } else {
+      notes.push('该路由器不提供 UPnP IGD（WAN 信息与远程重启不可用）');
+    }
     const now = Date.now();
-    // 世代守卫（审计 L4）：本轮观测期间发生过 logout → 观测基于已作废的会话，
-    // DHCP 租约/无线客户端/系统信息整体丢弃，不得覆盖 logout 清理后的干净状态。
-    if (gen !== this.generation) return;
     if (upnpSnap) {
       this.wanSamples.push({ at: now, rx: upnpSnap.totalBytesRx, tx: upnpSnap.totalBytesTx });
       this.wanSamples = this.wanSamples.filter((s) => now - s.at <= 5 * 60_000).slice(-12);
     }
     const rate = this.computeRates();
 
-    this.status = {
-      ts: now,
+    this.publish({
       phase: 'ready',
       identity,
       capabilities: caps,
@@ -491,37 +512,54 @@ export class RouterManager {
         connectionStatus: upnpSnap?.connectionStatus ?? null,
         uptimeSec: upnpSnap?.uptimeSec ?? null,
       },
-      dhcpLeases,
+      dhcpLeases: this.mergedLeases(),
       wirelessClients,
       wirelessStatus,
       systemBoard,
-      session: {
-        // 客户端自己也可能已作废会话（-32002）：不能只查 this.ubus !== null，那会让 UI 显示假的"已登录"
-        loggedIn: ubusLoggedIn || this.webSessionActive || this.basicAuthOk,
-        // 会话死后保留"最后登录的用户名"（既有契约，失效提示带着用户名更可读）；
-        // basic 会话同样带用户名；从未登录 / 已登出 → null（管理页会话不知道用户名，也不编造）
-        user: this.ubus !== null ? this.user : this.basicAuthOk ? this.basicUser : null,
-        // 观测到会话失效时给出原因；未观测到时沿用上一条（消息要持续到用户重新登录）。
-        // 重新登录成功与 logout 已有清零路径，这里不新增清零逻辑。
-        error: sessionInvalid ? '路由器会话已过期，请重新登录' : this.status.session.error,
-        // kind 按"ubus > web > basic"优先级合成（数据通道可用性递减）
-        kind: ubusLoggedIn ? 'ubus' : this.webSessionActive ? 'web' : this.basicAuthOk ? 'basic' : null,
-        // task-022 B-2：失效时刻粘性记录（主进程轮询回调据此触发自动重登）。
-        // 瞬时故障不写（只有 -32002 算失效）；重新登录成功 / logout 已清零。
-        invalidatedAt: sessionInvalid ? Date.now() : this.status.session.invalidatedAt,
-      },
+      session: this.currentSession(),
       lastError: null,
       capabilityNotes: notes,
-    };
+    });
+  }
+
+  private async readWebLeases(gw: string, brand: RouterBrand | null, gen: number): Promise<{ leases: DhcpLease[]; note: string | null }> {
+    if (!this.webSessionActive || !this.webLeaseProvider) return { leases: [], note: null };
+    if (Date.now() < this.webLeaseRetryAt) {
+      return { leases: [], note: `管理页租约（实验通道）：暂时退避，${Math.ceil((this.webLeaseRetryAt - Date.now()) / 1000)} 秒后自动重试` };
+    }
+    const provider = this.webLeaseProvider;
+    const webGen = this.webGeneration;
+    const current = (): boolean => this.isCurrent(gen, gw) && this.webSessionActive && webGen === this.webGeneration;
+    const result = await fetchWebLeases({
+      gateway: gw,
+      brand,
+      adminUrl: this.adminUrl,
+      isCurrent: current,
+      cookieProvider: async (url) => {
+        if (!current()) return null;
+        const cookie = await provider(url);
+        return current() ? cookie : null;
+      },
+    });
+    if (!current()) return { leases: [], note: null };
+    if (result.ok) {
+      this.webLeaseFailures = 0;
+      this.webLeaseRetryAt = 0;
+    } else {
+      this.webLeaseFailures = Math.min(this.webLeaseFailures + 1, 4);
+      this.webLeaseRetryAt = Date.now() + Math.min(ROUTER.pollMs * 2 ** (this.webLeaseFailures - 1), 60_000);
+    }
+    return result;
   }
 
   /** UPnP 探测：SSDP 优先，失败则直查常见描述路径；都不通返回 null。 */
-  private async probeUpnp(gw: string): Promise<Awaited<ReturnType<typeof upnpQuery>> | null> {
+  private async probeUpnp(gw: string, gen: number): Promise<Awaited<ReturnType<typeof upnpQuery>> | null> {
     const descPaths = ['/description.xml', '/igd.xml', '/igddesc.xml', '/wanipcn.xml'];
     const tryLocation = async (location: string): Promise<string | null> => {
+      if (!this.isCurrent(gen, gw)) return null;
       const u = new URL(location);
       const res = await httpRequest(location, { port: Number(u.port) || 80, path: u.pathname, timeoutMs: ROUTER.upnpHttpTimeoutMs });
-      if (res.error || res.status !== 200) return null;
+      if (!this.isCurrent(gen, gw) || res.error || res.status !== 200) return null;
       const parsed = parseDeviceDescription(res.body);
       if (!parsed) return null;
       this.controlUrl = resolveControlUrl(location, parsed.controlUrl);
@@ -601,6 +639,8 @@ export class RouterManager {
   private async runRelogin(): Promise<void> {
     if (this.reloginInFlight || this.reloginProvider === null) return;
     this.reloginInFlight = true;
+    const gen = this.generation;
+    const gw = this.gateway;
     // 是否需要续链下一跳退避：必须在 finally 清掉 reloginInFlight **之后**再调
     // scheduleRelogin()——否则会被它的 inFlight 幂等守卫拦截，纯内部调度挂不出第二跳
     // （退避链自续断裂；生产被轮询再触发遮蔽，但内部链语义必须自洽）。
@@ -608,9 +648,9 @@ export class RouterManager {
     try {
       // 每次现读凭据：不常驻明文密码；开关关闭时 provider 返回 null，静默停用
       const creds = await this.reloginProvider();
-      if (!creds) return;
+      if (!creds || !this.isCurrent(gen, gw)) return;
       const res = await this.login(creds.user, creds.password);
-      if (res.ok) {
+      if (!this.isCurrent(gen, gw) || res.ok) {
         // login() 成功路径已把 reloginFailures 清零
         return;
       }
@@ -623,24 +663,39 @@ export class RouterManager {
           session: { ...this.status.session, error: '已停止自动重登（凭据可能已失效），请手动登录' },
         };
       }
+    } catch {
+      if (this.isCurrent(gen, gw)) {
+        this.reloginFailures += 1;
+        retry = this.reloginFailures < 3;
+        this.publish({ session: { ...this.currentSession(), error: '自动重登失败，请检查保存的凭据或手动登录' } });
+      }
     } finally {
       this.reloginInFlight = false;
-      if (retry) this.scheduleRelogin();
+      if (retry && this.isCurrent(gen, gw)) this.scheduleRelogin();
     }
   }
 
-  /** 周期轮询（主进程启动时开启）。 */
-  startPolling(onUpdate: (s: RouterStatus) => void): void {
+  startPolling(onUpdate: (s: RouterStatus) => void, checkWebSession?: () => Promise<unknown>): void {
     if (this.pollTimer) return;
-    this.pollTimer = setInterval(async () => {
-      const before = this.status.ts;
-      const after = await this.refresh();
-      if (after.ts !== before) onUpdate(after);
+    this.onUpdate = onUpdate;
+    this.pollTimer = setInterval(() => {
+      const gen = this.generation;
+      const check = this.webSessionActive && checkWebSession ? checkWebSession() : Promise.resolve();
+      void check.catch(() => undefined).then(() => {
+        if (this.onUpdate !== null && (gen === this.generation || !this.webSessionActive)) return this.refresh();
+        return this.status;
+      });
     }, ROUTER.pollMs);
     this.pollTimer.unref?.();
   }
 
   stopPolling(): void {
+    this.onUpdate = null;
+    this.generation += 1;
+    if (this.reloginTimer) {
+      clearTimeout(this.reloginTimer);
+      this.reloginTimer = null;
+    }
     if (this.pollTimer) {
       clearInterval(this.pollTimer);
       this.pollTimer = null;

@@ -15,6 +15,7 @@ import type {
   DataSource,
   Device,
   DeviceDetail,
+  DhcpLease,
   NetQuality,
   Printer,
   RouterHints,
@@ -61,8 +62,9 @@ import { QualityTracker } from './network/monitor';
 import { isDegraded } from './network/quality';
 import { BandwidthMeter, readConnections, type BandwidthSample } from './network/bandwidth';
 import { readSpooler } from './printers/spooler';
-import { collectPrinters, hasFault } from './printers/printer-service';
+import { collectPrinters, hasFault, SnmpConsumableProvider, IppConsumableProvider } from './printers/printer-service';
 import { discoverMdnsPrinters } from './printers/mdns';
+import { normalizeDhcpLeases, normalizeLeaseMac } from './router/leases';
 import { Simulator } from './simulator';
 
 export interface SchedulerConfig {
@@ -232,10 +234,10 @@ export class Scheduler {
   /** ONVIF 探测轮转游标（与 HTTP 指纹各用一套，避免互相挤占覆盖）。 */
   private onvifCursor = 0;
   /**
-   * 路由器通道提示（task-022 C-1）：DHCP 租约 hostname 回填。
-   * 内存态不持久化；主进程在路由器状态推送回调里每轮重灌，未登录时为空数组（不猜）。
+   * 路由器通道提示（task-022 C-1）：规范化 MAC + IP → 有名称的 DHCP 租约副本。
+   * 内存态不持久化；主进程在路由器状态推送回调里每轮重灌，未登录时清空（不猜）。
    */
-  private routerHints: RouterHints = { leaseHostnames: [] };
+  private routerLeaseIndex = new Map<string, DhcpLease>();
   /** NetBIOS 采集轮转游标：无主机名候选多于一轮配额时均匀覆盖。 */
   private nbtstatCursor = 0;
   private simulator = new Simulator();
@@ -253,6 +255,10 @@ export class Scheduler {
   private heartbeatInFlight = false;
   private qualityInFlight = false;
   private printersInFlight = false;
+  private printerRefreshPromise: Promise<{ ok: boolean; error: string | null }> | null = null;
+  private printerRefreshPending = false;
+  private readonly snmpProvider = new SnmpConsumableProvider();
+  private readonly ippProvider = new IppConsumableProvider();
   /** 首次 refreshPrinters 成功后置 true。 */
   private printersCollected = false;
   private bandwidthInFlight = false;
@@ -319,24 +325,35 @@ export class Scheduler {
     this.emitSnapshot();
   }
 
-  /** 灌入路由器通道提示（task-022 C-1，由 Engine 门面转发；内存态，不持久化）。 */
-  setRouterHints(hints: RouterHints): void {
-    this.routerHints = hints;
+  /** 灌入路由器通道提示；仅当下有效的 MAC + IP → hostname 投影变化时返回 true。 */
+  setRouterHints(hints: RouterHints): boolean {
+    const now = Date.now();
+    const next = new Map<string, DhcpLease>();
+    // 统一入口负责校验、复制、消歧和限量；不保留调用方的数组或租约引用。
+    for (const lease of normalizeDhcpLeases(hints.leaseHostnames, now)) {
+      if (lease.hostname !== null) next.set(`${lease.mac}|${lease.ip}`, lease);
+    }
+    let previousSize = 0;
+    let changed = false;
+    for (const [key, lease] of this.routerLeaseIndex) {
+      // 两边都按同一时刻求值：续租不制造噪声，过期后续租则重新成为有效名称。
+      if (lease.expiresAt !== null && lease.expiresAt <= now) continue;
+      previousSize += 1;
+      if (next.get(key)?.hostname !== lease.hostname) changed = true;
+    }
+    if (previousSize !== next.size) changed = true;
+    // 即便名称没变也必须换入新租期，避免引擎的降噪逻辑吞掉续租。
+    this.routerLeaseIndex = next;
+    return changed;
   }
 
-  /**
-   * 按 MAC 查 DHCP 租约自报的 hostname（task-022 C-1）。
-   * 找不到 / 租约 hostname 为空 → null。MAC 归一化小写后比对，吸收大小写书写差异。
-   */
-  private leaseHostnameByMac(mac: string | null): string | null {
-    if (mac === null) return null;
-    const key = mac.toLowerCase();
-    for (const lease of this.routerHints.leaseHostnames) {
-      if (lease.mac.toLowerCase() === key && lease.hostname !== null && lease.hostname.trim() !== '') {
-        return lease.hostname.trim();
-      }
-    }
-    return null;
+  /** MAC 与当前 IP 必须同时匹配；每次投影检查租期，不给已过期名称续命。 */
+  private leaseHostnameFor(mac: string | null, ip: string, now: number): string | null {
+    const normalizedMac = normalizeLeaseMac(mac);
+    if (normalizedMac === null) return null;
+    const lease = this.routerLeaseIndex.get(`${normalizedMac}|${ip}`);
+    if (!lease || (lease.expiresAt !== null && lease.expiresAt <= now)) return null;
+    return lease.hostname;
   }
 
   get snapshotCached(): Snapshot | null {
@@ -360,6 +377,9 @@ export class Scheduler {
   setPrinterSources(opts: { snmpEnabled?: boolean; useMdns?: boolean }): { snmpEnabled: boolean; useMdns: boolean } {
     if (opts.snmpEnabled !== undefined) this.cfg.snmpEnabled = opts.snmpEnabled;
     if (opts.useMdns !== undefined) this.cfg.useMdns = opts.useMdns;
+    this.snmpProvider.clear();
+    this.ippProvider.clear();
+    if (this.printersInFlight) this.printerRefreshPending = true;
     return { snmpEnabled: this.cfg.snmpEnabled, useMdns: this.cfg.useMdns };
   }
 
@@ -591,37 +611,55 @@ export class Scheduler {
       .map((r) => r.ip);
   }
 
-  async refreshPrinters(): Promise<void> {
-    if (this.printersInFlight) return;
-    this.printersInFlight = true;
-    try {
-      const spooler = await readSpooler();
-      const mdns = this.cfg.useMdns ? await discoverMdnsPrinters() : [];
-      const devices = this.buildDevices();
-      const result = await collectPrinters({
-        spooler,
-        arp: this.arp,
-        devices,
-        mdns,
-        snmpEnabled: this.cfg.snmpEnabled,
-        manage: this.hooks.getPrinterManage?.(),
-      });
-      this.printers = result.printers;
-      this.printerReachable = result.reachable;
-      // 首轮打印机采集完成
-      this.printersCollected = true;
-      // R-03②：collectPrinters 的 errors 以前被调用方丢弃，Get-Printer 失败在界面上就是"没有打印机"
-      this.replaceWarnings('printers', result.errors);
-      this.emitSnapshot();
-    } catch (err) {
-      // spooler 全失败也不能让整个引擎崩：保留上一轮结果，但必须让用户看见
-      this.replaceWarnings('printers', [
-        `打印机采集失败：${err instanceof Error ? err.message : String(err)}`,
-      ]);
-      this.emitSnapshot();
-    } finally {
-      this.printersInFlight = false;
+  refreshPrinters(force = false): Promise<{ ok: boolean; error: string | null }> {
+    if (this.printerRefreshPromise) {
+      this.printerRefreshPending ||= force;
+      return this.printerRefreshPromise;
     }
+    this.printersInFlight = true;
+    this.printerRefreshPending = force;
+    const pending = (async () => {
+      let status: { ok: boolean; error: string | null } = { ok: true, error: null };
+      do {
+        if (this.printerRefreshPending) {
+          this.snmpProvider.clear();
+          this.ippProvider.clear();
+        }
+        this.printerRefreshPending = false;
+        const snmpEnabled = this.cfg.snmpEnabled;
+        const useMdns = this.cfg.useMdns;
+        try {
+          const [spooler, mdns] = await Promise.all([
+            readSpooler(), useMdns ? discoverMdnsPrinters() : Promise.resolve([]),
+          ]);
+          const result = await collectPrinters({
+            spooler, mdns, arp: this.arp, devices: this.buildDevices(),
+            discoveryHosts: this.cfg.hosts,
+            consumableProviders: snmpEnabled ? [this.snmpProvider, this.ippProvider] : [this.ippProvider],
+            manage: this.hooks.getPrinterManage?.(),
+          });
+          if (this.printerRefreshPending) continue;
+          this.printers = result.printers;
+          this.printerReachable = result.reachable;
+          this.printersCollected = true;
+          this.replaceWarnings('printers', result.errors);
+          this.emitSnapshot();
+          status = { ok: result.errors.length === 0, error: result.errors.join(' · ') || null };
+        } catch (err) {
+          status = { ok: false, error: `打印机采集失败：${err instanceof Error ? err.message : String(err)}` };
+          if (!this.printerRefreshPending) {
+            this.replaceWarnings('printers', [status.error!]);
+            this.emitSnapshot();
+          }
+        }
+      } while (this.printerRefreshPending);
+      return status;
+    })();
+    this.printerRefreshPromise = pending.finally(() => {
+      this.printersInFlight = false;
+      this.printerRefreshPromise = null;
+    });
+    return this.printerRefreshPromise;
   }
 
   /** 手动刷新：立即出一次快照（<1s 有反馈），随后后台跑完整扫描。 */
@@ -1104,6 +1142,7 @@ export class Scheduler {
   // —— 快照组装 ——
 
   buildDevices(): Device[] {
+    const now = Date.now();
     const devices: Device[] = [];
     // 侦测联动：最近一轮有效 ARP 解析出的冲突 IP 集合（null = 尚无有效读取，一律 false）
     const conflictIps = new Set(
@@ -1127,7 +1166,7 @@ export class Scheduler {
       const onvifHint = this.onvifHints.get(rec.ip) ?? null;
       // task-022 C-1：设备自身 hostname 为空时用 DHCP 租约自报回填（单点回填，
       // 同时服务指纹管线与展示）。不覆盖 rDNS/mDNS 已有值，不 mutate 记录。
-      const leaseHostname = rec.hostname === null ? this.leaseHostnameByMac(rec.mac) : null;
+      const leaseHostname = rec.hostname === null ? this.leaseHostnameFor(rec.mac, rec.ip, now) : null;
       const effectiveHostname = rec.hostname ?? leaseHostname;
       // task-023：OUI 查不到时，本地管理位 MAC（安卓 10+/iOS 14+ 默认随机化）给出诚实
       // 标签——绝不猜厂商
@@ -1315,7 +1354,8 @@ export class Scheduler {
       txBps: h.txBps,
     }));
 
-    return { device, ports, connections, history };
+    // 状态历史由持久化层注入（引擎门面），调度器自身不持存储依赖
+    return { device, ports, connections, history, statusHistory: [] };
   }
 
   /**

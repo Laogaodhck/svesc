@@ -9,7 +9,6 @@ import path from 'node:path';
 import type {
   AppSettings,
   DeviceDetail,
-  DhcpLease,
   PrinterManageConfig,
   PrintJobAction,
   RouterHints,
@@ -71,6 +70,7 @@ export interface Engine {
   configImport(json: string): { ok: boolean; imported: string[]; skipped: string[]; error: string | null };
   // —— 打印管理页 ——
   getPrinterManage(): PrinterManageConfig;
+  printerRefresh(): Promise<{ ok: boolean; error: string | null }>;
   addManualPrinter(ip: string, note: string | null): { ok: boolean; error: string | null };
   removeManualPrinter(ip: string): { ok: boolean };
   setPrinterIgnored(printerId: string, ignored: boolean): { ok: boolean };
@@ -152,6 +152,7 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
         options.onSnapshot?.(withMeta);
       },
       onScanProgress: options.onScanProgress,
+      getPrinterManage: () => store.printerManage(),
     },
   );
 
@@ -176,8 +177,6 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
 
   let stopped = false;
   const gatewayIp: string | null = subnet?.gateway ?? null;
-  /** 上一次灌入的租约提示（审查 R-9：内容对比，未变化不重灌不推帧）。 */
-  let lastHints: DhcpLease[] | null = null;
 
   // —— 配置导入导出（task-025）：settings + 用户元数据 + 监控目标 + 打印管理 + firstSeen ——
   const exportConfigFile = (): { ok: boolean; path: string | null; error?: string } => {
@@ -221,6 +220,8 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
     snmpEnabled: 'boolean',
     useMdns: 'boolean',
     closeToTray: 'boolean',
+    printerAlerts: 'boolean',
+    autoUpdate: 'boolean',
     rememberRouterPassword: 'boolean',
   };
 
@@ -344,11 +345,15 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
     scheduler.setAutoScan(store.settings.autoScan, store.settings.autoScanIntervalSec);
     scheduler.setPrinterSources({ snmpEnabled: store.settings.snmpEnabled, useMdns: store.settings.useMdns });
     scheduler.hydrateWatches(store.watchTargets());
-    void scheduler.refreshPrinters();
+    void scheduler.refreshPrinters(true);
     scheduler.emitSnapshotNow();
     netlog.push('info', 'config', `配置导入完成：生效 ${imported.length} 项，跳过 ${skipped.length} 项`);
     return { ok: true, imported, skipped, error: null };
   };
+
+  const queueForOperation = (name: string) => scheduler.buildSnapshot().printers.find((p) =>
+    p.queueName === name && p.source !== 'simulated' && !p.id.startsWith('sim-'),
+  );
 
   const engine: Engine = {
     subnetLabel: subnet ? subnet.cidr : null,
@@ -360,34 +365,29 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
       return gatewayIp;
     },
     applyRouterHints(hints: RouterHints): void {
-      // 审查 R-9（降噪）：路由器轮询每 10s 重灌一次租约——内容没变就跳过推帧，
-      // 避免无意义的全量快照重建与 IPC 风暴；变了才灌入并立即推帧让回填马上可见
-      const same =
-        lastHints !== null &&
-        lastHints.length === hints.leaseHostnames.length &&
-        lastHints.every((l, i) => l.mac === hints.leaseHostnames[i]?.mac && l.hostname === hints.leaseHostnames[i]?.hostname);
-      if (same) return;
-      lastHints = hints.leaseHostnames.map((l) => ({ ...l }));
-      scheduler.setRouterHints(hints);
-      scheduler.emitSnapshotNow();
+      // 每轮都更新租期；有效名称投影变化才推帧，避免重复缓存吞掉续租或 IP 变化。
+      if (scheduler.setRouterHints(hints)) scheduler.emitSnapshotNow();
     },
     // —— 打印管理页：配置变更落盘后立即触发一轮打印机刷新（刷新内部会推快照） ——
     getPrinterManage(): PrinterManageConfig {
       return store.printerManage();
     },
+    printerRefresh() {
+      return scheduler.refreshPrinters(true);
+    },
     addManualPrinter(ip: string, note: string | null) {
       const res = store.addManualPrinter(ip, note);
-      if (res.ok) void scheduler.refreshPrinters();
+      if (res.ok) void scheduler.refreshPrinters(true);
       return res;
     },
     removeManualPrinter(ip: string) {
       const res = store.removeManualPrinter(ip);
-      if (res.ok) void scheduler.refreshPrinters();
+      if (res.ok) void scheduler.refreshPrinters(true);
       return res;
     },
     setPrinterIgnored(printerId: string, ignored: boolean) {
       store.setPrinterIgnored(printerId, ignored);
-      void scheduler.refreshPrinters();
+      void scheduler.refreshPrinters(true);
       return { ok: true };
     },
     setPrinterAlias(printerId: string, alias: string | null) {
@@ -398,20 +398,26 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
     },
     // —— 打印操作（task-024）：留痕入日志环；成功后刷新打印机快照让队列/默认态立即可见 ——
     async printerJobAction(action, printerName, jobId) {
+      const queue = queueForOperation(printerName);
+      if (!queue) return { ok: false, error: '未找到可操作的真实 Windows 打印队列' };
+      if (!queue.jobs.some((job) => job.id === jobId)) return { ok: false, error: '该任务已不在当前队列，请刷新后重试' };
       const res = await printJobAction(action, printerName, jobId);
       netlog.push(res.ok ? 'info' : 'error', 'printer', `任务${action} ${printerName}#${jobId}：${res.ok ? '成功' : res.error}`);
-      if (res.ok) void scheduler.refreshPrinters();
+      if (res.ok) void scheduler.refreshPrinters(true);
       return res;
     },
     async printerPrintTestPage(printerName) {
+      if (!queueForOperation(printerName)) return { ok: false, error: '未找到可操作的真实 Windows 打印队列' };
       const res = await printTestPage(printerName);
       netlog.push(res.ok ? 'info' : 'error', 'printer', `打印测试页 ${printerName}：${res.ok ? '已发送' : res.error}`);
+      if (res.ok) void scheduler.refreshPrinters(true);
       return res;
     },
     async printerSetDefault(printerName) {
+      if (!queueForOperation(printerName)) return { ok: false, error: '未找到可操作的真实 Windows 打印队列' };
       const res = await setDefaultPrinter(printerName);
       netlog.push(res.ok ? 'info' : 'error', 'printer', `设默认打印机 ${printerName}：${res.ok ? '成功' : res.error}`);
-      if (res.ok) void scheduler.refreshPrinters();
+      if (res.ok) void scheduler.refreshPrinters(true);
       return res;
     },
     setDeviceAlias(deviceId: string, alias: string | null) {
@@ -487,6 +493,8 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
         snmpEnabled: s.snmpEnabled,
         useMdns: s.useMdns,
         closeToTray: s.closeToTray,
+        printerAlerts: s.printerAlerts,
+        autoUpdate: s.autoUpdate,
         rememberRouterPassword: s.rememberRouterPassword,
       };
     },
@@ -528,8 +536,14 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
       store.setSettings({ autoScan: result.autoScan, autoScanIntervalSec: result.intervalSec });
       return result;
     },
-    getDeviceDetail(deviceId: string): Promise<DeviceDetail | null> {
-      return scheduler.getDeviceDetail(deviceId);
+    async getDeviceDetail(deviceId: string): Promise<DeviceDetail | null> {
+      const detail = await scheduler.getDeviceDetail(deviceId);
+      if (!detail) return null;
+      // 跨重启的在线历史只存在于支持状态日志的后端（SQLite）；JSON/降级后端如实给空数组
+      return {
+        ...detail,
+        statusHistory: store.getDeviceStatusHistory?.(detail.device.ip, 50) ?? [],
+      };
     },
     /**
      * 导出报告。extras（可选）由主进程合入路由器状态与打印管理配置——

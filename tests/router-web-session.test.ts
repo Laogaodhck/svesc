@@ -157,6 +157,7 @@ describe('RouterManager 管理页会话（内置浏览器登录）', () => {
     scriptAllOk();
     const mgr = newManager();
     await mgr.login('root', 'secret');
+    mgr.markWebSession(true);
     mgr.markWebSession(false);
 
     const s = mgr.getStatus();
@@ -440,39 +441,78 @@ describe('审查修复：会话生命周期与实验通道恢复', () => {
     expect(s.session.loggedIn).toBe(true);
   });
 
-  it('实验通道连续失败 10 次停用（停用可感知）；重新建立管理页会话即复活（新会话重置预算）', async () => {
-    const mgr = newManager();
-    mgr.markWebSession(true);
-    const provider = vi.fn(async () => 'sid=1');
-    mgr.setWebLeaseProvider(provider);
-
-    // 品牌被 mock 成 tplink：6 个候选（3 专属 + 3 通用）全部失败 → 每轮 failures+1
-    for (let i = 0; i < 10; i += 1) await mgr.refresh();
-    expect(provider).toHaveBeenCalledTimes(10);
-    await mgr.refresh();
-    expect(provider, '连续 10 次失败后停用：不再读 Cookie 空打').toHaveBeenCalledTimes(10);
-    expect(
-      mgr.getStatus().capabilityNotes.some((n) => n.includes('已停用')),
-      '停用状态必须在能力说明中可感知，不得静默跳过',
-    ).toBe(true);
-
-    // 重新建立管理页会话（用户在内嵌管理页重新登录）→ 失败计数重置，通道复活
-    mgr.markWebSession(true);
-    await mgr.refresh();
-    expect(provider, '新会话必须重置失败计数，否则重登无法复活通道').toHaveBeenCalledTimes(11);
+  it('实验通道失败退避 10/20/40/60 秒，持续失败仍自动恢复尝试，重复 Cookie 检查不重置预算', async () => {
+    vi.useFakeTimers();
+    try {
+      const mgr = newManager();
+      mgr.markWebSession(true);
+      const provider = vi.fn(async () => 'sid=1');
+      mgr.setWebLeaseProvider(provider);
+      await mgr.refresh();
+      const perRound = provider.mock.calls.length;
+      expect(perRound).toBeGreaterThan(0);
+      for (const delay of [10_000, 20_000, 40_000, ...Array<number>(10).fill(60_000)]) {
+        const before = provider.mock.calls.length;
+        mgr.markWebSession(true);
+        await mgr.refresh();
+        expect(provider).toHaveBeenCalledTimes(before);
+        expect(mgr.getStatus().capabilityNotes.join(' ')).toContain('自动重试');
+        await vi.advanceTimersByTimeAsync(delay - 1);
+        await mgr.refresh();
+        expect(provider).toHaveBeenCalledTimes(before);
+        await vi.advanceTimersByTimeAsync(1);
+        await mgr.refresh();
+        expect(provider).toHaveBeenCalledTimes(before + perRound);
+      }
+    } finally { vi.useRealTimers(); }
   });
 
-  it('logout 重置实验通道失败计数（登出即清账，下次登录从满预算开始）', async () => {
+  it('logout 后新管理页会话立即恢复预算', async () => {
     const mgr = newManager();
     mgr.markWebSession(true);
     const provider = vi.fn(async () => 'sid=1');
     mgr.setWebLeaseProvider(provider);
-    for (let i = 0; i < 10; i += 1) await mgr.refresh();
-    expect(provider).toHaveBeenCalledTimes(10);
-
+    await mgr.refresh();
+    const before = provider.mock.calls.length;
+    await mgr.refresh();
+    expect(provider).toHaveBeenCalledTimes(before);
     mgr.logout();
     mgr.markWebSession(true);
     await mgr.refresh();
-    expect(provider, 'logout 清账后重新登录：通道必须恢复（而不是沿用旧失败计数停在停用态）').toHaveBeenCalledTimes(11);
+    expect(provider).toHaveBeenCalledTimes(before * 2);
+  });
+
+  it('凭据读取在飞时 logout，晚返回的自动重登不得恢复登录', async () => {
+    vi.useFakeTimers();
+    try {
+      scriptAllOk();
+      const mgr = newManager();
+      const deferred = Promise.withResolvers<{ user: string; password: string }>();
+      const provider = vi.fn(() => deferred.promise);
+      mgr.setAutoRelogin(provider);
+      mgr.scheduleRelogin();
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(provider).toHaveBeenCalledTimes(1);
+      mgr.logout();
+      deferred.resolve({ user: 'root', password: 'secret' });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(h.requests.filter((request) => request.body.includes('"method":"call"'))).toHaveLength(0);
+      expect(mgr.getStatus().session.loggedIn).toBe(false);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('凭据提供者抛错不泄露异常内容、不产生未处理拒绝，三次后停止', async () => {
+    vi.useFakeTimers();
+    try {
+      const mgr = newManager();
+      const provider = vi.fn(async () => { throw new Error('secret-value'); });
+      mgr.setAutoRelogin(provider);
+      mgr.scheduleRelogin();
+      await vi.advanceTimersByTimeAsync(60_000 + 120_000 + 240_000);
+      expect(provider).toHaveBeenCalledTimes(3);
+      await vi.advanceTimersByTimeAsync(600_000);
+      expect(provider).toHaveBeenCalledTimes(3);
+      expect(mgr.getStatus().session.error).not.toContain('secret-value');
+    } finally { vi.useRealTimers(); }
   });
 });

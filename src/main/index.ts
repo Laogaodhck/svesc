@@ -8,10 +8,21 @@ import { app, BrowserWindow, Menu } from 'electron';
 import path from 'node:path';
 import { createEngine, type Engine } from './engine';
 import { RouterManager } from './engine/router';
-import { clearPushTarget, pushRouterStatus, pushScanProgress, pushSnapshot, registerIpc, setPushTarget } from './ipc';
+import { PrinterAlertTracker } from './engine/printers/alerts';
+import {
+  clearPushTarget,
+  pushRouterStatus,
+  pushScanProgress,
+  pushSnapshot,
+  pushUpdateStatus,
+  registerIpc,
+  setPushTarget,
+} from './ipc';
+import { showPrinterAlert } from './notify';
 import { loadCredentials, saveCredentials, clearCredentials } from './router-store';
-import { getRouterAdminCookieHeader } from './router-browser';
-import { createTray, destroyTray, isQuitRequested, refreshTray } from './tray';
+import { bindRouterAdminGateway, checkRouterWebSession, getRouterAdminCookieHeader } from './router-browser';
+import { createTray, destroyTray, isQuitRequested, markQuitting, refreshTray, showWindow } from './tray';
+import { createUpdateService, type UpdateService } from './updater';
 
 const isSmoke = process.env.SMOKE === '1';
 
@@ -21,6 +32,9 @@ const isSmoke = process.env.SMOKE === '1';
  * （gpu_process_host.cc: GPU process isn't usable. Goodbye.）导致应用直接 FATAL 退出。
  * 本应用是纯数据表格/曲线 UI，软件合成完全够用，稳定性优先。
  */
+// Windows 通知归属：必须与 electron-builder appId 一致，否则 toast 会显示为 electron.app.*
+app.setAppUserModelId('cn.svesc.lan-monitor');
+
 app.disableHardwareAcceleration();
 app.commandLine.appendSwitch('disable-gpu');
 app.commandLine.appendSwitch('disable-gpu-compositing');
@@ -31,6 +45,7 @@ app.commandLine.appendSwitch('disable-renderer-backgrounding');
 let mainWindow: BrowserWindow | null = null;
 let engine: Engine | null = null;
 let routerManager: RouterManager | null = null;
+let updateService: UpdateService | null = null;
 
 function rendererEntry(): string {
   // 产物结构：dist/main/index.cjs + dist/renderer/index.html
@@ -98,17 +113,36 @@ async function createWindow(): Promise<BrowserWindow> {
 async function bootstrap(): Promise<void> {
   Menu.setApplicationMenu(null);
 
+  /** 异常判定账本常驻：即使开关关闭也持续推进基线，重新开启时不会补弹存量故障 */
+  const printerAlerts = new PrinterAlertTracker();
+
   engine = await createEngine({
     userDataDir: app.getPath('userData'),
     exportDir: app.getPath('downloads'),
     onSnapshot: (snapshot) => {
       pushSnapshot(snapshot);
-      // 托盘菜单随心跳重建（勾选态保鲜）
-      if (!isSmoke) refreshTray();
+      if (!isSmoke) {
+        // 托盘菜单随心跳重建（勾选态保鲜）
+        refreshTray();
+        const alerts = printerAlerts.evaluate(snapshot.printers);
+        if (alerts.length > 0 && (engine?.getSettings().printerAlerts ?? true)) {
+          for (const alert of alerts) {
+            showPrinterAlert(alert, showWindow);
+            engine?.logs.push(
+              alert.kind === 'fault' ? 'warn' : 'info',
+              'printers',
+              alert.kind === 'fault'
+                ? `打印机异常：${alert.printerName}（${alert.reason}）`
+                : `打印机已恢复：${alert.printerName}`,
+            );
+          }
+        }
+      }
     },
     onScanProgress: (progress) => pushScanProgress(progress),
   });
 
+  await bindRouterAdminGateway(engine.getGatewayIp());
   mainWindow = await createWindow();
 
   // 路由器管理通道：网关 IP 接引擎探测结果；启动即轮询，凭据可从 safeStorage 恢复
@@ -121,8 +155,22 @@ async function bootstrap(): Promise<void> {
   });
   // task-030：管理页租约实验通道的 Cookie 提供者——内置浏览器登录后分区里的
   // 会话 Cookie 每轮现读，登出清空后自动变 null（通道静默跳过）
-  routerManager.setWebLeaseProvider(getRouterAdminCookieHeader);
-  registerIpc(mainWindow, engine, routerManager);
+  routerManager.setWebLeaseProvider(async (url) =>
+    await bindRouterAdminGateway(engine?.getGatewayIp() ?? null) ? getRouterAdminCookieHeader(url) : null,
+  );
+  // 自动更新：仅安装版（非便携、非开发、非冒烟）；检查/下载自动化，安装始终由用户确认
+  updateService = createUpdateService({
+    isPackaged: app.isPackaged,
+    isSmoke,
+    env: process.env,
+    currentVersion: app.getVersion(),
+    getAutoUpdate: () => engine?.getSettings().autoUpdate ?? true,
+    showWindow,
+    beforeInstall: markQuitting,
+    onStatus: pushUpdateStatus,
+    onLog: (level, message) => engine?.logs.push(level, 'update', message),
+  });
+  registerIpc(mainWindow, engine, routerManager, updateService);
   routerManager.startPolling((status) => {
     pushRouterStatus(status);
     // task-022 B-2：观测到会话失效（invalidatedAt 粘性）→ 触发自动重登。
@@ -130,10 +178,10 @@ async function bootstrap(): Promise<void> {
     if (status.session.invalidatedAt !== null && engine?.getSettings().rememberRouterPassword) {
       routerManager?.scheduleRelogin();
     }
-    // task-022 C-1：DHCP 租约灌入设备识别管线做 hostname 回填。
-    // 未登录 / web 会话时 dhcpLeases 天然为空数组，不猜数据
     engine?.applyRouterHints({ leaseHostnames: status.dhcpLeases });
-  });
+  }, () => routerManager
+    ? checkRouterWebSession(routerManager, engine?.getGatewayIp() ?? null)
+    : Promise.resolve());
   const saved = await loadCredentials();
   if (saved) routerManager.restoreSession(saved.user, saved.password);
 
@@ -154,6 +202,9 @@ async function bootstrap(): Promise<void> {
     engine.stop();
     app.exit(result.ok ? 0 : 3);
   }
+
+  // 启动扫描稳定后再检查更新，避免与首轮深度扫描争网络
+  updateService?.start();
 }
 
 process.on('unhandledRejection', (reason) => {
@@ -185,6 +236,8 @@ app.on('window-all-closed', () => {
 app.on('before-quit', () => {
   // 先置位真退出（托盘菜单"退出"之外的 quit 路径也要放行 close），再销毁托盘
   destroyTray();
+  updateService?.dispose();
+  updateService = null;
   engine?.stop();
   routerManager?.stopPolling();
   engine = null;

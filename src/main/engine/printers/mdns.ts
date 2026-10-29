@@ -13,6 +13,7 @@ export interface MdnsPrinter {
   ip: string | null;
   port: number | null;
   service: string;
+  model?: string | null;
 }
 
 export const MDNS_SERVICES = ['_ipp._tcp.local', '_pdl-datastream._tcp.local'] as const;
@@ -143,8 +144,7 @@ export function parseMdnsRecords(buf: Buffer): DnsRecord[] {
  * 返回去重后的 `{name, ip, port, service}`；无响应返回 []。
  */
 export async function discoverMdnsPrinters(timeoutMs = TIMEOUTS.mdns): Promise<MdnsPrinter[]> {
-  const hits = await mdnsQuery([...MDNS_SERVICES], timeoutMs);
-  return hits.map((h) => ({ name: h.name, ip: h.ip, port: h.port, service: h.service }));
+  return mdnsQuery([...MDNS_SERVICES], timeoutMs);
 }
 
 /** mDNS 命中（PTR 实例 + SRV 端口 + A 地址尽力解析 + TXT 自报型号）。 */

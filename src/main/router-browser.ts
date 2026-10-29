@@ -11,7 +11,9 @@
  * 且它只解锁管理页会话展示与管理页租约实验通道，绝不解锁 ubus 数据，
  * 不存在"假已登录却拿不到数据被静默"的路径。
  */
-import { BrowserWindow, session as electronSession } from 'electron';
+import { app, BrowserWindow, session as electronSession } from 'electron';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import type { RouterManager } from './engine/router';
 
 /** 隔离的持久化分区：路由器 Cookie 不进应用默认会话，退出登录时整体清空。 */
@@ -20,73 +22,99 @@ export const ROUTER_ADMIN_PARTITION = 'persist:router-admin';
 /** 会话 Cookie 名称关键词（大小写不敏感子串匹配）。 */
 const SESSION_COOKIE_HINTS = ['sysauth', 'session', 'token', 'stok', 'auth', 'userid', 'login'] as const;
 
-/** 清空路由器管理分区的 Cookie（退出登录时由 IPC 层调用；失败不阻断登出）。 */
-export async function clearAdminCookies(): Promise<void> {
-  try {
-    await electronSession.fromPartition(ROUTER_ADMIN_PARTITION).clearStorageData({ storages: ['cookies'] });
-  } catch {
-    /* Cookie 清理失败不阻断登出：RouterManager 的会话状态已由 logout() 清掉 */
+let cookieRevision = 0;
+let cookiesUsable = true;
+let clearingCookies: Promise<boolean> | null = null;
+let bindingGateway: Promise<boolean> | null = null;
+
+export function clearAdminCookies(): Promise<boolean> {
+  cookieRevision += 1;
+  cookiesUsable = false;
+  if (clearingCookies) return clearingCookies;
+  const pending = Promise.resolve()
+    .then(() => {
+      const ses = electronSession.fromPartition(ROUTER_ADMIN_PARTITION);
+      // 原生 webview 也会自动附带 Cookie，必须与后台取凭据共用清理闸门。
+      ses.webRequest.onBeforeRequest((_details, callback) => {
+        callback({ cancel: !cookiesUsable || clearingCookies !== null });
+      });
+      return ses.clearStorageData({ storages: ['cookies'] });
+    })
+    .then(() => { cookiesUsable = true; return true; }, () => false)
+    .finally(() => { if (clearingCookies === pending) clearingCookies = null; });
+  clearingCookies = pending;
+  return pending;
+}
+
+export async function bindRouterAdminGateway(gateway: string | null): Promise<boolean> {
+  if (!gateway) return false;
+  if (bindingGateway) {
+    await bindingGateway;
+    return bindRouterAdminGateway(gateway);
   }
-}
-
-/**
- * 分区里是否存在会话 Cookie（关键词命中）。
- *
- * 审查 R-4（联动盲区修复）：不按网关 IP 域过滤——TP-LINK 等固件的防重绑定机制
- * 会把浏览器 302 到本地域名（tplogin.cn），登录后的会话 Cookie 落在该域名而非
- * 网关 IP 下，按 IP 过滤将永远检测不到会话（管理页租约通道随之永不启用）。
- * 分区（persist:router-admin）是路由器管理页专用的，扫描全量 Cookie 是安全的；
- * 判定标准与会话 Cookie 关键词表一致，仅做启发式（UI 文案已声明"Cookie 检测"）。
- */
-function hasSessionCookie(): Promise<boolean> {
-  const ses = electronSession.fromPartition(ROUTER_ADMIN_PARTITION);
-  return ses.cookies
-    .get({})
-    .then((cookies) =>
-      cookies.some((c) => {
-        const name = c.name.toLowerCase();
-        return SESSION_COOKIE_HINTS.some((kw) => name.includes(kw));
-      }),
-    )
-    .catch(() => false);
-}
-
-/**
- * 管理页分区的全部 Cookie 组装成 Cookie 头（task-030 管理页租约实验通道）。
- * 分区专用（只装路由器管理页），全部转发是安全的；空分区返回 null。
- * TP-LINK 等固件登录后 Cookie 落在本地域名（tplogin.cn）而非 IP，这里不按域过滤。
- */
-export async function getRouterAdminCookieHeader(): Promise<string | null> {
+  const file = path.join(app.getPath('userData'), 'router-admin-gateway.json');
   try {
-    const cookies = await electronSession.fromPartition(ROUTER_ADMIN_PARTITION).cookies.get({});
-    if (cookies.length === 0) return null;
+    if (JSON.parse(fs.readFileSync(file, 'utf8')).gateway === gateway) return cookiesUsable && clearingCookies === null;
+  } catch { /* 未绑定的持久 Cookie 也不能假定属于当前网关。 */ }
+  const pending = (async () => {
+    if (!(await clearAdminCookies())) return false;
+    try {
+      fs.writeFileSync(file, JSON.stringify({ gateway }), { encoding: 'utf8', mode: 0o600 });
+      return true;
+    } catch {
+      cookiesUsable = false;
+      return false;
+    }
+  })();
+  bindingGateway = pending;
+  try { return await pending; }
+  finally { if (bindingGateway === pending) bindingGateway = null; }
+}
+
+export async function getRouterAdminCookieHeader(url: string): Promise<string | null> {
+  if (clearingCookies || !cookiesUsable) return null;
+  const revision = cookieRevision;
+  try {
+    const target = new URL(url);
+    if (!['http:', 'https:'].includes(target.protocol)) return null;
+    const cookies = await electronSession.fromPartition(ROUTER_ADMIN_PARTITION).cookies.get({ url: target.href });
+    if (revision !== cookieRevision || cookies.length === 0) return null;
     return cookies.map((c) => `${c.name}=${c.value}`).join('; ');
   } catch {
     return null;
   }
 }
 
-/**
- * 检测管理页会话（task-032）：页面内嵌 webview 在 dom-ready / did-navigate 后
- * 经 IPC 调到这里——读分区 Cookie，命中与否**双向**同步 markWebSession。
- *
- * 审查 R-5（状态同步修复）：此前只会置 true 不会置 false——Cookie 过期/在管理页
- * 自行登出后，应用侧"管理页会话"永远保持，UI 显示已登录、实验通道空转。
- * 分区是路由器管理页专用的，"分区里没有会话 Cookie"就是"管理页未登录"的可靠证据，
- * 双向同步成立；判定谓词与建会话时一致（同一套关键词），不存在口径漂移。
- * 返回当前是否检测到会话，渲染层只用于展示，会话真值以 RouterManager 状态为准。
- */
 export async function checkRouterWebSession(
   router: RouterManager,
   gatewayIp: string | null,
 ): Promise<{ session: boolean }> {
-  if (!gatewayIp) return { session: false };
+  if (!gatewayIp) {
+    router.markWebSession(false);
+    return { session: false };
+  }
+  if (clearingCookies || !cookiesUsable) return { session: false };
+  const revision = router.getWebSessionRevision();
   try {
-    const hit = await hasSessionCookie();
-    router.markWebSession(hit);
+    if (!(await bindRouterAdminGateway(gatewayIp)) || revision !== router.getWebSessionRevision()) return { session: false };
+    const cookieGen = cookieRevision;
+    const adminUrl = router.getAdminUrl();
+    const target = new URL(adminUrl ?? `http://${gatewayIp}/`);
+    const brand = router.getStatus().identity?.brand;
+    const hosts = new Set([gatewayIp]);
+    if (target.hostname === gatewayIp || (brand === 'tplink' && target.hostname === 'tplogin.cn')) hosts.add(target.hostname);
+    if (brand === 'tplink') hosts.add('tplogin.cn');
+    const ses = electronSession.fromPartition(ROUTER_ADMIN_PARTITION);
+    const groups = await Promise.all([...hosts].map((domain) => ses.cookies.get({ domain })));
+    if (revision !== router.getWebSessionRevision() || cookieGen !== cookieRevision || clearingCookies) return { session: false };
+    const hit = groups.flat().some((cookie) =>
+      (!cookie.expirationDate || cookie.expirationDate > Date.now() / 1000) &&
+      SESSION_COOKIE_HINTS.some((hint) => cookie.name.toLowerCase().includes(hint)),
+    );
+    const changed = router.markWebSession(hit);
+    if (changed && hit) await router.refresh();
     return { session: hit };
   } catch {
-    // Cookie 读取失败不算登录失败，webview 下一次导航会再触发
     return { session: false };
   }
 }

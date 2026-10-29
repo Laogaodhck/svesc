@@ -933,6 +933,33 @@
   vertical-align: middle;
 }
 
+.manage-filters {
+  margin-bottom: 12px;
+}
+
+.manage-table-scroll {
+  overflow-x: auto;
+}
+
+.manage-printers-table {
+  min-width: 1120px;
+  table-layout: auto;
+}
+
+.manage-printers-table td:first-child {
+  max-width: 230px;
+}
+
+.manage-printers-table td:last-child {
+  min-width: 240px;
+  white-space: normal;
+}
+
+.manage-confirm {
+  margin-bottom: 12px;
+  overflow-wrap: anywhere;
+}
+
 .manage-name {
   font-weight: 600;
 }

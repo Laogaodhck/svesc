@@ -21,6 +21,7 @@ import type {
   ScanProgress,
   Snapshot,
   WatchStatus,
+  UpdateStatus,
 } from '../shared/types';
 
 function subscribe<T>(channel: string, cb: (payload: T) => void): () => void {
@@ -73,6 +74,7 @@ const api: LanApi = {
     ipcRenderer.invoke(CH.routerCheckWebSession),
 
   printerGetManageConfig: () => ipcRenderer.invoke(CH.printerGetManageConfig),
+  printerRefresh: () => ipcRenderer.invoke(CH.printerRefresh),
   printerAddManual: (ip: string, note: string | null) => ipcRenderer.invoke(CH.printerAddManual, ip, note),
   printerRemoveManual: (ip: string) => ipcRenderer.invoke(CH.printerRemoveManual, ip),
   printerSetIgnored: (printerId: string, ignored: boolean) =>
@@ -92,6 +94,10 @@ const api: LanApi = {
   setLaunchAtLogin: (on: boolean): Promise<{ ok: boolean; error: string | null }> =>
     ipcRenderer.invoke(CH.launchAtLoginSet, on),
 
+  updateGetStatus: () => ipcRenderer.invoke(CH.updateGetStatus),
+  updateCheck: () => ipcRenderer.invoke(CH.updateCheck),
+  updateInstall: () => ipcRenderer.invoke(CH.updateInstall),
+
   diagRun: (kind: DiagKind, target: string): Promise<DiagResult> =>
     ipcRenderer.invoke(CH.diagRun, kind, target),
   diagAdapters: (): Promise<NetAdapter[]> => ipcRenderer.invoke(CH.diagAdapters),
@@ -105,6 +111,7 @@ const api: LanApi = {
   onSnapshot: (cb: (s: Snapshot) => void): (() => void) => subscribe<Snapshot>(CH.snapshot, cb),
   onScanProgress: (cb: (p: ScanProgress) => void): (() => void) => subscribe<ScanProgress>(CH.scanProgress, cb),
   onRouterStatus: (cb: (s: RouterStatus) => void): (() => void) => subscribe<RouterStatus>(CH.routerStatus, cb),
+  onUpdateStatus: (cb: (s: UpdateStatus) => void): (() => void) => subscribe<UpdateStatus>(CH.updateStatus, cb),
 };
 
 contextBridge.exposeInMainWorld('lanApi', api);

@@ -15,8 +15,70 @@ import {
   UBUS_NULL_SESSION,
 } from '../src/main/engine/router/openwrt';
 import type { Transport } from '../src/main/engine/router/openwrt';
+import { normalizeDhcpLeases, normalizeLeaseHostname, normalizeLeaseMac } from '../src/main/engine/router/leases';
+import type { DhcpLease } from '../src/shared/types';
 
 const ok = (payload: unknown) => async () => ({ status: 200, body: JSON.stringify({ jsonrpc: '2.0', id: 1, result: [0, payload] }), error: null });
+
+describe('租约纯工具', () => {
+  it.each(['AA:BB:CC:DD:EE:FF', 'aa-bb-cc-dd-ee-ff', 'AABB.CCDD.EEFF', 'AABBCCDDEEFF', ' aa:bb:cc:dd:ee:ff '])('MAC 规范化 %s', (value) => {
+    expect(normalizeLeaseMac(value)).toBe('aa-bb-cc-dd-ee-ff');
+  });
+
+  it.each([null, 123, '', 'AA:BB-CC:DD:EE:FF', 'mac=AA:BB:CC:DD:EE:FF', 'AABBCCDDEEFF00', 'aa bb cc dd ee ff', 'gg-bb-cc-dd-ee-ff'])('拒绝非法 MAC %s', (value) => {
+    expect(normalizeLeaseMac(value)).toBeNull();
+  });
+
+  it.each([null, 123, '', ' ', '*', '-', '--', 'UNKNOWN', '(Unknown)', 'n/a', 'None', 'a\u0000b', 'a\u007fb', '\tdevice', 'x'.repeat(254)])('拒绝空、占位和控制字符名称 %s', (value) => {
+    expect(normalizeLeaseHostname(value)).toBeNull();
+  });
+
+  it('只 trim 真实自报名，不从名称格式猜设备', () => {
+    expect(normalizeLeaseHostname('  客厅设备  ')).toBe('客厅设备');
+    expect(normalizeLeaseHostname('123')).toBe('123');
+    expect(normalizeLeaseHostname('x'.repeat(253))).toHaveLength(253);
+  });
+
+  const base: DhcpLease = { mac: 'AA:BB:CC:DD:EE:01', ip: '192.168.0.2', hostname: null, expiresAt: null };
+
+  it('过滤非法地址/过期/非有限期限并复制，不修改输入', () => {
+    const input = Object.freeze([
+      Object.freeze({ ...base, hostname: ' host ', expiresAt: 1001 }),
+      ...['999.1.1.1', '1.2.3', '::1', '192.168.00.1'].map((ip) => ({ ...base, ip })),
+      ...[999, 1000, NaN, Infinity, -Infinity].map((expiresAt) => ({ ...base, expiresAt })),
+      { ...base, mac: 'bad' },
+    ]);
+    const result = normalizeDhcpLeases(input, 1000);
+    expect(result).toEqual([{ ...base, mac: 'aa-bb-cc-dd-ee-01', hostname: 'host', expiresAt: 1001 }]);
+    expect(result[0]).not.toBe(input[0]);
+    expect(input[0].hostname).toBe(' host ');
+  });
+
+  it('同 MAC+IP 优先有名、续租取较晚期限，null 保持未知/无限', () => {
+    const leases = [
+      { ...base, expiresAt: 1001 },
+      { ...base, mac: 'aabb.ccdd.ee01', hostname: ' host ', expiresAt: 2000 },
+      { ...base, hostname: 'host', expiresAt: 1500 },
+    ];
+    expect(normalizeDhcpLeases(leases, 1000)).toEqual([{ ...base, mac: 'aa-bb-cc-dd-ee-01', hostname: 'host', expiresAt: 2000 }]);
+    expect(normalizeDhcpLeases([...leases, base], 1000)[0].expiresAt).toBeNull();
+  });
+
+  it('冲突名称永久置 null；排序和截断与输入顺序无关，同 MAC 不同 IP 保留', () => {
+    const leases = [
+      { ...base, hostname: 'alpha' }, { ...base, hostname: 'beta' },
+      { ...base, hostname: 'alpha' }, { ...base, ip: '192.168.0.1', hostname: 'old' },
+    ];
+    const result = normalizeDhcpLeases(leases, 1000);
+    expect(result).toHaveLength(2);
+    expect(result[0].ip).toBe('192.168.0.1');
+    expect(result[1].hostname).toBeNull();
+    expect(result).toEqual(normalizeDhcpLeases([...leases].reverse(), 1000));
+    const many = Array.from({ length: 520 }, (_, i) => ({ ...base, ip: `10.0.${Math.floor(i / 256)}.${i % 256}` }));
+    expect(normalizeDhcpLeases(many, 1000)).toHaveLength(512);
+    expect(normalizeDhcpLeases(many, 1000)).toEqual(normalizeDhcpLeases(many.reverse(), 1000));
+  });
+});
 
 describe('纯函数解析', () => {
   it('buildRpcRequest 生成标准 JSON-RPC call', () => {
@@ -57,9 +119,30 @@ describe('纯函数解析', () => {
       dhcp6_leases: [],
     });
     expect(leases).toHaveLength(2);
-    expect(leases[0]).toMatchObject({ ip: '192.168.2.101', mac: 'AA:BB:CC:DD:EE:01', hostname: 'Max-PC' });
+    expect(leases[0]).toMatchObject({ ip: '192.168.2.101', mac: 'aa-bb-cc-dd-ee-01', hostname: 'Max-PC' });
     expect(leases[0].expiresAt).toBeGreaterThan(now);
     expect(leases[1].expiresAt).toBeNull();
+  });
+
+  it('expires=0 已过期；非法数字不能变成有效或无限租期', () => {
+    const item = { ipaddr: '192.168.0.2', macaddr: 'aabb.ccdd.ee01', hostname: ' unknown ' };
+    for (const expires of [0, -2, NaN, Infinity, -Infinity, Number.MAX_VALUE, '3600', 'bad', true, {}]) {
+      expect(parseDhcpLeases({ dhcp_leases: [{ ...item, expires }] })).toEqual([]);
+    }
+    for (const expires of [-1, null, undefined]) {
+      expect(parseDhcpLeases({ dhcp_leases: [{ ...item, expires }] })).toEqual([
+        { ip: item.ipaddr, mac: 'aa-bb-cc-dd-ee-01', hostname: null, expiresAt: null },
+      ]);
+    }
+  });
+
+  it('OpenWrt 也过滤地址、合并重复及冲突名', () => {
+    expect(parseDhcpLeases({ dhcp_leases: [
+      { ipaddr: '192.168.0.2', macaddr: 'AABBCCDDEE01', hostname: 'a' },
+      { ipaddr: '192.168.0.2', macaddr: 'AA:BB:CC:DD:EE:01', hostname: 'b' },
+      { ipaddr: '192.168.0.2', macaddr: 'bad', hostname: 'fake' },
+      { ipaddr: '999.0.0.1', macaddr: 'AABBCCDDEE01' },
+    ] })).toEqual([{ ip: '192.168.0.2', mac: 'aa-bb-cc-dd-ee-01', hostname: null, expiresAt: null }]);
   });
 
   it('parseDhcpLeases 形状不符返回 []', () => {
@@ -183,6 +266,18 @@ describe('UbusClient（transport 注入）', () => {
     const res = await client.login('root', 'x');
     expect(res.ok).toBe(false);
     expect(res.error).toContain('不是合法 JSON');
+  });
+
+  it.each(['null', '[]', '[0, {}]', '42', 'true', '"text"'])('RPC 顶层 %s 返回失败，不 throw；调用失败不作废会话', async (body) => {
+    let response = body;
+    const transport: Transport = async () => ({ status: 200, body: response, error: null });
+    const client = new UbusClient('192.168.2.1', transport);
+    await expect(client.login('root', 'x')).resolves.toMatchObject({ ok: false });
+    response = JSON.stringify({ result: [0, { ubus_rpc_session: 'S1' }] });
+    await client.login('root', 'x');
+    response = body;
+    await expect(client.call('system', 'board')).resolves.toMatchObject({ ok: false, payload: null });
+    expect(client.loggedIn).toBe(true);
   });
 
   it('logout 清空会话', async () => {

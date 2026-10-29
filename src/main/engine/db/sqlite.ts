@@ -230,6 +230,8 @@ export class SqliteStore implements PersistStore {
       snmpEnabled: pick('snmpEnabled', d.snmpEnabled),
       useMdns: pick('useMdns', d.useMdns),
       closeToTray: pick('closeToTray', d.closeToTray),
+      printerAlerts: pick('printerAlerts', d.printerAlerts),
+      autoUpdate: pick('autoUpdate', d.autoUpdate),
       rememberRouterPassword: pick('rememberRouterPassword', d.rememberRouterPassword),
     };
   }
