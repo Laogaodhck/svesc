@@ -32,8 +32,11 @@ export function App() {
   const [focusPrinterId, setFocusPrinterId] = useState<string | null>(null)
   /** 诊断中心预填目标：设备详情"网络诊断"跳转时携带，进入诊断页消费一次后清除 */
   const [diagPresetTarget, setDiagPresetTarget] = useState<string | null>(null)
-  // 虚拟打印机开关（审计后持久化到 JsonStore.settings；本地态保证切视图/刷新不丢）
   const [showVirtualPrinters, setShowVirtualPrinters] = useState(false)
+  const [virtualSaving, setVirtualSaving] = useState(false)
+  const [virtualSaveError, setVirtualSaveError] = useState<string | null>(null)
+  const virtualSavePending = useRef(false)
+  const settingsRevision = useRef(0)
   const [printerRefreshing, setPrinterRefreshing] = useState(false)
   const [printerRefreshError, setPrinterRefreshError] = useState<string | null>(null)
   const printerRefreshPending = useRef(false)
@@ -41,7 +44,7 @@ export function App() {
   const [appVersion, setAppVersion] = useState<string | undefined>(undefined)
   /** 更新就绪提示（主进程推送；只在 downloaded 时显示顶部横幅） */
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null)
-  const [updateDismissed, setUpdateDismissed] = useState(false)
+  const [dismissedUpdateVersion, setDismissedUpdateVersion] = useState<string | null | undefined>(undefined)
   const [updateError, setUpdateError] = useState<string | null>(null)
   const [updateInstalling, setUpdateInstalling] = useState(false)
   const renderMsRef = useRef<HTMLSpanElement | null>(null)
@@ -72,38 +75,51 @@ export function App() {
     if (renderMsRef.current) renderMsRef.current.textContent = ms.toFixed(1)
   }, [snapshot])
 
-  /* -------- 持久化设置初值：虚拟打印机开关 + 版本号（失败静默用默认值） -------- */
+  const syncVirtualPrinters = useCallback((next: boolean) => {
+    settingsRevision.current += 1
+    setShowVirtualPrinters(next)
+    setVirtualSaveError(null)
+  }, [])
+
   useEffect(() => {
     if (typeof window === 'undefined' || !window.lanApi) return
+    let alive = true
+    const revision = settingsRevision.current
     window.lanApi
       .settingsGet()
       .then((s) => {
-        setShowVirtualPrinters(s.showVirtualPrinters)
+        if (!alive) return
+        if (settingsRevision.current === revision) setShowVirtualPrinters(s.showVirtualPrinters)
         setAppVersion(s.appVersion)
       })
       .catch(() => {
         /* 主进程未就绪时用默认值，下一次设置页/打印机页操作会再对齐 */
       })
+    return () => { alive = false }
   }, [])
 
   /* -------- 更新就绪提示：主进程推送，只在下载完成时打断 -------- */
   useEffect(() => {
     if (typeof window === 'undefined' || !window.lanApi?.onUpdateStatus) return
     let alive = true
+    let receivedPush = false
+    const acceptStatus = (s: UpdateStatus) => {
+      setUpdateStatus(s)
+      setUpdateError(s.phase === 'downloaded' ? s.error : null)
+    }
+    const off = window.lanApi.onUpdateStatus((s) => {
+      if (!alive) return
+      receivedPush = true
+      acceptStatus(s)
+    })
     window.lanApi
       .updateGetStatus()
       .then((s) => {
-        if (alive) setUpdateStatus(s)
+        if (alive && !receivedPush) acceptStatus(s)
       })
       .catch(() => {
         /* 更新状态不可用时保持安静，不打断监控 */
       })
-    const off = window.lanApi.onUpdateStatus((s) => {
-      if (!alive) return
-      setUpdateStatus(s)
-      setUpdateError(null)
-      if (s.phase === 'downloaded') setUpdateDismissed(false)
-    })
     return () => {
       alive = false
       off()
@@ -163,16 +179,22 @@ export function App() {
   const openDetail = useCallback((id: string) => setDetailId(id), [])
   const closeDetail = useCallback(() => setDetailId(null), [])
 
-  /** 虚拟打印机开关：本地即时 + 持久化（设置页与打印机页共用同一状态） */
-  const toggleVirtualPrinters = useCallback(() => {
-    setShowVirtualPrinters((prev) => {
-      const next = !prev
-      void window.lanApi?.settingsUpdate({ showVirtualPrinters: next }).catch(() => {
-        /* 持久化失败静默：下一次开关操作会再同步 */
-      })
-      return next
-    })
-  }, [])
+  const toggleVirtualPrinters = useCallback(async () => {
+    if (virtualSavePending.current) return
+    virtualSavePending.current = true
+    settingsRevision.current += 1
+    setVirtualSaving(true)
+    setVirtualSaveError(null)
+    try {
+      const next = await window.lanApi.settingsUpdate({ showVirtualPrinters: !showVirtualPrinters })
+      syncVirtualPrinters(next.showVirtualPrinters)
+    } catch (err) {
+      setVirtualSaveError(err instanceof Error ? err.message : String(err))
+    } finally {
+      virtualSavePending.current = false
+      setVirtualSaving(false)
+    }
+  }, [showVirtualPrinters, syncVirtualPrinters])
 
   const toggleAutoScan = useCallback(() => {
     const next = !autoScan
@@ -246,6 +268,7 @@ export function App() {
             refreshError={printerRefreshError}
             now={snapshot.ts}
             showVirtual={showVirtualPrinters}
+            virtualSaving={virtualSaving}
             onToggleVirtual={toggleVirtualPrinters}
             onRefresh={refreshPrinters}
             focusId={focusPrinterId}
@@ -265,7 +288,7 @@ export function App() {
         return (
           <SettingsView
             showVirtualPrinters={showVirtualPrinters}
-            onShowVirtualChange={setShowVirtualPrinters}
+            onShowVirtualChange={syncVirtualPrinters}
           />
         )
       case 'router':
@@ -359,24 +382,24 @@ export function App() {
           />
         }
       >
-        {updateStatus?.phase === 'downloaded' && !updateDismissed && (
+        {updateStatus?.phase === 'downloaded' && dismissedUpdateVersion !== updateStatus.availableVersion && (
           <div className="banner banner--ok" role="status">
             <Icon name="arrow-down" size={14} />
             <span className="banner__text">
-              新版本{updateStatus.availableVersion ? ` v${updateStatus.availableVersion}` : ''} 已下载，重启应用完成安装。
+              新版本{updateStatus.availableVersion ? ` v${updateStatus.availableVersion}` : ''} 已下载，请点击“重启并安装”；普通退出不会安装。
             </span>
             <button
               type="button"
               className="btn btn--primary btn--sm"
               onClick={() => void installUpdate()}
-              disabled={updateInstalling}
+              disabled={updateInstalling || !updateStatus.supported}
             >
-              {updateInstalling ? '正在安装…' : '重启并安装'}
+              {updateInstalling ? '正在安装…' : updateError ? '重试安装' : '重启并安装'}
             </button>
             <button
               type="button"
               className="banner__close"
-              onClick={() => setUpdateDismissed(true)}
+              onClick={() => setDismissedUpdateVersion(updateStatus.availableVersion)}
               aria-label="稍后安装"
               title="稍后安装"
             >
@@ -412,6 +435,12 @@ export function App() {
             >
               <Icon name="close" size={13} />
             </button>
+          </div>
+        )}
+        {view === 'printers' && virtualSaveError && (
+          <div className="banner" role="alert">
+            <Icon name="warn" size={14} />
+            <span className="banner__text">保存虚拟打印机设置失败：{virtualSaveError}</span>
           </div>
         )}
         {content}

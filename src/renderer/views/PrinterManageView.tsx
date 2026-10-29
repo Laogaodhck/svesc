@@ -3,7 +3,7 @@ import type { Printer, PrinterManageConfig } from '../../shared/types'
 import { StatusPill } from '../components/atoms/StatusPill'
 import { EmptyState } from '../components/atoms/EmptyState'
 import { Icon } from '../components/Icon'
-import { CONSUMABLE_LABEL, PRINTER_SOURCE_LABEL, PRINTER_STATE_LABEL, fmtMac } from '../lib/format'
+import { CONSUMABLE_LABEL, PRINTER_SOURCE_LABEL, PRINTER_STATE_LABEL, fmtDateTime, fmtMac } from '../lib/format'
 import { printerStateTone, type Tone } from '../lib/semantics'
 
 /**
@@ -325,7 +325,7 @@ export function PrinterManageView({ printers, refreshing, refreshError, onRefres
         <div>
           <div className="view-title">打印管理</div>
           <div className="view-desc">
-            手动添加自动发现不到的打印机；为监控条目设置别名或忽略不关心的设备。配置持久化保存。
+            手动添加、设置别名或忽略设备。首次发现时间仅属于本次运行，不持久化；启动或新增的存量异常不立即通知，满 30 分钟后由新采集样本触发提醒。
           </div>
         </div>
         <button
@@ -583,6 +583,13 @@ export function PrinterManageView({ printers, refreshing, refreshError, onRefres
                         <StatusPill tone={printerStateTone(p.state)}>
                           {PRINTER_STATE_LABEL[p.state] ?? p.state}
                         </StatusPill>
+                        {p.firstObservedAt != null && Number.isFinite(p.firstObservedAt)
+                          && p.source !== 'simulated' && !p.id.startsWith('sim-') && p.connection !== 'virtual' && (
+                          <span className="manage-name__orig" title="非设备真实故障起点；恢复后清除，未知状态保留。">
+                            本次运行首次发现异常：<br />
+                            <time dateTime={new Date(p.firstObservedAt).toISOString()}>{fmtDateTime(p.firstObservedAt)}</time>
+                          </span>
+                        )}
                       </td>
                       <td className="u-105" title={consumableSummary(p)}>
                         {consumableSummary(p)}

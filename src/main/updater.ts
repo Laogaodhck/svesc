@@ -6,6 +6,7 @@
  * 并决定下载完成后是否弹系统通知；业务门控与错误文案在 engine/update-controller.ts。
  */
 import { autoUpdater } from 'electron-updater';
+import type { AppUpdaterEvents } from 'electron-updater/out/AppUpdater';
 import type { UpdateStatus } from '../shared/types';
 import { createUpdateController, type UpdaterAdapter } from './engine/update-controller';
 import { resolveUpdateSupport } from './engine/update-policy';
@@ -29,8 +30,6 @@ export function createUpdateService(opts: {
   getAutoUpdate: () => boolean;
   /** 通知点击时把主窗口带到前台 */
   showWindow: () => void;
-  /** 退出安装前置位，避免 close-to-tray 拦截 app.quit */
-  beforeInstall: () => void;
   onStatus: (status: UpdateStatus) => void;
   onLog: (level: 'info' | 'warn' | 'error', message: string) => void;
 }): UpdateService {
@@ -40,23 +39,32 @@ export function createUpdateService(opts: {
     env: opts.env,
   });
 
+  const subscriptions: (() => void)[] = [];
+  const subscribe = <K extends keyof AppUpdaterEvents>(event: K, cb: AppUpdaterEvents[K]): void => {
+    autoUpdater.on(event, cb);
+    subscriptions.push(() => autoUpdater.removeListener(event, cb));
+  };
+
   const adapter: UpdaterAdapter = {
-    autoDownload: true,
-    autoInstallOnAppQuit: false,
-    allowPrerelease: false,
-    allowDowngrade: false,
-    onCheckingForUpdate: (cb) => autoUpdater.on('checking-for-update', cb),
-    onUpdateAvailable: (cb) => autoUpdater.on('update-available', (info) => cb(info.version)),
-    onUpdateNotAvailable: (cb) => autoUpdater.on('update-not-available', cb),
-    onDownloadProgress: (cb) =>
-      autoUpdater.on('download-progress', (progress) =>
-        cb({ percent: progress.percent, transferred: progress.transferred, total: progress.total }),
-      ),
-    onUpdateDownloaded: (cb) => autoUpdater.on('update-downloaded', (info) => cb(info.version)),
-    onError: (cb) => autoUpdater.on('error', cb),
-    checkForUpdates: () => autoUpdater.checkForUpdates(),
+    get autoDownload() { return autoUpdater.autoDownload; },
+    set autoDownload(value) { autoUpdater.autoDownload = value; },
+    get autoInstallOnAppQuit() { return autoUpdater.autoInstallOnAppQuit; },
+    set autoInstallOnAppQuit(value) { autoUpdater.autoInstallOnAppQuit = value; },
+    get allowPrerelease() { return autoUpdater.allowPrerelease; },
+    set allowPrerelease(value) { autoUpdater.allowPrerelease = value; },
+    get allowDowngrade() { return autoUpdater.allowDowngrade; },
+    set allowDowngrade(value) { autoUpdater.allowDowngrade = value; },
+    onCheckingForUpdate: (cb) => subscribe('checking-for-update', cb),
+    onUpdateAvailable: (cb) => subscribe('update-available', (info: { version: string }) => cb(info.version)),
+    onUpdateNotAvailable: (cb) => subscribe('update-not-available', cb),
+    onDownloadProgress: (cb) => subscribe('download-progress', cb),
+    onUpdateDownloaded: (cb) => subscribe('update-downloaded', (info: { version: string }) => cb(info.version)),
+    onError: (cb) => subscribe('error', cb),
+    checkForUpdates: async () => {
+      const result = await autoUpdater.checkForUpdates();
+      await result?.downloadPromise;
+    },
     quitAndInstall: () => {
-      opts.beforeInstall();
       // 显示安装器界面（未签名包依赖用户确认 SmartScreen），安装后重新启动
       autoUpdater.quitAndInstall(false, true);
     },
@@ -90,6 +98,9 @@ export function createUpdateService(opts: {
     install: () => controller.install(),
     setAutoUpdateEnabled: (on) => controller.setAutoUpdateEnabled(on),
     start: () => controller.start(),
-    dispose: () => controller.dispose(),
+    dispose: () => {
+      controller.dispose();
+      for (const unsubscribe of subscriptions.splice(0)) unsubscribe();
+    },
   };
 }

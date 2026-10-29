@@ -3,8 +3,11 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { Scheduler } from '../src/main/engine/scheduler';
-import { createEngine } from '../src/main/engine';
-import type { ManualPrinterEntry } from '../src/shared/types';
+import { createEngine, type Engine } from '../src/main/engine';
+import type { ManualPrinterEntry, Printer, Snapshot } from '../src/shared/types';
+import * as printerService from '../src/main/engine/printers/printer-service';
+import { DEFAULT_ALERT_REPEAT_MS, OFFLINE_CONFIRM_MS, type PrinterAlert } from '../src/main/engine/printers/alerts';
+import { printer, T0 } from './fixtures';
 import type { SpoolerSnapshot } from '../src/main/engine/printers/spooler';
 import { readSpooler } from '../src/main/engine/printers/spooler';
 import { snmpGet } from '../src/main/engine/printers/snmp-client';
@@ -41,7 +44,7 @@ function scheduler(getManual = (): ManualPrinterEntry[] => [manualEntry], onSnap
 beforeEach(() => {
   vi.clearAllMocks();
   vi.mocked(readSpooler).mockReset().mockResolvedValue(blank());
-  vi.mocked(snmpGet).mockResolvedValue({ ok: false, varbinds: [], error: 'timeout' });
+  vi.mocked(snmpGet).mockResolvedValue({ ok: false, varbinds: [], error: 'timeout', ms: 0 });
   vi.mocked(ippGetAttributes).mockResolvedValue(null);
 });
 afterEach(() => vi.useRealTimers());
@@ -171,5 +174,160 @@ describe('真实队列管理门控', () => {
       engine.stop();
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('引擎打印机提醒观察与只读投影', () => {
+  let readings: Printer[];
+  const opened: { engine: Engine; dir: string }[] = [];
+  const onSnapshot = vi.fn<(snapshot: Snapshot) => void>();
+  const onPrinterAlert = vi.fn<(alert: PrinterAlert) => boolean>(() => true);
+  const sample = (over: Partial<Printer> = {}) => printer({ id: 'p-alert', name: 'HP', ip: IP, lastSeen: Date.now(), ...over });
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(T0);
+    readings = [sample()];
+    onSnapshot.mockReset();
+    onPrinterAlert.mockReset().mockReturnValue(true);
+    vi.spyOn(printerService, 'collectPrinters').mockImplementation(async () => ({ printers: readings, reachable: new Map<string, boolean | null>(), errors: [], ms: 0 }));
+  });
+  afterEach(() => {
+    for (const { engine, dir } of opened.splice(0)) {
+      engine.stop();
+      rmSync(dir, { recursive: true, force: true });
+    }
+    vi.restoreAllMocks();
+  });
+
+  async function makeEngine(notifications = true) {
+    const dir = mkdtempSync(path.join(tmpdir(), 'svesc-printer-alerts-'));
+    const engine = await createEngine({ userDataDir: dir, forceDemo: false, onSnapshot, onPrinterAlert: notifications ? onPrinterAlert : undefined });
+    opened.push({ engine, dir });
+    await engine.printerRefresh();
+    return engine;
+  }
+
+  it('推送先观察再投影；getSnapshot与心跳不确认离线，恢复投影一致', async () => {
+    const engine = await makeEngine();
+    vi.advanceTimersByTime(1);
+    readings = [sample({ state: 'offline' })];
+    await engine.printerRefresh();
+    expect(onSnapshot.mock.lastCall?.[0].printers[0].firstObservedAt).toBe(T0 + 1);
+    expect(engine.getSnapshot().printers[0]?.firstObservedAt).toBe(T0 + 1);
+    expect(engine.scheduler.snapshotCached?.printers[0]?.firstObservedAt).toBeUndefined();
+    engine.setPrinterAlias('p-alert', '前台');
+    vi.advanceTimersByTime(OFFLINE_CONFIRM_MS);
+    engine.scheduler.emitSnapshotNow();
+    expect(engine.getSnapshot().printers).toEqual(onSnapshot.mock.lastCall?.[0].printers);
+    expect(engine.getSnapshot().printers[0]?.firstObservedAt).toBe(T0 + 1);
+    expect(onPrinterAlert).not.toHaveBeenCalled();
+    readings = [sample({ state: 'offline' })];
+    await engine.printerRefresh();
+    expect(onPrinterAlert).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ kind: 'fault', printerName: '前台', firstObservedAt: T0 + 1 }));
+    vi.advanceTimersByTime(1);
+    readings = [sample({ state: 'unknown' })];
+    await engine.printerRefresh();
+    expect(engine.getSnapshot().printers[0]?.firstObservedAt).toBe(T0 + 1);
+    vi.advanceTimersByTime(1);
+    readings = [sample()];
+    await engine.printerRefresh();
+    expect(onPrinterAlert.mock.lastCall?.[0]).toMatchObject({ kind: 'recovered' });
+    expect(engine.getSnapshot().printers).toEqual(onSnapshot.mock.lastCall?.[0].printers);
+    expect(engine.getSnapshot().printers[0]?.firstObservedAt).toBeNull();
+  });
+
+  it('回读不推进首次观察或发送周期提醒，无callback仍投影观察时间', async () => {
+    readings = [sample({ state: 'error' })];
+    const engine = await makeEngine(false);
+    expect(engine.getSnapshot().printers[0]?.firstObservedAt).toBe(T0);
+    vi.advanceTimersByTime(DEFAULT_ALERT_REPEAT_MS);
+    const prior = onSnapshot.mock.calls.length;
+    expect(engine.getSnapshot().printers[0]?.firstObservedAt).toBe(T0);
+    expect(engine.getSnapshot().printers[0]?.firstObservedAt).toBe(T0);
+    expect(onSnapshot).toHaveBeenCalledTimes(prior);
+    readings = [sample({ state: 'error' })];
+    await engine.printerRefresh();
+    vi.advanceTimersByTime(1);
+    readings = [sample()];
+    await engine.printerRefresh();
+    expect(engine.getSnapshot().printers[0]?.firstObservedAt).toBeNull();
+    expect(onPrinterAlert).not.toHaveBeenCalled();
+  });
+
+  it('通知关闭不调用出口、不计已通知；开启后故障可通知，关闭期间恢复不补弹', async () => {
+    const engine = await makeEngine();
+    engine.updateSettings({ printerAlerts: false });
+    vi.advanceTimersByTime(1);
+    readings = [sample({ state: 'error' })];
+    await engine.printerRefresh();
+    expect(engine.getSnapshot().printers[0]?.firstObservedAt).toBe(T0 + 1);
+    expect(onPrinterAlert).not.toHaveBeenCalled();
+    engine.updateSettings({ printerAlerts: true });
+    vi.advanceTimersByTime(1);
+    readings = [sample()];
+    await engine.printerRefresh();
+    expect(onPrinterAlert).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(1);
+    readings = [sample({ state: 'error' })];
+    await engine.printerRefresh();
+    expect(onPrinterAlert).toHaveBeenCalledTimes(1);
+    engine.updateSettings({ printerAlerts: false });
+    vi.advanceTimersByTime(1);
+    readings = [sample()];
+    await engine.printerRefresh();
+    engine.updateSettings({ printerAlerts: true });
+    vi.advanceTimersByTime(1);
+    readings = [sample()];
+    await engine.printerRefresh();
+    expect(onPrinterAlert).toHaveBeenCalledTimes(1);
+  });
+
+  it('出口失败/抛错不计为通知也不阻断快照；成功后30分钟再提醒', async () => {
+    const engine = await makeEngine();
+    onPrinterAlert.mockReturnValueOnce(false).mockImplementationOnce(() => { throw new Error('notification unavailable'); });
+    for (let i = 1; i <= 3; i += 1) {
+      vi.advanceTimersByTime(1);
+      readings = [sample({ state: 'error' })];
+      await engine.printerRefresh();
+      expect(engine.getSnapshot().printers).toEqual(onSnapshot.mock.lastCall?.[0].printers);
+      expect(engine.getSnapshot().printers[0]?.firstObservedAt).toBe(T0 + 1);
+    }
+    expect(onPrinterAlert).toHaveBeenCalledTimes(3);
+    vi.advanceTimersByTime(DEFAULT_ALERT_REPEAT_MS);
+    engine.getSnapshot();
+    engine.getSnapshot();
+    expect(onPrinterAlert).toHaveBeenCalledTimes(3);
+    readings = [sample({ state: 'error' })];
+    await engine.printerRefresh();
+    expect(onPrinterAlert).toHaveBeenCalledTimes(4);
+  });
+
+  it.each(['ignore', 'remove'] as const)('%s 立即清理旧缓存及账本，不等采集完成、不发伪恢复', async (action) => {
+    const engine = await makeEngine();
+    if (action === 'remove') engine.store.addManualPrinter(IP, null);
+    vi.advanceTimersByTime(1);
+    readings = [sample({ state: 'error', manual: action === 'remove' })];
+    await engine.printerRefresh();
+    expect(onPrinterAlert).toHaveBeenCalledTimes(1);
+    let release!: (value: SpoolerSnapshot) => void;
+    vi.mocked(readSpooler).mockImplementationOnce(() => new Promise((resolve) => { release = resolve; }));
+    if (action === 'ignore') engine.setPrinterIgnored('p-alert', true);
+    else engine.removeManualPrinter(IP);
+    expect(engine.getSnapshot().printers).toEqual([]);
+    expect(onSnapshot.mock.lastCall?.[0].printers).toEqual([]);
+    expect(onPrinterAlert).toHaveBeenCalledTimes(1);
+    release(blank());
+    await engine.printerRefresh();
+    vi.advanceTimersByTime(1);
+    if (action === 'ignore') engine.setPrinterIgnored('p-alert', false);
+    else engine.store.addManualPrinter(IP, null);
+    readings = [sample({ state: 'error', manual: action === 'remove' })];
+    await engine.printerRefresh();
+    expect(engine.getSnapshot().printers[0]?.firstObservedAt).toBe(T0 + 2);
+    vi.advanceTimersByTime(1);
+    readings = [sample({ manual: action === 'remove' })];
+    await engine.printerRefresh();
+    expect(onPrinterAlert).toHaveBeenCalledTimes(1);
   });
 });

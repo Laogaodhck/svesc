@@ -128,6 +128,8 @@ export interface Printer {
   jobs: PrintJob[];
   source: 'snmp' | 'ipp' | 'mdns' | 'probe' | 'spooler' | 'both' | 'simulated';
   lastSeen: number;
+  /** 本次运行首次发现当前异常的时间，非设备真实故障起点；恢复后清除，不持久化。 */
+  firstObservedAt?: number | null;
 }
 
 /** 打印管理页：手动添加的网络打印机条目（持久化于 JsonStore）。 */
@@ -211,7 +213,7 @@ export interface UpdateStatus {
   transferred: number | null;
   /** 总字节；未知为 null */
   total: number | null;
-  /** phase=error 时非空，其余为 null */
+  /** 检查/下载失败或就绪后的安装启动失败原因；无错误时为 null */
   error: string | null;
   /** 不支持自动更新的原因（开发态/便携版/冒烟）；支持时为 null */
   unavailableReason: string | null;

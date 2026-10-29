@@ -8,7 +8,6 @@ import { app, BrowserWindow, Menu } from 'electron';
 import path from 'node:path';
 import { createEngine, type Engine } from './engine';
 import { RouterManager } from './engine/router';
-import { PrinterAlertTracker } from './engine/printers/alerts';
 import {
   clearPushTarget,
   pushRouterStatus,
@@ -21,7 +20,7 @@ import {
 import { showPrinterAlert } from './notify';
 import { loadCredentials, saveCredentials, clearCredentials } from './router-store';
 import { bindRouterAdminGateway, checkRouterWebSession, getRouterAdminCookieHeader } from './router-browser';
-import { createTray, destroyTray, isQuitRequested, markQuitting, refreshTray, showWindow } from './tray';
+import { createTray, destroyTray, isQuitRequested, refreshTray, showWindow } from './tray';
 import { createUpdateService, type UpdateService } from './updater';
 
 const isSmoke = process.env.SMOKE === '1';
@@ -113,9 +112,6 @@ async function createWindow(): Promise<BrowserWindow> {
 async function bootstrap(): Promise<void> {
   Menu.setApplicationMenu(null);
 
-  /** 异常判定账本常驻：即使开关关闭也持续推进基线，重新开启时不会补弹存量故障 */
-  const printerAlerts = new PrinterAlertTracker();
-
   engine = await createEngine({
     userDataDir: app.getPath('userData'),
     exportDir: app.getPath('downloads'),
@@ -124,20 +120,18 @@ async function bootstrap(): Promise<void> {
       if (!isSmoke) {
         // 托盘菜单随心跳重建（勾选态保鲜）
         refreshTray();
-        const alerts = printerAlerts.evaluate(snapshot.printers);
-        if (alerts.length > 0 && (engine?.getSettings().printerAlerts ?? true)) {
-          for (const alert of alerts) {
-            showPrinterAlert(alert, showWindow);
-            engine?.logs.push(
-              alert.kind === 'fault' ? 'warn' : 'info',
-              'printers',
-              alert.kind === 'fault'
-                ? `打印机异常：${alert.printerName}（${alert.reason}）`
-                : `打印机已恢复：${alert.printerName}`,
-            );
-          }
-        }
       }
+    },
+    onPrinterAlert: (alert) => {
+      if (isSmoke || !showPrinterAlert(alert, showWindow)) return false;
+      engine?.logs.push(
+        alert.kind === 'fault' ? 'warn' : 'info',
+        'printers',
+        alert.kind === 'fault'
+          ? `打印机异常：${alert.printerName}（${alert.reason}）`
+          : `打印机已恢复：${alert.printerName}`,
+      );
+      return true;
     },
     onScanProgress: (progress) => pushScanProgress(progress),
   });
@@ -166,7 +160,6 @@ async function bootstrap(): Promise<void> {
     currentVersion: app.getVersion(),
     getAutoUpdate: () => engine?.getSettings().autoUpdate ?? true,
     showWindow,
-    beforeInstall: markQuitting,
     onStatus: pushUpdateStatus,
     onLog: (level, message) => engine?.logs.push(level, 'update', message),
   });

@@ -8,8 +8,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { PrinterManageView } from '../src/renderer/views/PrinterManageView';
+import { PrintersView } from '../src/renderer/views/PrintersView';
+import { fmtDateTime } from '../src/renderer/lib/format';
 import type { LanApi, Printer, PrinterManageConfig } from '../src/shared/types';
-import { printer } from './fixtures';
+import { printer, T0 } from './fixtures';
 
 type ApiMock = {
   config: PrinterManageConfig;
@@ -167,5 +169,61 @@ describe('PrinterManageView 别名草稿', () => {
     await waitFor(() => expect(api.printerSetAlias).toHaveBeenCalledWith('p5', '前台彩色机'));
     expect(await screen.findByText('别名已保存：前台彩色机')).toBeTruthy();
     expect((screen.getByLabelText('Epson 的别名') as HTMLInputElement).value).toBe('前台彩色机');
+  });
+});
+
+describe.each(['card', 'manage'] as const)('%s 打印机首次异常展示', (surface) => {
+  async function renderSurface(printers: Printer[]) {
+    const api = installApi();
+    if (surface === 'manage') {
+      const view = renderView(printers, api);
+      await waitForTable();
+      return view;
+    }
+    const props = { printers, refreshing: false, refreshError: null, now: T0, showVirtual: true, onToggleVirtual: vi.fn(), onRefresh: vi.fn() };
+    const view = render(<PrintersView {...props} />);
+    return { ...view, rerenderPrinters: (next: Printer[]) => view.rerender(<PrintersView {...props} printers={next} />) };
+  }
+
+  it('展示引擎投影时间，心跳/问题变化/未知不重置；恢复后清除', async () => {
+    const fault = printer({ id: 'p-time', name: 'HP time', state: 'offline', firstObservedAt: T0 });
+    const view = await renderSurface([fault]);
+    const assertTime = () => {
+      const time = screen.getByText(fmtDateTime(T0));
+      expect(time.tagName).toBe('TIME');
+      expect(time.getAttribute('datetime')).toBe(new Date(T0).toISOString());
+      expect(time.parentElement?.textContent).toContain('本次运行首次发现异常');
+      expect(time.parentElement?.getAttribute('title')).toContain('非设备真实故障起点');
+    };
+    assertTime();
+    for (const state of ['offline', 'error', 'unknown'] as const) {
+      view.rerenderPrinters([{ ...fault, state, lastSeen: T0 + 60_000 }]);
+      assertTime();
+    }
+    view.rerenderPrinters([{ ...fault, state: 'idle', firstObservedAt: null }]);
+    expect(screen.queryByText(fmtDateTime(T0))).toBeNull();
+  });
+
+  it('旧快照缺字段、正常、演示及虚拟条目不编造异常时间，时间戳0有效', async () => {
+    const view = await renderSurface([
+      printer({ id: 'normal', name: 'Normal' }),
+      printer({ id: 'legacy', name: 'Legacy', state: 'error' }),
+      printer({ id: 'sim-1', name: 'Demo', state: 'error', source: 'simulated', firstObservedAt: T0 }),
+      printer({ id: 'pdf', name: 'PDF', state: 'error', connection: 'virtual', firstObservedAt: T0 }),
+    ]);
+    expect(view.container.querySelector('time')).toBeNull();
+    view.rerenderPrinters([printer({ id: 'epoch', name: 'Epoch', state: 'error', firstObservedAt: 0 })]);
+    expect(screen.getByText(fmtDateTime(0)).getAttribute('datetime')).toBe(new Date(0).toISOString());
+  });
+
+  it('说明提醒节奏且不声称记录真实故障起点', async () => {
+    await renderSurface([]);
+    if (surface === 'card') {
+      expect(screen.getByText(/离线持续 30 秒并由新采集样本确认/).textContent).toContain('每 30 分钟复提醒');
+      expect(screen.getByText(/问题变化冷却 10 分钟/)).toBeTruthy();
+    } else {
+      expect(screen.getByText(/启动或新增的存量异常不立即通知/).textContent).toContain('满 30 分钟');
+      expect(screen.getByText(/首次发现时间仅属于本次运行/).textContent).toContain('不持久化');
+    }
   });
 });

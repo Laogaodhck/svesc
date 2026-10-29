@@ -164,14 +164,64 @@ describe('更新状态机', () => {
     expect(logs.filter((line) => line.startsWith('更新失败')).length).toBe(1);
   });
 
-  it('安装抛出异常时回到 error，不假装成功', async () => {
+  it('安装抛出异常时保留就绪状态，不假装成功', async () => {
     const { adapter, controller } = make();
     void controller.check();
     adapter.emitAvailable('0.5.0');
     adapter.emitDownloaded('0.5.0');
     adapter.installError = new Error('spawn failed');
-    expect(controller.install()).toEqual({ ok: false, error: '更新失败：spawn failed' });
+    expect(controller.install()).toEqual({ ok: false, error: '启动安装失败：spawn failed' });
+    expect(controller.status().phase).toBe('downloaded');
+  });
+
+  it('就绪后手动与定时检查不能清掉下载结果', async () => {
+    vi.useFakeTimers();
+    const { adapter, controller } = make();
+    controller.start();
+    await controller.check();
+    adapter.emitDownloaded('0.4.1');
+    await controller.check();
+    await vi.advanceTimersByTimeAsync(180_000);
+    expect(controller.status()).toMatchObject({ phase: 'downloaded', availableVersion: '0.4.1', percent: 100 });
+    expect(adapter.checks).toBe(1);
+    controller.dispose();
+  });
+
+  it('安装通过 error 事件拒绝时不能返回成功，且仍可重试安装', async () => {
+    const { adapter, controller } = make();
+    await controller.check();
+    adapter.emitDownloaded('0.4.1');
+    vi.spyOn(adapter, 'quitAndInstall').mockImplementationOnce(() => adapter.emitError(new Error('spawn EPERM')));
+    expect(controller.install().ok).toBe(false);
+    expect(controller.status()).toMatchObject({ phase: 'downloaded', percent: 100 });
+    expect(controller.status().error).toBeTruthy();
+    expect(controller.install()).toEqual({ ok: true, error: null });
+  });
+
+  it('失败后迟到的进度不得恢复为下载中', async () => {
+    const { adapter, controller } = make({ initialAutoUpdate: false });
+    await controller.check();
+    adapter.emitAvailable('0.4.1');
+    adapter.emitError(new Error('net::ERR_CONNECTION_RESET'));
+    adapter.emitProgress({ percent: 50, transferred: 50, total: 100 });
     expect(controller.status().phase).toBe('error');
+    await controller.check();
+    expect(adapter.checks).toBe(2);
+  });
+
+  it('dispose 后在飞响应不得推送或重新开启定时器', async () => {
+    const onStatus = vi.fn();
+    const { adapter, controller } = make({ onStatus });
+    await controller.check();
+    controller.dispose();
+    onStatus.mockClear();
+    adapter.emitDownloaded('0.4.1');
+    adapter.emitError(new Error('net::ERR_CONNECTION_RESET'));
+    controller.setAutoUpdateEnabled(false);
+    controller.setAutoUpdateEnabled(true);
+    await controller.check();
+    expect(onStatus).not.toHaveBeenCalled();
+    expect(adapter.checks).toBe(1);
   });
 
   it('适配器标志强制为“自动下载、退出不静默安装、不收预发布/降级”', () => {
@@ -184,6 +234,68 @@ describe('更新状态机', () => {
 });
 
 describe('自动检查定时器', () => {
+  it('断网按 15/30/60 秒最多重试三次，手动检查重置预算', async () => {
+    vi.useFakeTimers();
+    const { adapter, controller } = make({ intervalMs: 6 * 60 * 60 * 1000 });
+    adapter.reject = new Error('net::ERR_INTERNET_DISCONNECTED');
+    controller.start();
+    await controller.check();
+    for (const [index, delay] of [15_000, 30_000, 60_000].entries()) {
+      await vi.advanceTimersByTimeAsync(delay - 1);
+      expect(adapter.checks).toBe(index + 1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(adapter.checks).toBe(index + 2);
+    }
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(adapter.checks).toBe(4);
+    await controller.check();
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(adapter.checks).toBe(6);
+    controller.dispose();
+  });
+
+  it.each(['sha512 mismatch', 'ENOSPC', 'spawn EPERM', 'net::ERR_CERT_AUTHORITY_INVALID', '404 latest.yml'])(
+    '%s 不属于可自动重试的网络故障', async (error) => {
+      vi.useFakeTimers();
+      const { adapter, controller } = make({ intervalMs: 6 * 60 * 60 * 1000 });
+      adapter.reject = new Error(error);
+      controller.start();
+      await controller.check();
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(adapter.checks).toBe(1);
+      controller.dispose();
+    },
+  );
+
+  it.each(['disable', 'dispose'] as const)('%s 取消待执行的网络重试', async (action) => {
+    vi.useFakeTimers();
+    const { adapter, controller } = make();
+    adapter.reject = new Error('ECONNRESET');
+    controller.start();
+    await controller.check();
+    if (action === 'disable') controller.setAutoUpdateEnabled(false);
+    else controller.dispose();
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(adapter.checks).toBe(1);
+    controller.dispose();
+  });
+
+  it('下载失败在恢复网络后重试，成功就绪后停止重试', async () => {
+    vi.useFakeTimers();
+    const { adapter, controller } = make();
+    controller.start();
+    await controller.check();
+    adapter.emitAvailable('0.4.1');
+    adapter.emitError(new Error('ECONNRESET'));
+    await vi.advanceTimersByTimeAsync(15_000);
+    adapter.emitAvailable('0.4.1');
+    adapter.emitDownloaded('0.4.1');
+    await vi.advanceTimersByTimeAsync(180_000);
+    expect(adapter.checks).toBe(2);
+    expect(controller.status().phase).toBe('downloaded');
+    controller.dispose();
+  });
+
   it('启动延迟后检查一次，此后按间隔检查；dispose 停止', async () => {
     vi.useFakeTimers();
     const { adapter, controller } = make();
